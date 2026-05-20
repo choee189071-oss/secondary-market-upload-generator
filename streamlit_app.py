@@ -21,6 +21,92 @@ st.set_page_config(page_title="Municipal Secondary Market Dashboard Generator", 
 st.title("Municipal Secondary Market Dashboard Generator")
 st.caption("Bring your own bond master and trade-history exports. Generate issuer-level relative value and liquidity analytics.")
 
+with st.expander("Instructions", expanded=False):
+    st.markdown(
+        """
+<div style='font-size:13px; color:#777; line-height:1.6;'>
+
+### Overview
+
+This dashboard automatically generates issuer-level secondary market analytics from uploaded municipal bond and trade history files.
+
+After uploading the datasets, the system will automatically detect issuers, merge bond and trade information, generate yield trend and relative value charts, create liquidity and trading activity analytics, and produce issuer-level security reference tables.
+
+---
+
+### Step 1: Upload Required Files
+
+<b>1. Bond File</b>
+
+- Information can be found from Munipro
+- Row 1 must contain the column headers
+- Actual data should begin from Row 2
+- Leave cells blank if information is unavailable
+- Multiple issuers’ bond data should be combined into the same file
+- Do not leave blank columns between issuers
+
+Required columns:  
+Issuer, Type, Lien, Election, Series, Cusip, Secondary Credit, Term, Maturity, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
+
+<br>
+
+<b>2. Trade History File(s)</b>
+
+- Information can be extracted from Munipro
+- Row 1 must contain the column headers
+- Actual data should begin from Row 2
+- Leave cells blank if information is unavailable
+- Multiple issuers’ trade files should be uploaded as separate files
+
+Required columns:  
+Trade Date/Time, CUSIP9, Description, Maturity Date, Trade Date, Settlement Date, Coupon, Yield, Price, Trade Amount, Calculation Date, Calculation Price, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
+
+<br>
+
+<b>Important:</b>  
+CUSIP9 in Trade Files must match Cusip in Bond File.
+
+<br><br>
+
+<b>3. Issuer / Sector Mapping File Optional</b>
+
+Used to manually assign sectors, correct issuer classifications, or update issuer metadata.
+
+Format: Issuer, Sector  
+Issuer should match the issuer name in the Bond File.
+
+<br><br>
+
+<b>4. MMD Curve File Optional</b>
+
+Used for relative value analysis and MMD spread comparison.
+
+---
+
+### Step 2: Automatic Issuer Detection
+
+After uploading the files, the dashboard automatically detects issuer names from the uploaded datasets. Uploaded issuers will appear in the issuer selection section. No manual issuer list maintenance is required.
+
+Both existing and newly uploaded issuers are supported automatically.
+
+---
+
+### Step 3: Select Uploaded Issuer
+
+In Section 2 of the sidebar, select one of the issuers detected from the uploaded files.
+
+Optional filters include:
+
+- Maturity Bucket
+- Time Window
+- Relative Value Comparison
+
+The dashboard will automatically generate the corresponding analytics and charts.
+
+</div>
+""",
+        unsafe_allow_html=True
+    )
 
 @st.cache_data(show_spinner="Processing uploaded data...")
 def process_uploads(
@@ -307,28 +393,3 @@ if show_raw_tables:
     st.dataframe(trades_df.head(20000), use_container_width=True)
     st.subheader("Merged Market Data")
     st.dataframe(market_df.head(20000), use_container_width=True)
-
-st.markdown(
-    """
-<div style='font-size:12px; color:gray;'>
-
-### Instructions
-
-- Upload Bond File and Trade History File(s) from Munipro exports  
-- Bond File should combine multiple issuers into one file  
-- Trade Files should be uploaded separately  
-- Row 1 must contain headers and actual data should start from Row 2  
-- `CUSIP9` in Trade Files must match `Cusip` in Bond File  
-- Optional files:
-    - Issuer / Sector Mapping File
-    - MMD Curve File  
-
-After upload, the dashboard will automatically:
-- Detect issuers
-- Merge bond and trade data
-- Generate issuer analytics and charts
-
-</div>
-""",
-    unsafe_allow_html=True
-)
