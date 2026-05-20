@@ -28,6 +28,8 @@ with st.expander("Instructions", expanded=False):
 
 <h5 style='margin-bottom:4px;'>Step 1: Upload Required Files</h5>
 
+<div style='padding-left:18px;'>
+
 <b>1. Bond File</b>
 
 <ul style='margin-top:2px; margin-bottom:6px;'>
@@ -63,18 +65,22 @@ CUSIP9 in Trade Files must match Cusip in Bond File.
 
 <b>3. Optional Files</b>
 
-<ul style='margin-top:2px; margin-bottom:8px;'>
+<ul style='margin-top:2px; margin-bottom:2px;'>
 <li>Issuer / Sector Mapping File</li>
 <li>MMD Curve File</li>
 </ul>
 
+</div>
+
 <h5 style='margin-top:10px; margin-bottom:4px;'>Step 2: Automatic Issuer Detection</h5>
 
+<div style='padding-left:18px;'>
 The dashboard automatically detects issuer names from uploaded datasets.
-
-<div style='height:8px;'></div>
+</div>
 
 <h5 style='margin-top:10px; margin-bottom:4px;'>Step 3: Select Uploaded Issuer</h5>
+
+<div style='padding-left:18px;'>
 
 <ul style='margin-top:2px; margin-bottom:6px;'>
 <li>Select one of the detected issuers</li>
@@ -88,10 +94,11 @@ The dashboard automatically detects issuer names from uploaded datasets.
 </ul>
 
 </div>
+
+</div>
 """,
         unsafe_allow_html=True
     )
-
 @st.cache_data(show_spinner="Processing uploaded data...")
 def process_uploads(
     bond_bytes: bytes,
