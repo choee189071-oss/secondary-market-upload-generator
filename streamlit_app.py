@@ -114,20 +114,40 @@ if market_df.empty:
     st.error("No usable trade rows found. Please check that trade files include CUSIP and trade date fields.")
     st.stop()
 
-st.success(f"Processed {len(bonds_df):,} bonds and {len(market_df):,} merged trade rows from {len(trade_files):,} trade file(s).")
+uploaded_issuers = sorted(market_df["issuer"].dropna().astype(str).unique().tolist())
+
+if not uploaded_issuers:
+    st.error("No issuer names were detected from the uploaded files. Please check the issuer field in the bond master or trade filenames.")
+    st.stop()
+
+st.success(
+    f"Processed {len(bonds_df):,} bonds and {len(market_df):,} merged trade rows "
+    f"from {len(trade_files):,} trade file(s). Detected {len(uploaded_issuers):,} issuer(s)."
+)
 
 with st.sidebar:
-    st.header("2. Filters")
-    sector_options = sorted(issuer_master["sector"].dropna().unique().tolist())
-    selected_sector = st.selectbox("Sector", sector_options)
-    issuer_options = sorted(issuer_master.loc[issuer_master["sector"] == selected_sector, "issuer"].dropna().unique().tolist())
-    selected_issuer = st.selectbox("Issuer", issuer_options)
+    st.header("2. Select From Uploaded Issuers")
+    selected_issuer = st.selectbox(
+        "Issuer detected from uploaded files",
+        uploaded_issuers,
+        help="This list is generated only from the files you uploaded in Section 1."
+    )
     maturity_bucket = st.selectbox("Maturity Bucket", ["All", "Short", "10Y", "20Y", "30Y"])
     time_window = st.selectbox("Time Window", ["All", "1Y", "3Y", "5Y"])
     show_raw_tables = st.checkbox("Show raw tables", value=False)
 
 issuer_bonds = bonds_df[bonds_df["issuer"] == selected_issuer].copy()
 issuer_trades = market_df[market_df["issuer"] == selected_issuer].copy()
+
+selected_sector = "Unknown"
+if "sector" in market_df.columns:
+    sector_values = issuer_trades["sector"].dropna().astype(str).unique().tolist()
+    if sector_values:
+        selected_sector = sector_values[0]
+elif "sector" in issuer_master.columns:
+    sector_values = issuer_master.loc[issuer_master["issuer"] == selected_issuer, "sector"].dropna().astype(str).unique().tolist()
+    if sector_values:
+        selected_sector = sector_values[0]
 
 if not issuer_trades.empty and maturity_bucket != "All":
     issuer_trades = issuer_trades[issuer_trades["maturity_bucket"] == maturity_bucket].copy()
@@ -146,7 +166,7 @@ col4.metric("Trades", f"{len(issuer_trades):,}")
 col5.metric("Latest Trade", issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades")
 
 st.header("Yield Trend / Relative Value Comparison")
-issuer_choices = sorted(market_df["issuer"].dropna().unique().tolist())
+issuer_choices = uploaded_issuers
 default_compare = [selected_issuer] if selected_issuer in issuer_choices else issuer_choices[:1]
 compare_issuers = st.multiselect("Compare Issuers", issuer_choices, default=default_compare)
 compare_bucket = st.selectbox("Comparison Maturity Bucket", ["All", "Short", "10Y", "20Y", "30Y"], key="compare_bucket")
