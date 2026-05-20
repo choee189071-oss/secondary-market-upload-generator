@@ -24,14 +24,14 @@ st.caption("Bring your own bond master and trade-history exports. Generate issue
 with st.expander("Instructions", expanded=False):
     st.markdown(
         """
-<div style='font-size:15px; color:black; line-height:1.7;'>
+<div style='font-size:15px; color:black; line-height:1.5;'>
 
-<h4>Overview</h4>
+<h4 style='margin-bottom:8px;'>Overview</h4>
 
 This dashboard automatically generates issuer-level secondary market analytics from uploaded municipal bond and trade history files.
 
-After uploading the datasets, the system will automatically:
-<ul>
+The system will automatically:
+<ul style='margin-top:5px; margin-bottom:12px;'>
 <li>Detect uploaded issuers</li>
 <li>Merge bond and trade information</li>
 <li>Generate yield trend and relative value charts</li>
@@ -39,17 +39,14 @@ After uploading the datasets, the system will automatically:
 <li>Produce issuer-level security reference tables and analysis</li>
 </ul>
 
-<hr>
-
-<h5>Step 1: Upload Required Files</h5>
+<h5 style='margin-bottom:6px;'>Step 1: Upload Required Files</h5>
 
 <b>1. Bond File</b>
 
-<ul>
+<ul style='margin-top:4px; margin-bottom:10px;'>
 <li>Information can be found from Munipro</li>
 <li>Row 1 must contain column headers</li>
 <li>Actual data should begin from Row 2</li>
-<li>Leave cells blank if information is unavailable</li>
 <li>Multiple issuers’ bond data should be combined into the same file</li>
 </ul>
 
@@ -60,11 +57,11 @@ Issuer, Type, Lien, Election, Series, Cusip, Secondary Credit, Term, Maturity, P
 
 <b>2. Trade History File(s)</b>
 
-<ul>
+<ul style='margin-top:4px; margin-bottom:10px;'>
 <li>Information can be extracted from Munipro</li>
 <li>Row 1 must contain column headers</li>
 <li>Actual data should begin from Row 2</li>
-<li>Multiple issuers’ trade files should be uploaded separately</li>
+<li>Trade files should be uploaded separately</li>
 </ul>
 
 <b>Required Columns:</b><br>
@@ -79,24 +76,21 @@ CUSIP9 in Trade Files must match Cusip in Bond File.
 
 <b>3. Optional Files</b>
 
-<ul>
+<ul style='margin-top:4px; margin-bottom:12px;'>
 <li>Issuer / Sector Mapping File</li>
 <li>MMD Curve File</li>
 </ul>
 
-<hr>
+<h5 style='margin-bottom:6px;'>Step 2: Automatic Issuer Detection</h5>
 
-<h5>Step 2: Automatic Issuer Detection</h5>
+The dashboard automatically detects issuer names from uploaded datasets. Both existing and newly uploaded issuers are supported automatically.
 
-The dashboard automatically detects issuer names from uploaded datasets.  
-Both existing and newly uploaded issuers are supported automatically.
+<br>
 
-<hr>
-
-<h5>Step 3: Select Uploaded Issuer</h5>
+<h5 style='margin-bottom:6px;'>Step 3: Select Uploaded Issuer</h5>
 
 In Section 2 of the sidebar:
-<ul>
+<ul style='margin-top:4px; margin-bottom:10px;'>
 <li>Select one of the detected issuers</li>
 <li>Apply optional filters:
     <ul>
