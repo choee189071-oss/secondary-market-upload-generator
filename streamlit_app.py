@@ -307,3 +307,28 @@ if show_raw_tables:
     st.dataframe(trades_df.head(20000), use_container_width=True)
     st.subheader("Merged Market Data")
     st.dataframe(market_df.head(20000), use_container_width=True)
+
+st.markdown(
+    """
+<div style='font-size:12px; color:gray;'>
+
+### Instructions
+
+- Upload Bond File and Trade History File(s) from Munipro exports  
+- Bond File should combine multiple issuers into one file  
+- Trade Files should be uploaded separately  
+- Row 1 must contain headers and actual data should start from Row 2  
+- `CUSIP9` in Trade Files must match `Cusip` in Bond File  
+- Optional files:
+    - Issuer / Sector Mapping File
+    - MMD Curve File  
+
+After upload, the dashboard will automatically:
+- Detect issuers
+- Merge bond and trade data
+- Generate issuer analytics and charts
+
+</div>
+""",
+    unsafe_allow_html=True
+)
