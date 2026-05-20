@@ -24,82 +24,88 @@ st.caption("Bring your own bond master and trade-history exports. Generate issue
 with st.expander("Instructions", expanded=False):
     st.markdown(
         """
-<div style='font-size:13px; color:#777; line-height:1.6;'>
+<div style='font-size:15px; color:black; line-height:1.7;'>
 
-### Overview
+<h4>Overview</h4>
 
 This dashboard automatically generates issuer-level secondary market analytics from uploaded municipal bond and trade history files.
 
-After uploading the datasets, the system will automatically detect issuers, merge bond and trade information, generate yield trend and relative value charts, create liquidity and trading activity analytics, and produce issuer-level security reference tables.
+After uploading the datasets, the system will automatically:
+<ul>
+<li>Detect uploaded issuers</li>
+<li>Merge bond and trade information</li>
+<li>Generate yield trend and relative value charts</li>
+<li>Create liquidity and trading activity analytics</li>
+<li>Produce issuer-level security reference tables and analysis</li>
+</ul>
 
----
+<hr>
 
-### Step 1: Upload Required Files
+<h5>Step 1: Upload Required Files</h5>
 
 <b>1. Bond File</b>
 
-- Information can be found from Munipro
-- Row 1 must contain the column headers
-- Actual data should begin from Row 2
-- Leave cells blank if information is unavailable
-- Multiple issuers’ bond data should be combined into the same file
-- Do not leave blank columns between issuers
+<ul>
+<li>Information can be found from Munipro</li>
+<li>Row 1 must contain column headers</li>
+<li>Actual data should begin from Row 2</li>
+<li>Leave cells blank if information is unavailable</li>
+<li>Multiple issuers’ bond data should be combined into the same file</li>
+</ul>
 
-Required columns:  
+<b>Required Columns:</b><br>
 Issuer, Type, Lien, Election, Series, Cusip, Secondary Credit, Term, Maturity, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
 
-<br>
+<br><br>
 
 <b>2. Trade History File(s)</b>
 
-- Information can be extracted from Munipro
-- Row 1 must contain the column headers
-- Actual data should begin from Row 2
-- Leave cells blank if information is unavailable
-- Multiple issuers’ trade files should be uploaded as separate files
+<ul>
+<li>Information can be extracted from Munipro</li>
+<li>Row 1 must contain column headers</li>
+<li>Actual data should begin from Row 2</li>
+<li>Multiple issuers’ trade files should be uploaded separately</li>
+</ul>
 
-Required columns:  
+<b>Required Columns:</b><br>
 Trade Date/Time, CUSIP9, Description, Maturity Date, Trade Date, Settlement Date, Coupon, Yield, Price, Trade Amount, Calculation Date, Calculation Price, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
 
-<br>
+<br><br>
 
-<b>Important:</b>  
+<b>Important:</b><br>
 CUSIP9 in Trade Files must match Cusip in Bond File.
 
 <br><br>
 
-<b>3. Issuer / Sector Mapping File Optional</b>
+<b>3. Optional Files</b>
 
-Used to manually assign sectors, correct issuer classifications, or update issuer metadata.
+<ul>
+<li>Issuer / Sector Mapping File</li>
+<li>MMD Curve File</li>
+</ul>
 
-Format: Issuer, Sector  
-Issuer should match the issuer name in the Bond File.
+<hr>
 
-<br><br>
+<h5>Step 2: Automatic Issuer Detection</h5>
 
-<b>4. MMD Curve File Optional</b>
-
-Used for relative value analysis and MMD spread comparison.
-
----
-
-### Step 2: Automatic Issuer Detection
-
-After uploading the files, the dashboard automatically detects issuer names from the uploaded datasets. Uploaded issuers will appear in the issuer selection section. No manual issuer list maintenance is required.
-
+The dashboard automatically detects issuer names from uploaded datasets.  
 Both existing and newly uploaded issuers are supported automatically.
 
----
+<hr>
 
-### Step 3: Select Uploaded Issuer
+<h5>Step 3: Select Uploaded Issuer</h5>
 
-In Section 2 of the sidebar, select one of the issuers detected from the uploaded files.
-
-Optional filters include:
-
-- Maturity Bucket
-- Time Window
-- Relative Value Comparison
+In Section 2 of the sidebar:
+<ul>
+<li>Select one of the detected issuers</li>
+<li>Apply optional filters:
+    <ul>
+        <li>Maturity Bucket</li>
+        <li>Time Window</li>
+        <li>Relative Value Comparison</li>
+    </ul>
+</li>
+</ul>
 
 The dashboard will automatically generate the corresponding analytics and charts.
 
