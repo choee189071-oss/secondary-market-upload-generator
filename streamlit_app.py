@@ -24,26 +24,13 @@ st.caption("Bring your own bond master and trade-history exports. Generate issue
 with st.expander("Instructions", expanded=False):
     st.markdown(
         """
-<div style='font-size:15px; color:black; line-height:1.5;'>
+<div style='font-size:15px; color:black; line-height:1.4;'>
 
-<h4 style='margin-bottom:8px;'>Overview</h4>
-
-This dashboard automatically generates issuer-level secondary market analytics from uploaded municipal bond and trade history files.
-
-The system will automatically:
-<ul style='margin-top:5px; margin-bottom:12px;'>
-<li>Detect uploaded issuers</li>
-<li>Merge bond and trade information</li>
-<li>Generate yield trend and relative value charts</li>
-<li>Create liquidity and trading activity analytics</li>
-<li>Produce issuer-level security reference tables and analysis</li>
-</ul>
-
-<h5 style='margin-bottom:6px;'>Step 1: Upload Required Files</h5>
+<h5 style='margin-bottom:4px;'>Step 1: Upload Required Files</h5>
 
 <b>1. Bond File</b>
 
-<ul style='margin-top:4px; margin-bottom:10px;'>
+<ul style='margin-top:2px; margin-bottom:6px;'>
 <li>Information can be found from Munipro</li>
 <li>Row 1 must contain column headers</li>
 <li>Actual data should begin from Row 2</li>
@@ -53,11 +40,11 @@ The system will automatically:
 <b>Required Columns:</b><br>
 Issuer, Type, Lien, Election, Series, Cusip, Secondary Credit, Term, Maturity, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
 
-<br><br>
+<div style='height:10px;'></div>
 
 <b>2. Trade History File(s)</b>
 
-<ul style='margin-top:4px; margin-bottom:10px;'>
+<ul style='margin-top:2px; margin-bottom:6px;'>
 <li>Information can be extracted from Munipro</li>
 <li>Row 1 must contain column headers</li>
 <li>Actual data should begin from Row 2</li>
@@ -67,41 +54,38 @@ Issuer, Type, Lien, Election, Series, Cusip, Secondary Credit, Term, Maturity, P
 <b>Required Columns:</b><br>
 Trade Date/Time, CUSIP9, Description, Maturity Date, Trade Date, Settlement Date, Coupon, Yield, Price, Trade Amount, Calculation Date, Calculation Price, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
 
-<br><br>
+<div style='height:8px;'></div>
 
 <b>Important:</b><br>
 CUSIP9 in Trade Files must match Cusip in Bond File.
 
-<br><br>
+<div style='height:10px;'></div>
 
 <b>3. Optional Files</b>
 
-<ul style='margin-top:4px; margin-bottom:12px;'>
+<ul style='margin-top:2px; margin-bottom:8px;'>
 <li>Issuer / Sector Mapping File</li>
 <li>MMD Curve File</li>
 </ul>
 
-<h5 style='margin-bottom:6px;'>Step 2: Automatic Issuer Detection</h5>
+<h5 style='margin-top:10px; margin-bottom:4px;'>Step 2: Automatic Issuer Detection</h5>
 
-The dashboard automatically detects issuer names from uploaded datasets. Both existing and newly uploaded issuers are supported automatically.
+The dashboard automatically detects issuer names from uploaded datasets.
 
-<br>
+<div style='height:8px;'></div>
 
-<h5 style='margin-bottom:6px;'>Step 3: Select Uploaded Issuer</h5>
+<h5 style='margin-top:10px; margin-bottom:4px;'>Step 3: Select Uploaded Issuer</h5>
 
-In Section 2 of the sidebar:
-<ul style='margin-top:4px; margin-bottom:10px;'>
+<ul style='margin-top:2px; margin-bottom:6px;'>
 <li>Select one of the detected issuers</li>
 <li>Apply optional filters:
-    <ul>
+    <ul style='margin-top:2px; margin-bottom:2px;'>
         <li>Maturity Bucket</li>
         <li>Time Window</li>
         <li>Relative Value Comparison</li>
     </ul>
 </li>
 </ul>
-
-The dashboard will automatically generate the corresponding analytics and charts.
 
 </div>
 """,
