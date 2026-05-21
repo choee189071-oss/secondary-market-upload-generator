@@ -39,8 +39,7 @@ with st.expander("Instructions", expanded=False):
 <li>Multiple issuers’ bond data should be combined into the same file</li>
 </ul>
 
-<b>Required Columns:</b><br>
-Issuer, Type, Lien, Election, Series, Cusip, Secondary Credit, Term, Maturity, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
+<b>Minimum Required Columns:</b><br>Issuer, Cusip, Maturity<br><br><b>Recommended Columns:</b><br>Type, Lien, Election, Series, Secondary Credit, Term, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
 
 <div style='height:10px;'></div>
 
@@ -53,8 +52,7 @@ Issuer, Type, Lien, Election, Series, Cusip, Secondary Credit, Term, Maturity, P
 <li>Trade files should be uploaded separately</li>
 </ul>
 
-<b>Required Columns:</b><br>
-Trade Date/Time, CUSIP9, Description, Maturity Date, Trade Date, Settlement Date, Coupon, Yield, Price, Trade Amount, Calculation Date, Calculation Price, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
+<b>Minimum Required Columns:</b><br>CUSIP9, Trade Date, Yield<br><br><b>Recommended Columns:</b><br>Trade Date/Time, Description, Maturity Date, Settlement Date, Coupon, Price, Trade Amount, Calculation Date, Calculation Price, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
 
 <div style='height:8px;'></div>
 
@@ -98,7 +96,198 @@ The dashboard automatically detects issuer names from uploaded datasets.
 </div>
 """,
         unsafe_allow_html=True
+
     )
+
+# -----------------------------------------------------------------------------
+# Team-readiness validation layer
+# -----------------------------------------------------------------------------
+# Goal: keep the dashboard usable even when files come from different people or
+# slightly different Munipro exports. We separate fields into:
+#   1) REQUIRED: the app needs these to run.
+#   2) RECOMMENDED: the app can run without them, but analytics become weaker.
+#   3) OPTIONAL: nice-to-have reference fields.
+
+COLUMN_ALIASES: dict[str, list[str]] = {
+    # Shared identifiers
+    "cusip": ["cusip", "cusip9", "cusip 9", "cusip_9", "security id", "security_id"],
+    "issuer": ["issuer", "issuer name", "issuer_name", "obligor", "borrower"],
+    "sector": ["sector", "industry", "sector name", "sector_name"],
+    "primary_type": ["type", "primary type", "primary_type", "bond type"],
+    # Bond master fields
+    "lien": ["lien"],
+    "election": ["election"],
+    "series": ["series"],
+    "secondary_credit": ["secondary credit", "secondary_credit", "credit", "credit enhancement"],
+    "term": ["term"],
+    "maturity": ["maturity", "maturity date", "maturity_date"],
+    "par_amount": ["par amount", "par_amount", "par", "amount issued"],
+    "outstanding_amount": ["outstanding amount", "outstanding_amount", "amount outstanding", "current amount outstanding"],
+    "coupon": ["coupon", "coupon rate", "coupon_rate"],
+    "call_date": ["call date", "call_date", "first call date", "first_call_date"],
+    "call_price": ["call price", "call_price"],
+    "fed_tax": ["fed tax", "fed_tax", "tax status", "tax_status"],
+    "amt": ["amt", "alternative minimum tax"],
+    "rating": ["rating", "ratings", "ratings m/s/f", "ratings_m_s_f", "moody/s&p/fitch"],
+    # Trade fields
+    "trade_datetime": ["trade date/time", "trade datetime", "trade_datetime", "datetime"],
+    "trade_date": ["trade date", "trade_date", "date", "transaction date"],
+    "settlement_date": ["settlement date", "settlement_date", "settle date"],
+    "description": ["description", "security description", "bond description"],
+    "maturity_trade": ["maturity date", "maturity_date", "maturity"],
+    "yield": ["yield", "yield to worst", "ytw", "yield_to_worst", "yield to maturity", "ytm"],
+    "price": ["price", "trade price", "execution price"],
+    "trade_amount": ["trade amount", "trade_amount", "par traded", "par amount", "amount", "quantity"],
+    "calculation_date": ["calculation date", "calculation_date"],
+    "calculation_price": ["calculation price", "calculation_price"],
+    "index": ["index", "benchmark"],
+    "index_rate": ["index rate", "index_rate", "benchmark rate"],
+    "spread": ["spread", "g spread", "z spread", "spread to benchmark"],
+    "trade_type": ["trade type", "trade_type", "side", "buy/sell"],
+}
+
+BOND_REQUIRED = ["cusip", "issuer", "maturity"]
+BOND_RECOMMENDED = [
+    "coupon", "outstanding_amount", "call_date", "call_price", "sector", "secondary_credit", "fed_tax", "amt"
+]
+BOND_OPTIONAL = ["primary_type", "lien", "election", "series", "term", "par_amount", "rating"]
+
+TRADE_REQUIRED = ["cusip", "trade_date", "yield"]
+TRADE_RECOMMENDED = ["price", "trade_amount", "trade_type", "spread", "settlement_date", "rating"]
+TRADE_OPTIONAL = ["trade_datetime", "description", "maturity_trade", "calculation_date", "calculation_price", "index", "index_rate"]
+
+MMD_REQUIRED = ["date"]
+MMD_RECOMMENDED = ["1Y", "2Y", "5Y", "10Y", "20Y", "30Y"]
+
+
+def _normalize_col_name(name: object) -> str:
+    """Normalize external column names so Munipro/Excel variants can be detected."""
+    text = str(name).strip().lower()
+    for ch in ["_", "-", "/", "\\", "\n", "\t"]:
+        text = text.replace(ch, " ")
+    return " ".join(text.split())
+
+
+def _find_column(df: pd.DataFrame, canonical_name: str) -> str | None:
+    """Return the actual uploaded column matching a canonical internal field."""
+    normalized_columns = {_normalize_col_name(c): c for c in df.columns}
+    aliases = COLUMN_ALIASES.get(canonical_name, [canonical_name])
+    for alias in aliases:
+        hit = normalized_columns.get(_normalize_col_name(alias))
+        if hit is not None:
+            return hit
+    return None
+
+
+def build_column_mapping(df: pd.DataFrame, expected_fields: list[str]) -> dict[str, str | None]:
+    return {field: _find_column(df, field) for field in expected_fields}
+
+
+def validate_dataset(
+    df: pd.DataFrame,
+    dataset_name: str,
+    required_fields: list[str],
+    recommended_fields: list[str],
+    optional_fields: list[str] | None = None,
+) -> dict:
+    """Create a file-readiness report without blocking on non-critical fields."""
+    optional_fields = optional_fields or []
+    all_fields = required_fields + recommended_fields + optional_fields
+    mapping = build_column_mapping(df, all_fields)
+
+    missing_required = [field for field in required_fields if mapping.get(field) is None]
+    missing_recommended = [field for field in recommended_fields if mapping.get(field) is None]
+    detected_required = [field for field in required_fields if mapping.get(field) is not None]
+    detected_recommended = [field for field in recommended_fields if mapping.get(field) is not None]
+
+    return {
+        "dataset": dataset_name,
+        "can_run": len(missing_required) == 0,
+        "row_count": len(df),
+        "column_count": len(df.columns),
+        "mapping": mapping,
+        "missing_required": missing_required,
+        "missing_recommended": missing_recommended,
+        "detected_required": detected_required,
+        "detected_recommended": detected_recommended,
+    }
+
+
+def validate_basic_values(df: pd.DataFrame, mapping: dict[str, str | None], dataset_type: str) -> list[str]:
+    """Soft data-quality checks. These generate warnings instead of killing the app."""
+    warnings: list[str] = []
+
+    cusip_col = mapping.get("cusip")
+    if cusip_col and cusip_col in df.columns:
+        blank_cusips = df[cusip_col].isna().sum() + (df[cusip_col].astype(str).str.strip() == "").sum()
+        if blank_cusips:
+            warnings.append(f"{blank_cusips:,} row(s) have blank CUSIP values.")
+
+    date_field = "maturity" if dataset_type == "bond" else "trade_date"
+    date_col = mapping.get(date_field)
+    if date_col and date_col in df.columns:
+        parsed = pd.to_datetime(df[date_col], errors="coerce")
+        bad_dates = parsed.isna().sum()
+        if bad_dates:
+            warnings.append(f"{bad_dates:,} row(s) have invalid or blank {date_field} values.")
+
+    yield_col = mapping.get("yield")
+    if yield_col and yield_col in df.columns:
+        parsed_yield = pd.to_numeric(df[yield_col], errors="coerce")
+        bad_yields = parsed_yield.isna().sum()
+        extreme_yields = ((parsed_yield < -5) | (parsed_yield > 30)).sum()
+        if bad_yields:
+            warnings.append(f"{bad_yields:,} row(s) have non-numeric yield values.")
+        if extreme_yields:
+            warnings.append(f"{extreme_yields:,} row(s) have yield values outside the expected -5% to 30% range.")
+
+    amount_col = mapping.get("trade_amount") or mapping.get("outstanding_amount")
+    if amount_col and amount_col in df.columns:
+        parsed_amount = pd.to_numeric(df[amount_col], errors="coerce")
+        negative_amounts = (parsed_amount < 0).sum()
+        if negative_amounts:
+            warnings.append(f"{negative_amounts:,} row(s) have negative amount values.")
+
+    return warnings
+
+
+def display_validation_report(title: str, report: dict, warnings: list[str] | None = None):
+    """Render a user-facing readiness card in Streamlit."""
+    warnings = warnings or []
+    status_icon = "✅" if report["can_run"] else "❌"
+    with st.expander(f"{status_icon} {title} readiness check", expanded=not report["can_run"]):
+        st.caption(f"Rows: {report['row_count']:,} · Columns: {report['column_count']:,}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Required detected", f"{len(report['detected_required'])}/{len(report['detected_required']) + len(report['missing_required'])}")
+        c2.metric("Recommended detected", f"{len(report['detected_recommended'])}/{len(report['detected_recommended']) + len(report['missing_recommended'])}")
+        c3.metric("Ready to run", "Yes" if report["can_run"] else "No")
+
+        if report["missing_required"]:
+            st.error("Missing required fields: " + ", ".join(report["missing_required"]))
+        if report["missing_recommended"]:
+            st.warning("Missing recommended fields: " + ", ".join(report["missing_recommended"]))
+        if warnings:
+            for warning in warnings:
+                st.warning(warning)
+
+        mapping_rows = [
+            {"Internal Field": key, "Uploaded Column Detected": value or "—"}
+            for key, value in report["mapping"].items()
+        ]
+        st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+
+
+def template_download_button(columns: list[str], label: str, filename: str):
+    template = pd.DataFrame(columns=columns)
+    st.download_button(
+        label=label,
+        data=template.to_csv(index=False).encode("utf-8"),
+        file_name=filename,
+        mime="text/csv",
+    )
+
+
 @st.cache_data(show_spinner="Processing uploaded data...")
 def process_uploads(
     bond_bytes: bytes,
@@ -157,6 +346,10 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Tip: Keep proprietary raw exports out of public GitHub. Upload them only during your own session.")
 
+    with st.expander("Download blank templates"):
+        template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Bond template CSV", "bond_master_template.csv")
+        template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
+
 if bond_file is None or not trade_files:
     st.info("Upload a bond master file and at least one trade-history file to generate the dashboard.")
     with st.expander("Expected file logic"):
@@ -170,6 +363,58 @@ bond_bytes = bond_file.getvalue()
 trade_payloads = [(f.name, f.getvalue()) for f in trade_files]
 issuer_mapping_payload = (issuer_mapping_file.name, issuer_mapping_file.getvalue()) if issuer_mapping_file else None
 mmd_payload = (mmd_file.name, mmd_file.getvalue()) if mmd_file else None
+
+# -----------------------------------------------------------------------------
+# File-readiness gate: inspect the uploaded files before running full analytics.
+# -----------------------------------------------------------------------------
+st.header("File Readiness Check")
+raw_bonds_preview = read_uploaded_file(io.BytesIO(bond_bytes), bond_file.name)
+bond_report = validate_dataset(raw_bonds_preview, bond_file.name, BOND_REQUIRED, BOND_RECOMMENDED, BOND_OPTIONAL)
+bond_warnings = validate_basic_values(raw_bonds_preview, bond_report["mapping"], dataset_type="bond")
+display_validation_report("Bond Master File", bond_report, bond_warnings)
+
+trade_reports = []
+trade_blocking_failures = []
+for trade_name, trade_bytes in trade_payloads:
+    try:
+        raw_trade_preview = read_uploaded_file(io.BytesIO(trade_bytes), trade_name)
+        report = validate_dataset(raw_trade_preview, trade_name, TRADE_REQUIRED, TRADE_RECOMMENDED, TRADE_OPTIONAL)
+        warnings = validate_basic_values(raw_trade_preview, report["mapping"], dataset_type="trade")
+        trade_reports.append(report)
+        display_validation_report(f"Trade File — {trade_name}", report, warnings)
+        if not report["can_run"]:
+            trade_blocking_failures.append(trade_name)
+    except Exception as exc:
+        st.error(f"Could not read trade file {trade_name}: {exc}")
+        trade_blocking_failures.append(trade_name)
+
+if not bond_report["can_run"] or trade_blocking_failures:
+    st.error(
+        "The dashboard cannot run yet because at least one required file is missing minimum fields. "
+        "Use the readiness tables above to rename/add columns, then upload again."
+    )
+    st.stop()
+
+if mmd_payload is not None:
+    try:
+        mmd_name, mmd_bytes = mmd_payload
+        raw_mmd_preview = read_uploaded_file(io.BytesIO(mmd_bytes), mmd_name)
+        mmd_report = validate_dataset(raw_mmd_preview, mmd_name, MMD_REQUIRED, MMD_RECOMMENDED, [])
+        display_validation_report("MMD Curve File", mmd_report)
+        if not mmd_report["can_run"]:
+            st.warning("MMD comparison will be skipped unless the MMD file has a date column.")
+    except Exception as exc:
+        st.warning(f"Could not validate MMD file. MMD comparison may be skipped: {exc}")
+
+with st.expander("Methodology: how the app decides whether a file is usable", expanded=False):
+    st.markdown(
+        """
+- **Required fields** are the minimum fields needed for the dashboard to run.
+- **Recommended fields** improve liquidity, callable-bond, tax, and relative-value analysis, but missing them should not break the app.
+- **Column aliases** let the app recognize variants like `CUSIP9`, `Cusip`, or `CUSIP` as the same internal `cusip` field.
+- **Warnings** flag data-quality issues, but the app only stops when a required field is missing.
+        """
+    )
 
 bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files = process_uploads(
     bond_bytes=bond_bytes,
@@ -243,6 +488,8 @@ col4.metric("Trades", f"{len(issuer_trades):,}")
 col5.metric("Latest Trade", issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades")
 
 st.header("Yield Trend / Relative Value Comparison")
+with st.expander("Methodology", expanded=False):
+    st.write("This section groups uploaded trade rows by trade date and issuer, then plots average observed trade yield. If an MMD file is uploaded, the selected maturity bucket is mapped to a benchmark MMD tenor for visual comparison.")
 issuer_choices = uploaded_issuers
 default_compare = [selected_issuer] if selected_issuer in issuer_choices else issuer_choices[:1]
 compare_issuers = st.multiselect("Compare Issuers", issuer_choices, default=default_compare)
@@ -290,6 +537,8 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
 st.header("Liquidity / Trading Frequency Analysis")
+with st.expander("Methodology", expanded=False):
+    st.write("Liquidity score is a transparent ranking measure: 35% trade count, 25% total trade amount, 25% recent 90-day trades, and 15% recency. It is a screening metric, not a credit rating or valuation recommendation.")
 if issuer_trades.empty:
     st.warning("No trade rows found for this issuer and filter.")
 else:
@@ -325,7 +574,7 @@ else:
     liq = liq.merge(recent, on="cusip", how="left")
     liq["recent_90d_trades"] = liq["recent_90d_trades"].fillna(0).astype(int)
     liq["yield_range"] = liq["max_yield"] - liq["min_yield"]
-    liq["turnover_ratio"] = liq["total_trade_amount"] / liq["outstanding_amount"]
+    liq["turnover_ratio"] = liq["total_trade_amount"] / liq["outstanding_amount"].replace({0: pd.NA})
     liq["liquidity_score"] = (
         liq["trade_count"].rank(pct=True) * 35
         + liq["total_trade_amount"].rank(pct=True) * 25
