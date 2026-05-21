@@ -1800,21 +1800,150 @@ else:
                             v_20 = get_curve_value("20Y")
                             v_30 = get_curve_value("30Y")
 
+                            # -------------------------
+                            # Dynamic curve diagnostics
+                            # -------------------------
+                            available_points = []
+                            missing_points = []
+
+                            for bucket_name, bucket_value in {
+                                "Short": v_short,
+                                "10Y": v_10,
+                                "20Y": v_20,
+                                "30Y": v_30,
+                            }.items():
+                                if pd.notna(bucket_value):
+                                    available_points.append(bucket_name)
+                                else:
+                                    missing_points.append(bucket_name)
+
+                            diag_col1, diag_col2 = st.columns(2)
+
+                            with diag_col1:
+                                st.success(
+                                    "Available Curve Points:\n\n"
+                                    + ", ".join(available_points)
+                                    if available_points
+                                    else "No usable curve points detected."
+                                )
+
+                            with diag_col2:
+                                if missing_points:
+                                    st.warning(
+                                        "Missing Curve Points:\n\n"
+                                        + ", ".join(missing_points)
+                                    )
+                                else:
+                                    st.success("All core curve points detected.")
+
                             metrics_rows = []
+                            analytics_status = []
+
+                            # 5s10s
                             if pd.notna(v_short) and pd.notna(v_10):
-                                metrics_rows.append({"Metric": "5s10s Slope", "Value": v_10 - v_short})
+                                metrics_rows.append({
+                                    "Metric": "5s10s Slope",
+                                    "Value": v_10 - v_short,
+                                })
+                                analytics_status.append({
+                                    "Analytics": "5s10s Slope",
+                                    "Status": "Available",
+                                    "Requirement": "Short + 10Y",
+                                })
+                            else:
+                                analytics_status.append({
+                                    "Analytics": "5s10s Slope",
+                                    "Status": "Missing Required Points",
+                                    "Requirement": "Short + 10Y",
+                                })
+
+                            # 10s30s
                             if pd.notna(v_10) and pd.notna(v_30):
-                                metrics_rows.append({"Metric": "10s30s Slope", "Value": v_30 - v_10})
+                                metrics_rows.append({
+                                    "Metric": "10s30s Slope",
+                                    "Value": v_30 - v_10,
+                                })
+                                analytics_status.append({
+                                    "Analytics": "10s30s Slope",
+                                    "Status": "Available",
+                                    "Requirement": "10Y + 30Y",
+                                })
+                            else:
+                                analytics_status.append({
+                                    "Analytics": "10s30s Slope",
+                                    "Status": "Missing Required Points",
+                                    "Requirement": "10Y + 30Y",
+                                })
+
+                            # 5s30s
                             if pd.notna(v_short) and pd.notna(v_30):
-                                metrics_rows.append({"Metric": "5s30s Slope", "Value": v_30 - v_short})
+                                metrics_rows.append({
+                                    "Metric": "5s30s Slope",
+                                    "Value": v_30 - v_short,
+                                })
+                                analytics_status.append({
+                                    "Analytics": "5s30s Slope",
+                                    "Status": "Available",
+                                    "Requirement": "Short + 30Y",
+                                })
+                            else:
+                                analytics_status.append({
+                                    "Analytics": "5s30s Slope",
+                                    "Status": "Missing Required Points",
+                                    "Requirement": "Short + 30Y",
+                                })
+
+                            # Butterfly
                             if pd.notna(v_short) and pd.notna(v_10) and pd.notna(v_30):
-                                metrics_rows.append({"Metric": "5s10s30s Butterfly", "Value": v_10 - ((v_short + v_30) / 2)})
+                                metrics_rows.append({
+                                    "Metric": "5s10s30s Butterfly",
+                                    "Value": v_10 - ((v_short + v_30) / 2),
+                                })
+                                analytics_status.append({
+                                    "Analytics": "5s10s30s Butterfly",
+                                    "Status": "Available",
+                                    "Requirement": "Short + 10Y + 30Y",
+                                })
+                            else:
+                                analytics_status.append({
+                                    "Analytics": "5s10s30s Butterfly",
+                                    "Status": "Missing Required Points",
+                                    "Requirement": "Short + 10Y + 30Y",
+                                })
+
+                            # Steepness score
                             if pd.notna(v_short) and pd.notna(v_10) and pd.notna(v_20) and pd.notna(v_30):
-                                # Simple composite steepness score: average of normalized slopes available.
-                                metrics_rows.append({"Metric": "Steepness Score", "Value": ((v_10 - v_short) + (v_30 - v_10) + (v_30 - v_short)) / 3})
+                                metrics_rows.append({
+                                    "Metric": "Steepness Score",
+                                    "Value": (
+                                        ((v_10 - v_short)
+                                        + (v_30 - v_10)
+                                        + (v_30 - v_short)) / 3
+                                    ),
+                                })
+                                analytics_status.append({
+                                    "Analytics": "Steepness Score",
+                                    "Status": "Available",
+                                    "Requirement": "Short + 10Y + 20Y + 30Y",
+                                })
+                            else:
+                                analytics_status.append({
+                                    "Analytics": "Steepness Score",
+                                    "Status": "Missing Required Points",
+                                    "Requirement": "Short + 10Y + 20Y + 30Y",
+                                })
+
+                            analytics_status_df = pd.DataFrame(analytics_status)
+
+                            with st.expander("Curve Analytics Availability", expanded=False):
+                                st.dataframe(
+                                    analytics_status_df,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
 
                             if not metrics_rows:
-                                st.info("At least two curve points are needed to calculate curve shape metrics.")
+                                st.info("At least two compatible curve points are needed to calculate curve shape metrics.")
                             else:
                                 metrics_df = pd.DataFrame(metrics_rows)
                                 unit = "bp" if cs_curve_basis == "Spread Curve" else "%"
