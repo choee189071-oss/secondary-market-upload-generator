@@ -166,13 +166,15 @@ def section_directory():
 <a href="#market-narrative">7. Market Narrative & Opportunity Map</a> ·
 <a href="#peer-rv">8. Peer RV Comparison</a> ·
 <a href="#historical-spread">9. Historical Spread Percentile</a> ·
-<a href="#spread-movement">10. Spread Movement</a> ·
-<a href="#cusip-drilldown">11. CUSIP Drilldown</a> ·
-<a href="#rv-positioning">12. RV Positioning Map</a> ·
-<a href="#liquidity">13. Liquidity</a> ·
-<a href="#bond-master">14. Bond Master</a> ·
-<a href="#trade-detail">15. Trade Detail</a> ·
-<a href="#downloads">16. Downloads</a>
+<a href="#dealer-proxy">10. Dealer Proxy</a> ·
+<a href="#security-screener">11. Security Screener</a> ·
+<a href="#spread-movement">12. Spread Movement</a> ·
+<a href="#cusip-drilldown">13. CUSIP Drilldown</a> ·
+<a href="#rv-positioning">14. RV Positioning Map</a> ·
+<a href="#liquidity">15. Liquidity</a> ·
+<a href="#bond-master">16. Bond Master</a> ·
+<a href="#trade-detail">17. Trade Detail</a> ·
+<a href="#downloads">18. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -2949,6 +2951,527 @@ else:
                         use_container_width=True,
                         hide_index=True,
                     )
+
+
+
+section_anchor("dealer-proxy", "Bid / Ask & Dealer Behavior Proxy")
+with st.expander("Methodology: dealer behavior proxy", expanded=False):
+    st.markdown(
+        """
+This section is intentionally **data-dependent**. It becomes most useful when uploaded trade files include a buy/sell indicator, dealer side, customer side, or trade type.
+
+**Realistic implementation:**
+
+- If a usable `trade_type` / side field exists, the app classifies trades into:
+    - **Customer Buy / Buy**
+    - **Customer Sell / Sell**
+    - **Other / Unknown**
+- It estimates a simple imbalance proxy:
+
+`Selling Imbalance = (Sell Amount - Buy Amount) / (Sell Amount + Buy Amount)`
+
+**How to read it:**
+
+- Positive value: more selling pressure / potential dealer inventory pressure.
+- Negative value: more buying demand.
+- Near zero: balanced flow.
+
+**Important limitation:**
+
+This is a **proxy**, not true dealer inventory. True dealer behavior would require richer MSRB/dealer-side fields, bid-wanted data, or inventory data.
+        """
+    )
+
+dealer_trade_type_col = None
+for candidate_col in ["trade_type", "side", "buy_sell", "customer_side", "dealer_side"]:
+    if candidate_col in market_df.columns:
+        dealer_trade_type_col = candidate_col
+        break
+
+if dealer_trade_type_col is None:
+    st.info(
+        "Dealer behavior proxy is unavailable because no trade side / trade type field was detected. "
+        "Upload trade data with fields such as Trade Type, Side, Customer Buy/Sell, or Dealer Side to enable this module."
+    )
+else:
+    dealer_col1, dealer_col2, dealer_col3 = st.columns([1, 1, 1])
+    with dealer_col1:
+        dealer_scope = st.selectbox(
+            "Dealer Proxy Scope",
+            ["Selected issuer", "All uploaded issuers"],
+            index=0,
+            key="dealer_proxy_scope",
+        )
+    with dealer_col2:
+        dealer_bucket = st.selectbox(
+            "Dealer Proxy Maturity Bucket",
+            ["All", "Short", "10Y", "20Y", "30Y"],
+            index=0,
+            key="dealer_proxy_bucket",
+        )
+    with dealer_col3:
+        dealer_window = st.selectbox(
+            "Dealer Proxy Window",
+            ["Latest 30D", "Latest 60D", "Latest 90D", "All"],
+            index=2,
+            key="dealer_proxy_window",
+        )
+
+    dealer_df = market_df.copy()
+    dealer_df["trade_date"] = pd.to_datetime(dealer_df["trade_date"], errors="coerce").dt.normalize()
+    dealer_df["yield"] = pd.to_numeric(dealer_df["yield"], errors="coerce")
+    if "trade_amount" in dealer_df.columns:
+        dealer_df["trade_amount"] = pd.to_numeric(dealer_df["trade_amount"], errors="coerce").fillna(0)
+    else:
+        dealer_df["trade_amount"] = 0.0
+
+    dealer_df = dealer_df.dropna(subset=["trade_date"])
+    if dealer_scope == "Selected issuer":
+        dealer_df = dealer_df[dealer_df["issuer"] == selected_issuer].copy()
+    if dealer_bucket != "All" and "maturity_bucket" in dealer_df.columns:
+        dealer_df = dealer_df[dealer_df["maturity_bucket"] == dealer_bucket].copy()
+
+    dealer_days = {"Latest 30D": 30, "Latest 60D": 60, "Latest 90D": 90, "All": None}[dealer_window]
+    if not dealer_df.empty and dealer_days is not None:
+        dealer_latest = dealer_df["trade_date"].max()
+        dealer_df = dealer_df[dealer_df["trade_date"] >= dealer_latest - pd.Timedelta(days=dealer_days)].copy()
+
+    if dealer_df.empty:
+        st.warning("No trades remain for the selected dealer-proxy filters.")
+    else:
+        def classify_trade_side(value: object) -> str:
+            text_val = str(value).strip().lower()
+            if not text_val or text_val in {"nan", "none"}:
+                return "Unknown"
+            # Common variants from trade exports. These are intentionally broad.
+            if any(token in text_val for token in ["sell", "sold", "sld", "customer sell", "cust sell", "cs"]):
+                return "Sell"
+            if any(token in text_val for token in ["buy", "bought", "purchase", "customer buy", "cust buy", "cb"]):
+                return "Buy"
+            if text_val in {"s"}:
+                return "Sell"
+            if text_val in {"b"}:
+                return "Buy"
+            return "Other / Unknown"
+
+        dealer_df["flow_side"] = dealer_df[dealer_trade_type_col].map(classify_trade_side)
+
+        flow_summary = (
+            dealer_df.groupby("flow_side", as_index=False)
+            .agg(
+                trade_count=("trade_date", "count"),
+                total_trade_amount=("trade_amount", "sum"),
+                avg_yield=("yield", "mean"),
+            )
+        )
+
+        buy_amount = flow_summary.loc[flow_summary["flow_side"] == "Buy", "total_trade_amount"].sum()
+        sell_amount = flow_summary.loc[flow_summary["flow_side"] == "Sell", "total_trade_amount"].sum()
+        buy_count = flow_summary.loc[flow_summary["flow_side"] == "Buy", "trade_count"].sum()
+        sell_count = flow_summary.loc[flow_summary["flow_side"] == "Sell", "trade_count"].sum()
+        denom_amount = buy_amount + sell_amount
+        denom_count = buy_count + sell_count
+        amount_imbalance = (sell_amount - buy_amount) / denom_amount if denom_amount > 0 else pd.NA
+        count_imbalance = (sell_count - buy_count) / denom_count if denom_count > 0 else pd.NA
+
+        dp1, dp2, dp3, dp4 = st.columns(4)
+        dp1.metric("Buy Amount", f"{buy_amount:,.0f}")
+        dp2.metric("Sell Amount", f"{sell_amount:,.0f}")
+        dp3.metric("Amount Imbalance", "N/A" if pd.isna(amount_imbalance) else f"{amount_imbalance:+.1%}")
+        dp4.metric("Count Imbalance", "N/A" if pd.isna(count_imbalance) else f"{count_imbalance:+.1%}")
+
+        if pd.notna(amount_imbalance):
+            if amount_imbalance >= 0.25:
+                st.info("Read-through: flow appears sell-heavy, which may indicate customer selling pressure or dealer balance-sheet pressure.")
+            elif amount_imbalance <= -0.25:
+                st.info("Read-through: flow appears buy-heavy, which may indicate stronger demand or dealer distribution.")
+            else:
+                st.info("Read-through: buy/sell flow appears relatively balanced in the selected window.")
+        else:
+            st.info("Read-through: buy/sell imbalance cannot be calculated because buy/sell amount data is unavailable or zero.")
+
+        flow_fig = px.bar(
+            flow_summary,
+            x="flow_side",
+            y="total_trade_amount",
+            hover_data={"trade_count": ":,.0f", "avg_yield": ":.2f"},
+            title="Trade Amount by Flow Side",
+            labels={
+                "flow_side": "Flow Side",
+                "total_trade_amount": "Total Trade Amount",
+                "trade_count": "Trade Count",
+                "avg_yield": "Average Yield",
+            },
+        )
+        flow_fig.update_layout(height=430)
+        st.plotly_chart(flow_fig, use_container_width=True)
+
+        dealer_daily = (
+            dealer_df.groupby(["trade_date", "flow_side"], as_index=False)
+            .agg(
+                trade_count=("trade_date", "count"),
+                total_trade_amount=("trade_amount", "sum"),
+            )
+        )
+        daily_pivot = (
+            dealer_daily.pivot_table(
+                index="trade_date",
+                columns="flow_side",
+                values="total_trade_amount",
+                aggfunc="sum",
+                fill_value=0,
+                observed=False,
+            )
+            .reset_index()
+        )
+        if "Buy" not in daily_pivot.columns:
+            daily_pivot["Buy"] = 0
+        if "Sell" not in daily_pivot.columns:
+            daily_pivot["Sell"] = 0
+        daily_pivot["net_selling_pressure"] = daily_pivot["Sell"] - daily_pivot["Buy"]
+
+        pressure_fig = px.bar(
+            daily_pivot,
+            x="trade_date",
+            y="net_selling_pressure",
+            title="Daily Net Selling Pressure Proxy",
+            labels={
+                "trade_date": "Trade Date",
+                "net_selling_pressure": "Sell Amount - Buy Amount",
+            },
+        )
+        pressure_fig.add_hline(y=0, line_dash="dash", opacity=0.45)
+        pressure_fig.update_layout(height=430)
+        st.plotly_chart(pressure_fig, use_container_width=True)
+
+        with st.expander("Dealer proxy audit table", expanded=False):
+            audit_cols = [
+                "trade_date",
+                "issuer",
+                "cusip",
+                "maturity_bucket",
+                dealer_trade_type_col,
+                "flow_side",
+                "yield",
+                "price",
+                "trade_amount",
+                "trade_type",
+            ]
+            audit_cols = [c for c in audit_cols if c in dealer_df.columns]
+            st.caption(f"Side classification source column: `{dealer_trade_type_col}`.")
+            st.dataframe(
+                dealer_df[audit_cols].sort_values("trade_date", ascending=False).head(5000),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+
+section_anchor("security-screener", "Security Screener — Top Relative Value Candidates")
+with st.expander("Methodology: security screener", expanded=False):
+    st.markdown(
+        """
+This section turns the dashboard into a practical **find me bonds** workflow.
+
+**Goal:**
+
+Screen uploaded bonds/trades for securities that are both relatively cheap and sufficiently liquid.
+
+**Core fields used:**
+
+- Sector / issuer / maturity bucket
+- Spread to benchmark
+- Liquidity score
+- Trade count
+- Total trade amount
+- Days since last trade
+
+**Core spread calculation:**
+
+`Spread to Benchmark = (Average CUSIP Yield - Benchmark Yield) × 100`
+
+**Important limitation:**
+
+This is a screening tool. It does not replace credit review, call analysis, structure review, tax status review, or PM/trader judgment.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD/benchmark curve file to enable security screener spread calculations.")
+else:
+    screen_col1, screen_col2, screen_col3, screen_col4 = st.columns([1, 1, 1, 1])
+    with screen_col1:
+        screen_sector_options = ["All"]
+        if "sector" in market_df.columns:
+            screen_sector_options += sorted(market_df["sector"].dropna().astype(str).unique().tolist())
+        screen_sector = st.selectbox("Screener Sector", screen_sector_options, index=0, key="screen_sector")
+    with screen_col2:
+        screen_bucket = st.selectbox(
+            "Screener Maturity Bucket",
+            ["All", "Short", "10Y", "20Y", "30Y"],
+            index=0,
+            key="screen_bucket",
+        )
+    with screen_col3:
+        screen_rating = st.selectbox(
+            "Screener Benchmark",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            key="screen_rating",
+        )
+    with screen_col4:
+        screen_window = st.selectbox(
+            "Screener Lookback",
+            ["Latest 30D", "Latest 60D", "Latest 90D", "All"],
+            index=2,
+            key="screen_window",
+        )
+
+    filt_col1, filt_col2, filt_col3, filt_col4 = st.columns([1, 1, 1, 1])
+    with filt_col1:
+        min_spread = st.number_input("Min Spread (bps)", value=40.0, step=5.0, key="min_screen_spread")
+    with filt_col2:
+        min_liquidity = st.number_input("Min Liquidity Score", value=50.0, min_value=0.0, max_value=100.0, step=5.0, key="min_screen_liq")
+    with filt_col3:
+        min_trades_screen = st.number_input("Min Trades", value=2, min_value=1, max_value=100, step=1, key="min_screen_trades")
+    with filt_col4:
+        min_trade_amount = st.number_input("Min Total Trade Amount", value=0.0, step=100000.0, key="min_screen_amount")
+
+    screener_df = market_df.copy()
+    screener_df["trade_date"] = pd.to_datetime(screener_df["trade_date"], errors="coerce").dt.normalize()
+    screener_df["yield"] = pd.to_numeric(screener_df["yield"], errors="coerce")
+    if "trade_amount" in screener_df.columns:
+        screener_df["trade_amount"] = pd.to_numeric(screener_df["trade_amount"], errors="coerce").fillna(0)
+    else:
+        screener_df["trade_amount"] = 0.0
+    if "price" in screener_df.columns:
+        screener_df["price"] = pd.to_numeric(screener_df["price"], errors="coerce")
+    else:
+        screener_df["price"] = pd.NA
+
+    screener_df = screener_df.dropna(subset=["trade_date", "yield", "cusip"])
+    if screen_sector != "All" and "sector" in screener_df.columns:
+        screener_df = screener_df[screener_df["sector"].astype(str) == str(screen_sector)].copy()
+    if screen_bucket != "All" and "maturity_bucket" in screener_df.columns:
+        screener_df = screener_df[screener_df["maturity_bucket"] == screen_bucket].copy()
+
+    screen_days = {"Latest 30D": 30, "Latest 60D": 60, "Latest 90D": 90, "All": None}[screen_window]
+    if not screener_df.empty and screen_days is not None:
+        latest_screen_date = screener_df["trade_date"].max()
+        screener_df = screener_df[screener_df["trade_date"] >= latest_screen_date - pd.Timedelta(days=screen_days)].copy()
+
+    if screener_df.empty:
+        st.warning("No securities remain after the selected screener universe filters.")
+    else:
+        screen_summary = (
+            screener_df.groupby("cusip", dropna=False)
+            .agg(
+                issuer=("issuer", "first"),
+                sector=("sector", "first") if "sector" in screener_df.columns else ("issuer", "first"),
+                maturity_bucket=("maturity_bucket", "first") if "maturity_bucket" in screener_df.columns else ("issuer", "first"),
+                maturity=("maturity_bond", "first") if "maturity_bond" in screener_df.columns else ("trade_date", "max"),
+                coupon=("coupon_bond", "first") if "coupon_bond" in screener_df.columns else ("yield", "count"),
+                call_date=("call_date", "first") if "call_date" in screener_df.columns else ("trade_date", "max"),
+                avg_yield=("yield", "mean"),
+                latest_yield=("yield", "last"),
+                avg_price=("price", "mean"),
+                trade_count=("trade_date", "count"),
+                latest_trade=("trade_date", "max"),
+                first_trade=("trade_date", "min"),
+                total_trade_amount=("trade_amount", "sum"),
+                avg_trade_amount=("trade_amount", "mean"),
+                outstanding_amount=("outstanding_amount", "first") if "outstanding_amount" in screener_df.columns else ("trade_amount", "sum"),
+            )
+            .reset_index()
+        )
+
+        # Latest benchmark by maturity bucket.
+        screen_date_col = _detect_mmd_date_column(mmd_df)
+        if screen_date_col is None:
+            st.warning("Security screener cannot calculate spreads because the benchmark file has no usable date column.")
+        else:
+            screen_mmd = mmd_df.copy()
+            screen_mmd[screen_date_col] = pd.to_datetime(screen_mmd[screen_date_col], errors="coerce")
+            screen_mmd = screen_mmd.dropna(subset=[screen_date_col])
+            latest_trade_for_screen = screener_df["trade_date"].max()
+            screen_mmd = screen_mmd[screen_mmd[screen_date_col].dt.normalize() <= latest_trade_for_screen].sort_values(screen_date_col)
+
+            if screen_mmd.empty:
+                st.warning("No benchmark curve observation was available on or before the latest screener trade date.")
+            else:
+                screen_latest_mmd = screen_mmd.iloc[[-1]].copy()
+                screen_benchmark_date = screen_latest_mmd[screen_date_col].iloc[0]
+
+                bench_rows = []
+                for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                    tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
+                    y, meta = get_benchmark_curve(screen_latest_mmd, tenor, screen_rating)
+                    if y is not None and pd.notna(y.iloc[0]):
+                        bench_rows.append(
+                            {
+                                "maturity_bucket": bucket,
+                                "mmd_tenor": tenor,
+                                "benchmark_yield": float(y.iloc[0]),
+                                "benchmark_source": meta.get("benchmark_source"),
+                                "source_column": meta.get("source_column"),
+                                "rating_spread_bps": meta.get("rating_spread_bps"),
+                            }
+                        )
+                screen_bench = pd.DataFrame(bench_rows)
+
+                if screen_bench.empty:
+                    st.warning("Selected benchmark curve could not be built for screener.")
+                else:
+                    screen_summary["maturity_bucket"] = screen_summary["maturity_bucket"].astype(str)
+                    screen_summary = screen_summary.merge(screen_bench, on="maturity_bucket", how="left")
+                    screen_summary["spread_to_benchmark_bps"] = (
+                        screen_summary["avg_yield"] - screen_summary["benchmark_yield"]
+                    ) * 100
+
+                    # Liquidity score proxy.
+                    today_screen = pd.Timestamp.today().normalize()
+                    screen_summary["days_since_last_trade"] = (today_screen - screen_summary["latest_trade"]).dt.days
+                    screen_summary["liquidity_score"] = (
+                        screen_summary["trade_count"].rank(pct=True) * 35
+                        + screen_summary["total_trade_amount"].rank(pct=True) * 35
+                        + (1 - screen_summary["days_since_last_trade"].rank(pct=True)) * 30
+                    )
+                    screen_summary["turnover_ratio"] = (
+                        screen_summary["total_trade_amount"]
+                        / pd.to_numeric(screen_summary["outstanding_amount"], errors="coerce").replace({0: pd.NA})
+                    )
+
+                    # Apply screen filters.
+                    candidates = screen_summary[
+                        (screen_summary["spread_to_benchmark_bps"] >= min_spread)
+                        & (screen_summary["liquidity_score"] >= min_liquidity)
+                        & (screen_summary["trade_count"] >= min_trades_screen)
+                        & (screen_summary["total_trade_amount"] >= min_trade_amount)
+                    ].copy()
+
+                    candidates["rv_score"] = (
+                        candidates["spread_to_benchmark_bps"].rank(pct=True) * 45
+                        + candidates["liquidity_score"].rank(pct=True) * 35
+                        + candidates["trade_count"].rank(pct=True) * 10
+                        + candidates["total_trade_amount"].rank(pct=True) * 10
+                    )
+
+                    candidates = candidates.sort_values("rv_score", ascending=False, na_position="last")
+
+                    s1, s2, s3, s4 = st.columns(4)
+                    s1.metric("Candidates", f"{len(candidates):,}")
+                    s2.metric("Benchmark", f"{screen_rating}")
+                    s3.metric("Benchmark Date", screen_benchmark_date.strftime("%Y-%m-%d"))
+                    s4.metric("Universe CUSIPs", f"{len(screen_summary):,}")
+
+                    if candidates.empty:
+                        st.info(
+                            "No securities met the current screener filters. Try lowering minimum spread, liquidity score, or trade count."
+                        )
+                    else:
+                        top_candidate = candidates.iloc[0]
+                        st.info(
+                            f"Top candidate by RV score: CUSIP {top_candidate['cusip']} "
+                            f"({top_candidate['issuer']}) screens at {top_candidate['spread_to_benchmark_bps']:+.1f} bp "
+                            f"to {screen_rating}, liquidity score {top_candidate['liquidity_score']:.1f}, "
+                            f"and {int(top_candidate['trade_count'])} trades in the selected window."
+                        )
+
+                        display_cols = [
+                            "rv_score",
+                            "cusip",
+                            "issuer",
+                            "sector",
+                            "maturity_bucket",
+                            "maturity",
+                            "coupon",
+                            "call_date",
+                            "avg_yield",
+                            "benchmark_yield",
+                            "spread_to_benchmark_bps",
+                            "liquidity_score",
+                            "trade_count",
+                            "total_trade_amount",
+                            "avg_trade_amount",
+                            "days_since_last_trade",
+                            "avg_price",
+                            "outstanding_amount",
+                            "turnover_ratio",
+                            "benchmark_source",
+                            "source_column",
+                        ]
+                        display_candidates = candidates[[c for c in display_cols if c in candidates.columns]].copy()
+                        for c in ["rv_score", "avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "liquidity_score", "avg_price", "turnover_ratio"]:
+                            if c in display_candidates.columns:
+                                display_candidates[c] = pd.to_numeric(display_candidates[c], errors="coerce").round(2)
+
+                        st.dataframe(
+                            display_candidates.head(1000),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=480,
+                        )
+
+                        screener_fig = px.scatter(
+                            candidates,
+                            x="liquidity_score",
+                            y="spread_to_benchmark_bps",
+                            size="total_trade_amount",
+                            size_max=38,
+                            color="maturity_bucket",
+                            hover_name="cusip",
+                            hover_data=[
+                                c for c in [
+                                    "issuer",
+                                    "sector",
+                                    "avg_yield",
+                                    "benchmark_yield",
+                                    "trade_count",
+                                    "days_since_last_trade",
+                                    "rv_score",
+                                ] if c in candidates.columns
+                            ],
+                            title="Top Relative Value Candidates",
+                            labels={
+                                "liquidity_score": "Liquidity Score",
+                                "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
+                                "maturity_bucket": "Maturity Bucket",
+                            },
+                        )
+                        screener_fig.add_vline(x=min_liquidity, line_dash="dash", opacity=0.45)
+                        screener_fig.add_hline(y=min_spread, line_dash="dash", opacity=0.45)
+                        screener_fig.update_layout(height=520, hovermode="closest")
+                        st.plotly_chart(screener_fig, use_container_width=True)
+
+                        csv_candidates = candidates.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            label="Download Top Relative Value Candidates CSV",
+                            data=csv_candidates,
+                            file_name="top_relative_value_candidates.csv",
+                            mime="text/csv",
+                        )
+
+                    with st.expander("Screener universe audit table", expanded=False):
+                        audit_cols = [
+                            "cusip",
+                            "issuer",
+                            "sector",
+                            "maturity_bucket",
+                            "avg_yield",
+                            "benchmark_yield",
+                            "spread_to_benchmark_bps",
+                            "liquidity_score",
+                            "trade_count",
+                            "total_trade_amount",
+                            "latest_trade",
+                            "benchmark_source",
+                            "source_column",
+                        ]
+                        audit_screen = screen_summary[[c for c in audit_cols if c in screen_summary.columns]].copy()
+                        for c in ["avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "liquidity_score"]:
+                            if c in audit_screen.columns:
+                                audit_screen[c] = pd.to_numeric(audit_screen[c], errors="coerce").round(2)
+                        st.dataframe(audit_screen.head(5000), use_container_width=True, hide_index=True)
 
 
 section_anchor("spread-movement", "Spread Movement Heatmap")
