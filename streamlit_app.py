@@ -3157,10 +3157,17 @@ else:
                 "trade_amount",
                 "trade_type",
             ]
-            audit_cols = [c for c in audit_cols if c in dealer_df.columns]
+
+            # Remove missing columns and duplicate column names while preserving order.
+            # This matters when dealer_trade_type_col itself is "trade_type".
+            audit_cols = list(dict.fromkeys([c for c in audit_cols if c in dealer_df.columns]))
+
+            dealer_audit_display = dealer_df[audit_cols].copy()
+            dealer_audit_display = dealer_audit_display.loc[:, ~dealer_audit_display.columns.duplicated()].copy()
+
             st.caption(f"Side classification source column: `{dealer_trade_type_col}`.")
             st.dataframe(
-                dealer_df[audit_cols].sort_values("trade_date", ascending=False).head(5000),
+                dealer_audit_display.sort_values("trade_date", ascending=False).head(5000),
                 use_container_width=True,
                 hide_index=True,
             )
