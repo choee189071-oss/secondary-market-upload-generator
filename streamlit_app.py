@@ -169,13 +169,14 @@ def section_directory():
 <a href="#curve-shape">10. Curve Shape Analytics</a> ·
 <a href="#dealer-proxy">11. Dealer Proxy</a> ·
 <a href="#security-screener">12. Security Screener</a> ·
-<a href="#spread-movement">13. Spread Movement</a> ·
-<a href="#cusip-drilldown">13. CUSIP Drilldown</a> ·
-<a href="#rv-positioning">14. RV Positioning Map</a> ·
-<a href="#liquidity">15. Liquidity</a> ·
-<a href="#bond-master">16. Bond Master</a> ·
-<a href="#trade-detail">17. Trade Detail</a> ·
-<a href="#downloads">18. Downloads</a>
+<a href="#recommendation-engine">13. Recommendation Narrative</a> ·
+<a href="#spread-movement">14. Spread Movement</a> ·
+<a href="#cusip-drilldown">15. CUSIP Drilldown</a> ·
+<a href="#rv-positioning">16. RV Positioning Map</a> ·
+<a href="#liquidity">17. Liquidity</a> ·
+<a href="#bond-master">18. Bond Master</a> ·
+<a href="#trade-detail">19. Trade Detail</a> ·
+<a href="#downloads">20. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1094,18 +1095,37 @@ with st.sidebar:
 <a href="#yield-relative-value">3. Yield & Relative Value</a><br>
 &nbsp;&nbsp;• Yield trend<br>
 &nbsp;&nbsp;• Spread to benchmark<br>
-<a href="#spread-level">4. Current Spread Level</a><br>
+<a href="#issuer-curve">4. Issuer Curve vs Benchmark</a><br>
+&nbsp;&nbsp;• Curve vs MMD / benchmark<br>
+<a href="#spread-level">5. Current Spread Level</a><br>
 &nbsp;&nbsp;• Spread curve<br>
 &nbsp;&nbsp;• Spread level heatmap<br>
-<a href="#spread-movement">5. Spread Movement</a><br>
-&nbsp;&nbsp;• Movement heatmap<br>
-<a href="#rv-positioning">6. RV Positioning Map</a><br>
+<a href="#spread-attribution">6. Spread Attribution</a><br>
+&nbsp;&nbsp;• Pitchbook-style waterfall<br>
+<a href="#market-narrative">7. Market Narrative & Opportunity Map</a><br>
+&nbsp;&nbsp;• Timeline + quadrant labels<br>
+<a href="#peer-rv">8. Peer RV Comparison</a><br>
+&nbsp;&nbsp;• Issuer vs issuer spreads<br>
+<a href="#historical-spread">9. Historical Spread Percentile</a><br>
+&nbsp;&nbsp;• Current spread vs history<br>
+<a href="#curve-shape">10. Curve Shape Analytics</a><br>
+&nbsp;&nbsp;• Slope + butterfly diagnostics<br>
+<a href="#dealer-proxy">11. Dealer Behavior Proxy</a><br>
+&nbsp;&nbsp;• Buy/sell imbalance when available<br>
+<a href="#security-screener">12. Security Screener</a><br>
+&nbsp;&nbsp;• Find top RV candidates<br>
+<a href="#recommendation-engine">13. Recommendation Narrative</a><br>
+&nbsp;&nbsp;• Rule-based market commentary<br>
+<a href="#spread-movement">14. Spread Movement</a><br>
+&nbsp;&nbsp;• Widening / tightening heatmap<br>
+<a href="#cusip-drilldown">15. CUSIP Opportunity Drilldown</a><br>
+&nbsp;&nbsp;• Bond-level drivers<br>
+<a href="#rv-positioning">16. RV Positioning Map</a><br>
 &nbsp;&nbsp;• Liquidity vs spread<br>
-&nbsp;&nbsp;• Cheap/rich quadrants<br>
-<a href="#liquidity">7. Liquidity Analysis</a><br>
-<a href="#bond-master">8. Bond Master</a><br>
-<a href="#trade-detail">9. Trade Detail</a><br>
-<a href="#downloads">10. Downloads</a>
+<a href="#liquidity">17. Liquidity Analysis</a><br>
+<a href="#bond-master">18. Bond Master</a><br>
+<a href="#trade-detail">19. Trade Detail</a><br>
+<a href="#downloads">20. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -3856,6 +3876,426 @@ else:
                             if c in audit_screen.columns:
                                 audit_screen[c] = pd.to_numeric(audit_screen[c], errors="coerce").round(2)
                         st.dataframe(audit_screen.head(5000), use_container_width=True, hide_index=True)
+
+
+
+section_anchor("recommendation-engine", "Trade Recommendation Narrative Engine")
+with st.expander("Methodology: rule-based recommendation narrative", expanded=False):
+    st.markdown(
+        """
+This section generates a **rule-driven market commentary** from the analytics already shown in the dashboard.
+
+It is intentionally not an AI black box. Each phrase is triggered by a transparent data rule.
+
+**Signals used when available:**
+
+- **Spread movement:** whether the selected maturity bucket widened/tightened over the chosen lookback window.
+- **Historical percentile:** whether the current spread is wide/tight versus its own history.
+- **Liquidity:** whether the bucket remains tradable based on trade count, amount traded, and recency.
+- **Peer comparison:** whether the selected issuer screens wide/tight versus uploaded peers.
+- **Dealer flow proxy:** whether observed trade type/side suggests buy-heavy or sell-heavy activity.
+
+**Example rule mapping:**
+
+| Data trigger | Narrative phrase |
+|---|---|
+| Spread change > +15 bp | widened materially |
+| Historical percentile > 90th | near the upper end of its historical range |
+| Liquidity score > 70 | while maintaining above-average liquidity |
+| Wider than peer median by > 10 bp | screens wide versus uploaded peers |
+| Sell imbalance > 25% | flow appears sell-heavy |
+
+**Important limitation:**
+
+This is a screening commentary, not an investment recommendation. It should be reviewed alongside credit fundamentals, call structure, tax status, and actual executable market levels.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD/benchmark curve file to enable rule-based recommendation commentary.")
+else:
+    rec_col1, rec_col2, rec_col3 = st.columns([1, 1, 1])
+    with rec_col1:
+        rec_bucket = st.selectbox(
+            "Narrative Maturity Bucket",
+            ["Short", "10Y", "20Y", "30Y"],
+            index=3,
+            key="rec_bucket",
+        )
+    with rec_col2:
+        rec_rating = st.selectbox(
+            "Narrative Benchmark",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            key="rec_rating",
+        )
+    with rec_col3:
+        rec_window_label = st.selectbox(
+            "Narrative Lookback",
+            ["1W", "1M", "3M", "6M", "1Y"],
+            index=1,
+            key="rec_window",
+        )
+
+    rec_window_days = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}[rec_window_label]
+
+    # -----------------------------
+    # Signal 1: spread movement + current spread
+    # -----------------------------
+    rec_obs = build_spread_observations(
+        market_df=market_df,
+        mmd_df=mmd_df,
+        issuer=selected_issuer,
+        rating=rec_rating,
+    )
+
+    narrative_lines = []
+    evidence_rows = []
+
+    current_spread = pd.NA
+    spread_change = pd.NA
+    historical_percentile = pd.NA
+    liquidity_score = pd.NA
+    peer_gap = pd.NA
+    amount_imbalance = pd.NA
+
+    if rec_obs.empty:
+        st.warning("No overlapping issuer trade dates and benchmark dates were found for narrative generation.")
+    else:
+        rec_obs = rec_obs.copy()
+        rec_obs["trade_date"] = pd.to_datetime(rec_obs["trade_date"], errors="coerce").dt.normalize()
+        rec_obs = rec_obs[
+            (rec_obs["maturity_bucket"] == rec_bucket)
+            & rec_obs["spread_to_benchmark_bps"].notna()
+        ].sort_values("trade_date")
+
+        if rec_obs.empty:
+            st.warning(f"No spread observations found for {selected_issuer} / {rec_bucket}.")
+        else:
+            latest_row = rec_obs.iloc[-1]
+            latest_date = latest_row["trade_date"]
+            current_spread = float(latest_row["spread_to_benchmark_bps"])
+            target_date = latest_date - pd.Timedelta(days=rec_window_days)
+            hist_candidates = rec_obs[rec_obs["trade_date"] <= target_date]
+
+            if not hist_candidates.empty:
+                hist_row = hist_candidates.iloc[-1]
+                historical_spread = float(hist_row["spread_to_benchmark_bps"])
+                spread_change = current_spread - historical_spread
+            else:
+                historical_spread = pd.NA
+
+            # Historical percentile uses up to 1Y of history when available.
+            hist_1y = rec_obs[rec_obs["trade_date"] >= latest_date - pd.Timedelta(days=365)].copy()
+            hist_values = pd.to_numeric(hist_1y["spread_to_benchmark_bps"], errors="coerce").dropna()
+            if len(hist_values) >= 2:
+                historical_percentile = float((hist_values <= current_spread).mean() * 100)
+
+            evidence_rows.append({
+                "Signal": "Current spread",
+                "Value": f"{current_spread:+.1f} bp",
+                "Rule / Source": f"Latest {rec_bucket} spread to {rec_rating}",
+            })
+            if pd.notna(spread_change):
+                evidence_rows.append({
+                    "Signal": f"{rec_window_label} spread movement",
+                    "Value": f"{spread_change:+.1f} bp",
+                    "Rule / Source": "Latest spread minus historical spread at/before lookback target date",
+                })
+            if pd.notna(historical_percentile):
+                evidence_rows.append({
+                    "Signal": "Historical percentile",
+                    "Value": f"{historical_percentile:.0f}th",
+                    "Rule / Source": "Current spread percentile versus latest 1Y spread observations",
+                })
+
+            # Movement phrase.
+            if pd.notna(spread_change):
+                if spread_change >= 15:
+                    movement_phrase = f"{rec_bucket} widened materially by {spread_change:+.1f} bp over {rec_window_label}"
+                elif spread_change >= 5:
+                    movement_phrase = f"{rec_bucket} widened modestly by {spread_change:+.1f} bp over {rec_window_label}"
+                elif spread_change <= -15:
+                    movement_phrase = f"{rec_bucket} tightened materially by {spread_change:+.1f} bp over {rec_window_label}"
+                elif spread_change <= -5:
+                    movement_phrase = f"{rec_bucket} tightened modestly by {spread_change:+.1f} bp over {rec_window_label}"
+                else:
+                    movement_phrase = f"{rec_bucket} was broadly stable over {rec_window_label}"
+                narrative_lines.append(f"{selected_issuer} {movement_phrase} versus the {rec_rating} benchmark.")
+            else:
+                narrative_lines.append(
+                    f"{selected_issuer} {rec_bucket} currently screens at {current_spread:+.1f} bp versus the {rec_rating} benchmark."
+                )
+
+            # Historical phrase.
+            if pd.notna(historical_percentile):
+                if historical_percentile >= 90:
+                    narrative_lines.append(
+                        f"Current spread sits near the upper end of its recent historical range ({historical_percentile:.0f}th percentile)."
+                    )
+                elif historical_percentile >= 75:
+                    narrative_lines.append(
+                        f"Current spread screens wide versus recent history ({historical_percentile:.0f}th percentile)."
+                    )
+                elif historical_percentile <= 10:
+                    narrative_lines.append(
+                        f"Current spread sits near the tight end of its recent historical range ({historical_percentile:.0f}th percentile)."
+                    )
+                elif historical_percentile <= 25:
+                    narrative_lines.append(
+                        f"Current spread screens tight versus recent history ({historical_percentile:.0f}th percentile)."
+                    )
+                else:
+                    narrative_lines.append(
+                        f"Current spread is close to its normal recent historical range ({historical_percentile:.0f}th percentile)."
+                    )
+
+    # -----------------------------
+    # Signal 2: liquidity proxy
+    # -----------------------------
+    rec_trades = market_df[
+        (market_df["issuer"] == selected_issuer)
+        & (market_df["maturity_bucket"] == rec_bucket)
+    ].copy()
+
+    if not rec_trades.empty:
+        rec_trades["trade_date"] = pd.to_datetime(rec_trades["trade_date"], errors="coerce").dt.normalize()
+        if "trade_amount" in rec_trades.columns:
+            rec_trades["trade_amount"] = pd.to_numeric(rec_trades["trade_amount"], errors="coerce").fillna(0)
+        else:
+            rec_trades["trade_amount"] = 0.0
+
+        rec_trades = rec_trades.dropna(subset=["trade_date"])
+        if not rec_trades.empty:
+            latest_trade_date = rec_trades["trade_date"].max()
+            rec_trade_window = rec_trades[rec_trades["trade_date"] >= latest_trade_date - pd.Timedelta(days=rec_window_days)].copy()
+
+            if not rec_trade_window.empty:
+                trade_count = len(rec_trade_window)
+                total_trade_amount = rec_trade_window["trade_amount"].sum()
+                days_since_last = (pd.Timestamp.today().normalize() - latest_trade_date).days
+
+                # Simple bounded liquidity proxy.
+                trade_count_score = min(trade_count / 10, 1) * 35
+                amount_score = min(total_trade_amount / 5_000_000, 1) * 35
+                recency_score = max(0, 1 - min(days_since_last / 180, 1)) * 30
+                liquidity_score = trade_count_score + amount_score + recency_score
+
+                evidence_rows.append({
+                    "Signal": "Liquidity score",
+                    "Value": f"{liquidity_score:.1f}",
+                    "Rule / Source": "35% trade count + 35% par traded + 30% recency proxy",
+                })
+                evidence_rows.append({
+                    "Signal": "Window trade count",
+                    "Value": f"{trade_count:,}",
+                    "Rule / Source": f"Trades in selected {rec_window_label} window",
+                })
+                evidence_rows.append({
+                    "Signal": "Window par traded",
+                    "Value": f"{total_trade_amount:,.0f}",
+                    "Rule / Source": f"Total par traded in selected {rec_window_label} window",
+                })
+
+                if liquidity_score >= 70:
+                    narrative_lines.append("The bucket maintains above-average liquidity based on recent trade count, par traded, and recency.")
+                elif liquidity_score >= 45:
+                    narrative_lines.append("Liquidity appears moderate; execution quality should still be checked at the CUSIP level.")
+                else:
+                    narrative_lines.append("Liquidity appears limited, so any apparent cheapness may include a meaningful liquidity premium.")
+
+    # -----------------------------
+    # Signal 3: peer comparison proxy
+    # -----------------------------
+    try:
+        if "sector" in market_df.columns and selected_sector and selected_sector != "Unknown":
+            peer_universe = market_df[
+                market_df["sector"].astype(str) == str(selected_sector)
+            ].copy()
+        else:
+            peer_universe = market_df.copy()
+
+        peer_universe = peer_universe[
+            (peer_universe["issuer"].astype(str) != str(selected_issuer))
+            & (peer_universe["maturity_bucket"] == rec_bucket)
+        ].copy()
+
+        if not peer_universe.empty and pd.notna(current_spread):
+            peer_universe["trade_date"] = pd.to_datetime(peer_universe["trade_date"], errors="coerce").dt.normalize()
+            peer_universe["yield"] = pd.to_numeric(peer_universe["yield"], errors="coerce")
+            peer_universe = peer_universe.dropna(subset=["trade_date", "yield"])
+            if not peer_universe.empty:
+                latest_peer_date = peer_universe["trade_date"].max()
+                peer_universe = peer_universe[
+                    peer_universe["trade_date"] >= latest_peer_date - pd.Timedelta(days=rec_window_days)
+                ].copy()
+
+                if not peer_universe.empty:
+                    date_col = _detect_mmd_date_column(mmd_df)
+                    if date_col is not None:
+                        peer_mmd = mmd_df.copy()
+                        peer_mmd[date_col] = pd.to_datetime(peer_mmd[date_col], errors="coerce")
+                        peer_mmd = peer_mmd.dropna(subset=[date_col])
+                        peer_mmd = peer_mmd[peer_mmd[date_col].dt.normalize() <= latest_peer_date].sort_values(date_col)
+                        if not peer_mmd.empty:
+                            peer_latest_mmd = peer_mmd.iloc[[-1]].copy()
+                            peer_tenor = MMD_BUCKET_MAP.get(rec_bucket, "10Y")
+                            peer_bench, _peer_meta = get_benchmark_curve(peer_latest_mmd, peer_tenor, rec_rating)
+                            if peer_bench is not None and pd.notna(peer_bench.iloc[0]):
+                                peer_benchmark_yield = float(peer_bench.iloc[0])
+                                peer_summary_for_narrative = (
+                                    peer_universe.groupby("issuer", as_index=False)
+                                    .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"))
+                                )
+                                peer_summary_for_narrative["peer_spread_bps"] = (
+                                    peer_summary_for_narrative["avg_yield"] - peer_benchmark_yield
+                                ) * 100
+                                peer_median = peer_summary_for_narrative["peer_spread_bps"].median()
+                                peer_gap = current_spread - peer_median
+
+                                evidence_rows.append({
+                                    "Signal": "Peer gap",
+                                    "Value": f"{peer_gap:+.1f} bp",
+                                    "Rule / Source": f"Selected issuer spread minus uploaded peer median in {rec_bucket}",
+                                })
+
+                                if peer_gap >= 10:
+                                    narrative_lines.append(
+                                        f"The issuer screens {peer_gap:+.1f} bp wide to the uploaded peer median in the same bucket."
+                                    )
+                                elif peer_gap <= -10:
+                                    narrative_lines.append(
+                                        f"The issuer screens {abs(peer_gap):.1f} bp tight to the uploaded peer median in the same bucket."
+                                    )
+                                else:
+                                    narrative_lines.append(
+                                        "The issuer screens broadly in line with the uploaded peer median."
+                                    )
+    except Exception as exc:
+        evidence_rows.append({
+            "Signal": "Peer comparison",
+            "Value": "Unavailable",
+            "Rule / Source": f"Peer narrative skipped: {exc}",
+        })
+
+    # -----------------------------
+    # Signal 4: dealer flow proxy
+    # -----------------------------
+    dealer_col = None
+    for candidate_col in ["trade_type", "side", "buy_sell", "customer_side", "dealer_side"]:
+        if candidate_col in market_df.columns:
+            dealer_col = candidate_col
+            break
+
+    if dealer_col is not None:
+        try:
+            flow_df = market_df[
+                (market_df["issuer"] == selected_issuer)
+                & (market_df["maturity_bucket"] == rec_bucket)
+            ].copy()
+            flow_df["trade_date"] = pd.to_datetime(flow_df["trade_date"], errors="coerce").dt.normalize()
+            if "trade_amount" in flow_df.columns:
+                flow_df["trade_amount"] = pd.to_numeric(flow_df["trade_amount"], errors="coerce").fillna(0)
+            else:
+                flow_df["trade_amount"] = 0.0
+            flow_df = flow_df.dropna(subset=["trade_date"])
+            if not flow_df.empty:
+                latest_flow_date = flow_df["trade_date"].max()
+                flow_df = flow_df[flow_df["trade_date"] >= latest_flow_date - pd.Timedelta(days=rec_window_days)].copy()
+
+            def rec_classify_side(value: object) -> str:
+                t = str(value).strip().lower()
+                if any(token in t for token in ["sell", "sold", "sld", "customer sell", "cust sell", "cs"]):
+                    return "Sell"
+                if any(token in t for token in ["buy", "bought", "purchase", "customer buy", "cust buy", "cb"]):
+                    return "Buy"
+                if t == "s":
+                    return "Sell"
+                if t == "b":
+                    return "Buy"
+                return "Other"
+
+            if not flow_df.empty:
+                flow_df["flow_side"] = flow_df[dealer_col].map(rec_classify_side)
+                buy_amt = flow_df.loc[flow_df["flow_side"] == "Buy", "trade_amount"].sum()
+                sell_amt = flow_df.loc[flow_df["flow_side"] == "Sell", "trade_amount"].sum()
+                denom = buy_amt + sell_amt
+                if denom > 0:
+                    amount_imbalance = (sell_amt - buy_amt) / denom
+                    evidence_rows.append({
+                        "Signal": "Dealer / flow imbalance",
+                        "Value": f"{amount_imbalance:+.1%}",
+                        "Rule / Source": f"(Sell amount - Buy amount) / total classified amount from `{dealer_col}`",
+                    })
+                    if amount_imbalance >= 0.25:
+                        narrative_lines.append("Classified flow appears sell-heavy, which may indicate customer selling pressure.")
+                    elif amount_imbalance <= -0.25:
+                        narrative_lines.append("Classified flow appears buy-heavy, which may indicate stronger demand.")
+        except Exception as exc:
+            evidence_rows.append({
+                "Signal": "Dealer / flow imbalance",
+                "Value": "Unavailable",
+                "Rule / Source": f"Flow narrative skipped: {exc}",
+            })
+
+    # -----------------------------
+    # Recommendation label
+    # -----------------------------
+    score = 0
+    if pd.notna(spread_change) and spread_change >= 15:
+        score += 1
+    if pd.notna(historical_percentile) and historical_percentile >= 75:
+        score += 1
+    if pd.notna(liquidity_score) and liquidity_score >= 60:
+        score += 1
+    if pd.notna(peer_gap) and peer_gap >= 10:
+        score += 1
+    if pd.notna(amount_imbalance) and amount_imbalance >= 0.25:
+        score += 0.5
+
+    if score >= 3:
+        recommendation_label = "Potential Relative Value Candidate"
+    elif score >= 2:
+        recommendation_label = "Watchlist Candidate"
+    elif score <= 0.5 and pd.notna(historical_percentile) and historical_percentile <= 25:
+        recommendation_label = "Potentially Rich / Lower Priority"
+    else:
+        recommendation_label = "Neutral / Needs More Evidence"
+
+    rec_m1, rec_m2, rec_m3, rec_m4 = st.columns(4)
+    rec_m1.metric("Narrative Signal", recommendation_label)
+    rec_m2.metric("Current Spread", "N/A" if pd.isna(current_spread) else f"{current_spread:+.1f} bp")
+    rec_m3.metric("Spread Movement", "N/A" if pd.isna(spread_change) else f"{spread_change:+.1f} bp")
+    rec_m4.metric("Historical Percentile", "N/A" if pd.isna(historical_percentile) else f"{historical_percentile:.0f}th")
+
+    if narrative_lines:
+        st.markdown("### Generated Commentary")
+        commentary_text = " ".join(narrative_lines)
+        st.info(commentary_text)
+    else:
+        st.info("Not enough data was available to generate a recommendation narrative for the selected inputs.")
+
+    if evidence_rows:
+        st.markdown("### Evidence Trail")
+        evidence_df = pd.DataFrame(evidence_rows)
+        st.dataframe(evidence_df, use_container_width=True, hide_index=True)
+
+    with st.expander("Rule thresholds used in this narrative", expanded=False):
+        rule_df = pd.DataFrame(
+            [
+                {"Rule": "Material widening", "Threshold": "Spread movement >= +15 bp"},
+                {"Rule": "Material tightening", "Threshold": "Spread movement <= -15 bp"},
+                {"Rule": "Historically wide", "Threshold": "Historical percentile >= 75th"},
+                {"Rule": "Very historically wide", "Threshold": "Historical percentile >= 90th"},
+                {"Rule": "Above-average liquidity", "Threshold": "Liquidity score >= 70"},
+                {"Rule": "Moderate liquidity", "Threshold": "Liquidity score 45–70"},
+                {"Rule": "Wide versus peers", "Threshold": "Peer gap >= +10 bp"},
+                {"Rule": "Tight versus peers", "Threshold": "Peer gap <= -10 bp"},
+                {"Rule": "Sell-heavy flow", "Threshold": "Flow imbalance >= +25%"},
+                {"Rule": "Buy-heavy flow", "Threshold": "Flow imbalance <= -25%"},
+            ]
+        )
+        st.dataframe(rule_df, use_container_width=True, hide_index=True)
 
 
 section_anchor("spread-movement", "Spread Movement Heatmap")
