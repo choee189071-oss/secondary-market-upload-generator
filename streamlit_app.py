@@ -208,6 +208,184 @@ def rating_spread_table() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _detect_mmd_date_column(mmd_df: pd.DataFrame) -> str | None:
+    """Find the MMD date column across common naming variants."""
+    if "Date" in mmd_df.columns:
+        return "Date"
+    if "date" in mmd_df.columns:
+        return "date"
+    return None
+
+
+def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
+    """Convert MMD wide curve data into long benchmark data by maturity bucket.
+
+    Output columns:
+    - trade_date: normalized MMD date
+    - maturity_bucket: Short / 10Y / 20Y / 30Y
+    - benchmark_rating
+    - mmd_tenor
+    - benchmark_yield
+    - rating_spread_bps
+    """
+    if mmd_df.empty:
+        return pd.DataFrame()
+
+    date_col = _detect_mmd_date_column(mmd_df)
+    if date_col is None:
+        return pd.DataFrame()
+
+    frames = []
+    mmd_base = mmd_df.copy()
+    mmd_base[date_col] = pd.to_datetime(mmd_base[date_col], errors="coerce")
+    mmd_base = mmd_base.dropna(subset=[date_col])
+
+    for bucket, tenor in MMD_BUCKET_MAP.items():
+        if bucket == "All" or tenor not in mmd_base.columns:
+            continue
+        benchmark_yield = benchmark_curve_from_mmd(mmd_base, tenor, rating)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "trade_date": mmd_base[date_col].dt.normalize(),
+                    "maturity_bucket": bucket,
+                    "benchmark_rating": rating,
+                    "mmd_tenor": tenor,
+                    "benchmark_yield": benchmark_yield,
+                    "rating_spread_bps": RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(tenor, 0.00) * 100,
+                }
+            )
+        )
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def build_spread_observations(
+    market_df: pd.DataFrame,
+    mmd_df: pd.DataFrame,
+    issuer: str,
+    rating: str,
+) -> pd.DataFrame:
+    """Build daily issuer spread observations by maturity bucket.
+
+    Spread is calculated in basis points:
+    (average issuer trade yield - synthetic benchmark yield) * 100.
+    """
+    required_cols = {"issuer", "trade_date", "maturity_bucket", "yield"}
+    if market_df.empty or mmd_df.empty or not required_cols.issubset(set(market_df.columns)):
+        return pd.DataFrame()
+
+    issuer_df = market_df[market_df["issuer"] == issuer].copy()
+    issuer_df = issuer_df[issuer_df["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])]
+    if issuer_df.empty:
+        return pd.DataFrame()
+
+    issuer_df["trade_date"] = pd.to_datetime(issuer_df["trade_date"], errors="coerce").dt.normalize()
+    issuer_df["yield"] = pd.to_numeric(issuer_df["yield"], errors="coerce")
+    issuer_df = issuer_df.dropna(subset=["trade_date", "yield", "maturity_bucket"])
+
+    daily_issuer = (
+        issuer_df.groupby(["trade_date", "maturity_bucket"], as_index=False)
+        .agg(
+            avg_yield=("yield", "mean"),
+            trade_count=("yield", "count"),
+            total_trade_amount=("trade_amount", "sum") if "trade_amount" in issuer_df.columns else ("yield", "count"),
+        )
+    )
+
+    benchmark_long = make_benchmark_long(mmd_df, rating)
+    if benchmark_long.empty:
+        return pd.DataFrame()
+
+    spread_obs = daily_issuer.merge(
+        benchmark_long,
+        on=["trade_date", "maturity_bucket"],
+        how="inner",
+    )
+    if spread_obs.empty:
+        return pd.DataFrame()
+
+    spread_obs["spread_to_benchmark_bps"] = (
+        spread_obs["avg_yield"] - spread_obs["benchmark_yield"]
+    ) * 100
+    return spread_obs.sort_values(["maturity_bucket", "trade_date"])
+
+
+def build_spread_movement_heatmap_data(
+    spread_obs: pd.DataFrame,
+    windows: dict[str, int] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return heatmap matrix and audit table for spread movement.
+
+    For each maturity bucket and lookback window:
+    Spread movement = latest available spread - historical spread at/before target date.
+
+    Positive value means widening; negative value means tightening.
+    """
+    if windows is None:
+        windows = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+
+    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+    matrix = pd.DataFrame(index=maturity_order, columns=list(windows.keys()), dtype="float")
+    audit_rows = []
+
+    if spread_obs.empty:
+        return matrix, pd.DataFrame(audit_rows)
+
+    obs = spread_obs.copy()
+    obs["trade_date"] = pd.to_datetime(obs["trade_date"], errors="coerce").dt.normalize()
+    obs = obs.dropna(subset=["trade_date", "spread_to_benchmark_bps"])
+
+    for bucket in maturity_order:
+        bucket_obs = obs[obs["maturity_bucket"] == bucket].sort_values("trade_date")
+        if bucket_obs.empty:
+            continue
+
+        latest_row = bucket_obs.iloc[-1]
+        latest_date = latest_row["trade_date"]
+        latest_spread = latest_row["spread_to_benchmark_bps"]
+
+        for label, days in windows.items():
+            target_date = latest_date - pd.Timedelta(days=days)
+            historical_candidates = bucket_obs[bucket_obs["trade_date"] <= target_date]
+            if historical_candidates.empty:
+                audit_rows.append(
+                    {
+                        "maturity_bucket": bucket,
+                        "window": label,
+                        "latest_date": latest_date,
+                        "latest_spread_bps": latest_spread,
+                        "target_date": target_date,
+                        "historical_date": pd.NaT,
+                        "historical_spread_bps": pd.NA,
+                        "spread_movement_bps": pd.NA,
+                        "note": "No historical observation at or before target date",
+                    }
+                )
+                continue
+
+            historical_row = historical_candidates.iloc[-1]
+            historical_date = historical_row["trade_date"]
+            historical_spread = historical_row["spread_to_benchmark_bps"]
+            movement = latest_spread - historical_spread
+            matrix.loc[bucket, label] = movement
+            audit_rows.append(
+                {
+                    "maturity_bucket": bucket,
+                    "window": label,
+                    "latest_date": latest_date,
+                    "latest_spread_bps": latest_spread,
+                    "target_date": target_date,
+                    "historical_date": historical_date,
+                    "historical_spread_bps": historical_spread,
+                    "spread_movement_bps": movement,
+                    "note": "Positive = widening; negative = tightening",
+                }
+            )
+
+    return matrix, pd.DataFrame(audit_rows)
+
+
 def _normalize_col_name(name: object) -> str:
     """Normalize external column names so Munipro/Excel variants can be detected."""
     text = str(name).strip().lower()
@@ -680,6 +858,92 @@ Where:
                 )
     elif show_spread_to_benchmark and mmd_df.empty:
         st.info("Upload an MMD curve file to enable AAA/AA/A/BBB benchmark curves and spread-to-benchmark analytics.")
+
+st.header("Spread Movement Heatmap")
+with st.expander("Methodology: spread movement heatmap", expanded=False):
+    st.markdown(
+        """
+This heatmap shows whether the selected issuer has become richer or cheaper versus the selected benchmark curve.
+
+**Calculation:**
+
+`Issuer Spread = (Average Issuer Trade Yield - Synthetic Benchmark Yield) × 100`
+
+`Spread Movement = Latest Available Issuer Spread - Historical Issuer Spread`
+
+**How to read it:**
+
+- **Positive / red = widening**: issuer spread increased versus the benchmark; the issuer/bucket became cheaper or underperformed.
+- **Negative / green = tightening**: issuer spread decreased versus the benchmark; the issuer/bucket became richer or outperformed.
+- Rows are maturity buckets. Columns are lookback windows.
+- Because municipal bonds can trade sparsely, the historical value uses the latest available observation at or before the lookback target date.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD curve file to enable the spread movement heatmap.")
+else:
+    heatmap_col1, heatmap_col2 = st.columns([1, 2])
+    with heatmap_col1:
+        heatmap_rating = st.selectbox(
+            "Heatmap Benchmark Curve",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            help="AAA uses uploaded MMD directly. Other ratings use MMD plus the visible rating-spread assumptions.",
+        )
+    with heatmap_col2:
+        st.caption(
+            "Cells show change in spread, in basis points, from the latest available observation to each lookback window."
+        )
+
+    heatmap_spread_obs = build_spread_observations(
+        market_df=market_df,
+        mmd_df=mmd_df,
+        issuer=selected_issuer,
+        rating=heatmap_rating,
+    )
+
+    if heatmap_spread_obs.empty:
+        st.warning(
+            "No overlapping issuer trade dates and benchmark dates were found for the heatmap. "
+            "Check that the MMD file has Date plus 5Y/10Y/20Y/30Y columns, and that trade dates overlap with the MMD history."
+        )
+    else:
+        heatmap_matrix, heatmap_audit = build_spread_movement_heatmap_data(heatmap_spread_obs)
+        if heatmap_matrix.isna().all().all():
+            st.info("Not enough historical spread observations to calculate movement across the selected windows yet.")
+        else:
+            heatmap_text = heatmap_matrix.applymap(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+            heatmap_fig = px.imshow(
+                heatmap_matrix.astype(float),
+                x=heatmap_matrix.columns,
+                y=heatmap_matrix.index,
+                color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
+                color_continuous_midpoint=0,
+                aspect="auto",
+                title=f"{selected_issuer} Spread Movement vs {heatmap_rating} Curve",
+                labels={"x": "Lookback Window", "y": "Maturity Bucket", "color": "Spread Movement (bps)"},
+            )
+            heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
+            heatmap_fig.update_layout(height=420)
+            st.plotly_chart(heatmap_fig, use_container_width=True)
+
+            latest_obs_date = heatmap_spread_obs["trade_date"].max()
+            st.caption(
+                f"Latest available spread observation used: {latest_obs_date.strftime('%Y-%m-%d')}. "
+                "Positive values indicate spread widening; negative values indicate spread tightening."
+            )
+
+            with st.expander("Heatmap calculation audit table", expanded=False):
+                display_cols = [
+                    "maturity_bucket", "window", "latest_date", "latest_spread_bps", "target_date",
+                    "historical_date", "historical_spread_bps", "spread_movement_bps", "note",
+                ]
+                audit_display = heatmap_audit[[c for c in display_cols if c in heatmap_audit.columns]].copy()
+                for c in ["latest_spread_bps", "historical_spread_bps", "spread_movement_bps"]:
+                    if c in audit_display.columns:
+                        audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
+                st.dataframe(audit_display, use_container_width=True, hide_index=True)
 
 st.header("Liquidity / Trading Frequency Analysis")
 with st.expander("Methodology", expanded=False):
