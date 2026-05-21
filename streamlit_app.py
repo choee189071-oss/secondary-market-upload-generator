@@ -158,6 +158,14 @@ TRADE_OPTIONAL = ["trade_datetime", "description", "maturity_trade", "calculatio
 
 MMD_REQUIRED = ["date"]
 MMD_RECOMMENDED = ["1Y", "2Y", "5Y", "10Y", "20Y", "30Y"]
+CURVE_TEMPLATE_COLUMNS = [
+    "date", "5Y", "10Y", "20Y", "30Y",
+    "AA+_5Y", "AA+_10Y", "AA+_20Y", "AA+_30Y",
+    "AA_5Y", "AA_10Y", "AA_20Y", "AA_30Y",
+    "AA-_5Y", "AA-_10Y", "AA-_20Y", "AA-_30Y",
+    "A_5Y", "A_10Y", "A_20Y", "A_30Y",
+    "BBB_5Y", "BBB_10Y", "BBB_20Y", "BBB_30Y",
+]
 
 
 # -----------------------------------------------------------------------------
@@ -185,15 +193,102 @@ MMD_BUCKET_MAP = {"Short": "5Y", "10Y": "10Y", "20Y": "20Y", "30Y": "30Y", "All"
 BENCHMARK_RATINGS = list(RATING_SPREADS.keys())
 
 
-def benchmark_curve_from_mmd(mmd_plot: pd.DataFrame, mmd_col: str, rating: str) -> pd.Series:
-    """Return synthetic benchmark yield = MMD AAA yield + rating spread.
+def _curve_column_key(name: object) -> str:
+    """Normalize curve column names for flexible matching.
 
-    MMD columns are assumed to be in yield percentage terms. Rating spreads are
-    also stored in percentage-point terms, so 0.10 means 10 basis points.
+    Examples that should match the same idea:
+    - AA 10Y, AA_10Y, AA-10Y
+    - AAA 5Y, MMD 5Y, 5Y
+    - AA+ 20Y, AA Plus 20Y
     """
-    base_curve = pd.to_numeric(mmd_plot[mmd_col], errors="coerce")
-    spread_adjustment = RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(mmd_col, 0.00)
-    return base_curve + spread_adjustment
+    text = str(name).strip().lower()
+    text = text.replace("+", " plus ").replace("-", " minus ")
+    keep = []
+    for ch in text:
+        keep.append(ch if ch.isalnum() else " ")
+    return " ".join("".join(keep).split()).replace(" ", "")
+
+
+def _rating_key(rating: str) -> str:
+    return _curve_column_key(rating)
+
+
+def find_uploaded_benchmark_column(mmd_df: pd.DataFrame, tenor: str, rating: str) -> str | None:
+    """Find an explicitly uploaded benchmark column for rating + tenor.
+
+    Priority logic:
+    1. Exact user-provided curve columns, e.g. AA_10Y / AA 10Y / AA Curve 10Y.
+    2. For AAA only, also allow MMD/vanilla tenor columns, e.g. 10Y.
+
+    This lets users upload vendor/internal AA/A/BBB curves. If they do not,
+    the app falls back to MMD AAA + transparent spread assumptions.
+    """
+    normalized = {_curve_column_key(c): c for c in mmd_df.columns}
+    r = _rating_key(rating)
+    t = _curve_column_key(tenor)
+
+    candidates = [
+        f"{r}{t}",
+        f"{r}curve{t}",
+        f"{r}yield{t}",
+        f"{r}muni{t}",
+        f"{r}mmd{t}",
+        f"{t}{r}",
+    ]
+
+    if rating == "AAA":
+        candidates.extend([
+            t,
+            f"mmd{t}",
+            f"mmdaaa{t}",
+            f"aaammd{t}",
+            f"aaacurve{t}",
+        ])
+
+    for key in candidates:
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def get_benchmark_curve(mmd_plot: pd.DataFrame, tenor: str, rating: str) -> tuple[pd.Series, dict] | tuple[None, dict]:
+    """Return benchmark yield and metadata.
+
+    Priority:
+    - Use explicitly uploaded rating curve column when available.
+    - Otherwise use uploaded AAA/MMD tenor column + visible rating-spread assumption.
+    """
+    explicit_col = find_uploaded_benchmark_column(mmd_plot, tenor, rating)
+    if explicit_col is not None:
+        return pd.to_numeric(mmd_plot[explicit_col], errors="coerce"), {
+            "benchmark_source": "Uploaded curve",
+            "source_column": explicit_col,
+            "rating_spread_bps": 0.0,
+        }
+
+    base_col = find_uploaded_benchmark_column(mmd_plot, tenor, "AAA")
+    if base_col is None:
+        return None, {
+            "benchmark_source": "Unavailable",
+            "source_column": None,
+            "rating_spread_bps": pd.NA,
+        }
+
+    base_curve = pd.to_numeric(mmd_plot[base_col], errors="coerce")
+    spread_adjustment = RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(tenor, 0.00)
+    return base_curve + spread_adjustment, {
+        "benchmark_source": "Modeled from MMD + spread assumption" if rating != "AAA" else "Uploaded MMD / AAA curve",
+        "source_column": base_col,
+        "rating_spread_bps": spread_adjustment * 100,
+    }
+
+
+def benchmark_curve_from_mmd(mmd_plot: pd.DataFrame, mmd_col: str, rating: str) -> pd.Series:
+    """Backward-compatible wrapper used by older chart blocks."""
+    curve, _meta = get_benchmark_curve(mmd_plot, mmd_col, rating)
+    if curve is None:
+        return pd.Series([pd.NA] * len(mmd_plot), index=mmd_plot.index, dtype="float")
+    return curve
 
 
 def rating_spread_table() -> pd.DataFrame:
@@ -241,9 +336,11 @@ def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
     mmd_base = mmd_base.dropna(subset=[date_col])
 
     for bucket, tenor in MMD_BUCKET_MAP.items():
-        if bucket == "All" or tenor not in mmd_base.columns:
+        if bucket == "All":
             continue
-        benchmark_yield = benchmark_curve_from_mmd(mmd_base, tenor, rating)
+        benchmark_yield, meta = get_benchmark_curve(mmd_base, tenor, rating)
+        if benchmark_yield is None:
+            continue
         frames.append(
             pd.DataFrame(
                 {
@@ -252,7 +349,9 @@ def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
                     "benchmark_rating": rating,
                     "mmd_tenor": tenor,
                     "benchmark_yield": benchmark_yield,
-                    "rating_spread_bps": RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(tenor, 0.00) * 100,
+                    "rating_spread_bps": meta.get("rating_spread_bps"),
+                    "benchmark_source": meta.get("benchmark_source"),
+                    "source_column": meta.get("source_column"),
                 }
             )
         )
@@ -436,6 +535,8 @@ def build_spread_level_data(
                         "spread_to_benchmark_bps": pd.NA,
                         "mmd_tenor": MMD_BUCKET_MAP.get(bucket),
                         "rating_spread_bps": RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(MMD_BUCKET_MAP.get(bucket, "10Y"), 0.00) * 100,
+                        "benchmark_source": "No matching benchmark/date",
+                        "source_column": pd.NA,
                         "trade_count": pd.NA,
                         "total_trade_amount": pd.NA,
                         "note": "No overlapping issuer trade and benchmark observation",
@@ -456,6 +557,8 @@ def build_spread_level_data(
                     "spread_to_benchmark_bps": spread_level,
                     "mmd_tenor": latest.get("mmd_tenor"),
                     "rating_spread_bps": latest.get("rating_spread_bps"),
+                    "benchmark_source": latest.get("benchmark_source"),
+                    "source_column": latest.get("source_column"),
                     "trade_count": latest.get("trade_count"),
                     "total_trade_amount": latest.get("total_trade_amount"),
                     "note": "Latest available spread observation for maturity bucket and benchmark",
@@ -654,6 +757,7 @@ with st.sidebar:
     with st.expander("Download blank templates"):
         template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Bond template CSV", "bond_master_template.csv")
         template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
+        template_download_button(CURVE_TEMPLATE_COLUMNS, "Benchmark curve template CSV", "benchmark_curve_template.csv")
 
 if bond_file is None or not trade_files:
     st.info("Upload a bond master file and at least one trade-history file to generate the dashboard.")
@@ -800,8 +904,9 @@ This section groups uploaded trade rows by **trade date** and **issuer**, then p
 
 **Benchmark logic:**
 
-- **AAA Curve = uploaded MMD curve.**
-- **AA+/AA/AA-/A+/A/A-/BBB Curves = MMD + transparent rating-spread assumptions.**
+- **AAA Curve = uploaded MMD / AAA curve.**
+- **If users upload explicit AA+/AA/AA-/A+/A/A-/BBB curve columns, the app uses those directly.**
+- **If explicit non-AAA curves are missing, the app falls back to MMD + transparent rating-spread assumptions.**
 - Spread assumptions are **maturity-adjusted**. For example, the 30Y AA spread can be wider than the 5Y AA spread.
 - Units in the code are percentage points: `0.10 = 10 bps`.
 - This is an internal analytical benchmark, not a live Bloomberg/BVAL/ICE curve. Replace the assumptions with firm-approved or vendor curves when available.
@@ -817,7 +922,7 @@ benchmark_ratings = st.multiselect(
     "Benchmark Curve(s)",
     BENCHMARK_RATINGS,
     default=["AAA", "AA"],
-    help="AAA is the uploaded MMD curve. Other ratings are approximated as MMD plus the visible rating-spread assumptions above.",
+    help="Priority: uploaded rating curve columns first; otherwise MMD/AAA plus the visible rating-spread assumptions above.",
 )
 show_spread_to_benchmark = st.checkbox(
     "Show issuer spread to selected benchmark",
@@ -856,9 +961,9 @@ else:
     benchmark_daily = pd.DataFrame()
     benchmark_ready = False
     if not mmd_df.empty and benchmark_ratings:
-        date_col = "Date" if "Date" in mmd_df.columns else "date" if "date" in mmd_df.columns else None
+        date_col = _detect_mmd_date_column(mmd_df)
         mmd_col = MMD_BUCKET_MAP.get(compare_bucket, "10Y")
-        if date_col and mmd_col in mmd_df.columns:
+        if date_col:
             mmd_plot = mmd_df.copy()
             mmd_plot[date_col] = pd.to_datetime(mmd_plot[date_col], errors="coerce")
             mmd_plot = mmd_plot.dropna(subset=[date_col])
@@ -866,8 +971,12 @@ else:
                 mmd_plot = mmd_plot[(mmd_plot[date_col].dt.date >= start_date) & (mmd_plot[date_col].dt.date <= end_date)]
 
             benchmark_frames = []
+            unavailable_ratings = []
             for rating in benchmark_ratings:
-                y = benchmark_curve_from_mmd(mmd_plot, mmd_col, rating)
+                y, meta = get_benchmark_curve(mmd_plot, mmd_col, rating)
+                if y is None:
+                    unavailable_ratings.append(rating)
+                    continue
                 fig.add_scatter(
                     x=mmd_plot[date_col],
                     y=y,
@@ -880,13 +989,20 @@ else:
                         "benchmark_rating": rating,
                         "benchmark_yield": y,
                         "mmd_tenor": mmd_col,
-                        "rating_spread_bps": RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(mmd_col, 0.00) * 100,
+                        "rating_spread_bps": meta.get("rating_spread_bps"),
+                        "benchmark_source": meta.get("benchmark_source"),
+                        "source_column": meta.get("source_column"),
                     })
                 )
             benchmark_daily = pd.concat(benchmark_frames, ignore_index=True) if benchmark_frames else pd.DataFrame()
             benchmark_ready = not benchmark_daily.empty
+            if unavailable_ratings:
+                st.warning(
+                    "Some benchmark curves could not be built because neither an uploaded curve column nor a usable AAA/MMD base tenor was found: "
+                    + ", ".join(unavailable_ratings)
+                )
         else:
-            st.warning(f"MMD benchmark could not be plotted because the file does not contain a usable date column and {mmd_col} tenor column.")
+            st.warning("Benchmark curves could not be plotted because the curve file does not contain a usable date column.")
 
     fig.update_layout(xaxis_title="Trade Date", yaxis_title="Yield (%)", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
@@ -908,7 +1024,7 @@ else:
                 color="issuer",
                 line_dash="benchmark_rating",
                 markers=True,
-                hover_data=["benchmark_rating", "mmd_tenor", "rating_spread_bps", "trade_count", "total_trade_amount"],
+                hover_data=["benchmark_rating", "mmd_tenor", "benchmark_source", "source_column", "rating_spread_bps", "trade_count", "total_trade_amount"],
                 title="Issuer Spread to Selected Benchmark Curve(s)",
             )
             spread_fig.update_layout(xaxis_title="Trade Date", yaxis_title="Spread to Benchmark (bps)", hovermode="x unified")
@@ -923,13 +1039,13 @@ For each issuer/date/rating benchmark:
 
 Where:
 
-`Synthetic Benchmark Yield = MMD Tenor Yield + Rating Spread Assumption`
+`Benchmark Yield = uploaded rating curve if available; otherwise MMD/AAA Tenor Yield + Rating Spread Assumption`
                     """
                 )
                 st.dataframe(
                     spread_to_benchmark[[
                         "trade_date", "issuer", "benchmark_rating", "mmd_tenor", "avg_yield",
-                        "benchmark_yield", "rating_spread_bps", "spread_to_benchmark_bps",
+                        "benchmark_yield", "benchmark_source", "source_column", "rating_spread_bps", "spread_to_benchmark_bps",
                         "trade_count", "total_trade_amount",
                     ]].sort_values(["trade_date", "issuer", "benchmark_rating"], ascending=[False, True, True]).head(1000),
                     use_container_width=True,
@@ -946,11 +1062,11 @@ This section shows where the selected issuer is trading **now** versus transpare
 
 **Calculation:**
 
-`Current Spread Level = (Average Issuer Trade Yield - Synthetic Benchmark Yield) × 100`
+`Current Spread Level = (Average Issuer Trade Yield - Benchmark Yield) × 100`
 
 Where:
 
-`Synthetic Benchmark Yield = MMD AAA Curve + Rating Spread Assumption`
+`Benchmark Yield = uploaded rating curve if available; otherwise MMD/AAA Curve + Rating Spread Assumption`
 
 **How to read it:**
 
@@ -970,7 +1086,7 @@ else:
             "Spread Level Benchmark Curves",
             BENCHMARK_RATINGS,
             default=[r for r in ["AAA", "AA", "A", "BBB"] if r in BENCHMARK_RATINGS],
-            help="AAA uses uploaded MMD directly. Other ratings use MMD plus the visible rating-spread assumptions.",
+            help="Priority: uploaded rating curve columns first; otherwise MMD/AAA plus the visible rating-spread assumptions.",
         )
     with level_col2:
         st.caption(
@@ -990,7 +1106,7 @@ else:
         if level_matrix.isna().all().all():
             st.warning(
                 "No overlapping issuer trade dates and benchmark dates were found for current spread levels. "
-                "Check that the MMD file has Date plus 5Y/10Y/20Y/30Y columns, and that trade dates overlap with the MMD history."
+                "Check that the curve file has a Date column plus either 5Y/10Y/20Y/30Y base columns or explicit rating curve columns such as AA_10Y, and that trade dates overlap with the curve history."
             )
         else:
             level_text = level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
@@ -1063,7 +1179,7 @@ else:
             with st.expander("Current spread level audit table", expanded=False):
                 display_cols = [
                     "maturity_bucket", "benchmark_rating", "latest_date", "avg_yield", "benchmark_yield",
-                    "spread_to_benchmark_bps", "mmd_tenor", "rating_spread_bps", "trade_count",
+                    "spread_to_benchmark_bps", "mmd_tenor", "benchmark_source", "source_column", "rating_spread_bps", "trade_count",
                     "total_trade_amount", "note",
                 ]
                 audit_display = level_audit[[c for c in display_cols if c in level_audit.columns]].copy()
@@ -1080,7 +1196,7 @@ This heatmap shows whether the selected issuer has become richer or cheaper vers
 
 **Calculation:**
 
-`Issuer Spread = (Average Issuer Trade Yield - Synthetic Benchmark Yield) × 100`
+`Issuer Spread = (Average Issuer Trade Yield - Benchmark Yield) × 100`
 
 `Spread Movement = Latest Available Issuer Spread - Historical Issuer Spread`
 
@@ -1102,7 +1218,7 @@ else:
             "Heatmap Benchmark Curve",
             BENCHMARK_RATINGS,
             index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
-            help="AAA uses uploaded MMD directly. Other ratings use MMD plus the visible rating-spread assumptions.",
+            help="Priority: uploaded rating curve columns first; otherwise MMD/AAA plus the visible rating-spread assumptions.",
         )
     with heatmap_col2:
         st.caption(
@@ -1119,7 +1235,7 @@ else:
     if heatmap_spread_obs.empty:
         st.warning(
             "No overlapping issuer trade dates and benchmark dates were found for the heatmap. "
-            "Check that the MMD file has Date plus 5Y/10Y/20Y/30Y columns, and that trade dates overlap with the MMD history."
+            "Check that the curve file has a Date column plus either 5Y/10Y/20Y/30Y base columns or explicit rating curve columns such as AA_10Y, and that trade dates overlap with the curve history."
         )
     else:
         heatmap_matrix, heatmap_audit = build_spread_movement_heatmap_data(heatmap_spread_obs)
