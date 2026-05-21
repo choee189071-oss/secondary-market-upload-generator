@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-import streamlit as st
 
 # =========================
 # Optional OpenAI Support
@@ -20,65 +20,85 @@ try:
     from openai import OpenAI
 
     if "OPENAI_API_KEY" in st.secrets:
-        client = OpenAI(
-            api_key=st.secrets["OPENAI_API_KEY"]
-        )
+        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
         OPENAI_AVAILABLE = True
 
-except Exception as e:
+except Exception:
     OPENAI_AVAILABLE = False
     client = None
 
 
-# =========================
-# Helper Function
-# =========================
+def generate_ai_market_commentary(
+    context_package: dict,
+    manual_market_context: str = "",
+    use_web_search: bool = False,
+    model: str = "gpt-4.1-mini",
+) -> str:
+    """Generate evidence-linked institutional commentary.
 
-def generate_ai_commentary(prompt_text):
-    """
-    Generate institutional-style market commentary
-    using OpenAI API.
+    The model should only synthesize the analytics and market context provided.
+    If web search is enabled, OpenAI's hosted web search tool may add current public context.
+    The dashboard remains fully functional even if the OpenAI package/key/tool is unavailable.
     """
 
     if not OPENAI_AVAILABLE or client is None:
-        return "AI commentary unavailable. OpenAI package or API key not configured."
-
-    try:
-
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-
-            messages=[
-                {
-                    "role": "system",
-                    "content": """
-You are an institutional municipal bond market strategist.
-
-Your task:
-- Write concise professional secondary-market commentary.
-- Use only the evidence provided.
-- Do NOT invent market data.
-- Do NOT hallucinate issuer-specific events.
-- Explain spread movement, liquidity behavior,
-  peer positioning, and historical context.
-- Sound like buy-side or broker-dealer strategy commentary.
-                    """
-                },
-
-                {
-                    "role": "user",
-                    "content": prompt_text
-                }
-            ],
-
-            temperature=0.3,
-            max_tokens=300
+        return (
+            "AI commentary unavailable. Confirm that `openai` is in requirements.txt "
+            "and `OPENAI_API_KEY` is configured in Streamlit Secrets."
         )
 
-        return response.choices[0].message.content
+    system_prompt = """
+You are an institutional municipal bond market strategist.
+
+Write concise, evidence-linked secondary-market commentary for a muni trading / public finance team.
+
+Rules:
+- Use ONLY the provided dashboard analytics and provided/retrieved market context.
+- Do NOT invent issuer-specific news, ratings actions, trades, or market events.
+- If market context is missing or weak, say that context is limited.
+- Separate data-backed observations from interpretation.
+- Keep tone professional, like buy-side / broker-dealer strategy commentary.
+- Mention that signals are screening indicators, not investment recommendations.
+- Prefer 3 sections:
+  1) Market Commentary
+  2) Why This May Be Happening
+  3) Evidence Used
+"""
+
+    user_payload = {
+        "task": "Generate institutional municipal secondary-market commentary.",
+        "manual_market_context": manual_market_context,
+        "dashboard_context_package": context_package,
+        "requested_output_format": {
+            "Market Commentary": "2-4 concise bullet points",
+            "Why This May Be Happening": "2-4 concise bullet points tied to evidence",
+            "Evidence Used": "bullet list of exact signals and context used",
+        },
+    }
+
+    try:
+        tools = [{"type": "web_search_preview"}] if use_web_search else []
+
+        response = client.responses.create(
+            model=model,
+            tools=tools,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(user_payload, indent=2, default=str),
+                },
+            ],
+            temperature=0.25,
+            max_output_tokens=900,
+        )
+
+        return response.output_text
 
     except Exception as e:
         return f"AI Commentary Error: {str(e)}"
+
+
 
 from data_utils import (
     build_issuer_master,
@@ -251,7 +271,8 @@ def section_directory():
 <a href="#peer-rv">Peer RV</a> ·
 <a href="#cross-issuer-rv">Cross-Issuer RV</a> ·
 <a href="#historical-spread">Historical Percentile</a> ·
-<a href="#recommendation-engine">Recommendation Narrative</a><br><br>
+<a href="#recommendation-engine">Rule-Based Narrative</a> ·
+<a href="#ai-commentary-studio">AI Commentary Studio</a><br><br>
 
 <b>4. Risk, flow & opportunity screening</b><br>
 <a href="#curve-shape">Curve Shape</a> ·
@@ -1197,7 +1218,8 @@ with st.sidebar:
 <a href="#peer-rv">9. Peer RV Comparison</a><br>
 <a href="#cross-issuer-rv">10. Cross-Issuer RV Analytics</a><br>
 <a href="#historical-spread">11. Historical Spread Percentile</a><br>
-<a href="#recommendation-engine">12. Recommendation Narrative</a><br><br>
+<a href="#recommendation-engine">12. Rule-Based Recommendation</a><br>
+<a href="#ai-commentary-studio">13. AI Commentary Studio</a><br><br>
 
 <b>Risk / Flow / Screening</b><br>
 <a href="#curve-shape">13. Curve Shape Analytics</a><br>
@@ -4986,6 +5008,318 @@ else:
         )
         st.dataframe(rule_df, use_container_width=True, hide_index=True)
 
+
+
+
+section_anchor("ai-commentary-studio", "AI Commentary Studio")
+with st.expander("Methodology: AI commentary studio", expanded=False):
+    st.markdown(
+        """
+This section adds an **AI writing layer** on top of the dashboard analytics.
+
+**Design principle:**
+
+The AI should not invent the analysis. The dashboard first creates a structured evidence package from spreads, liquidity, historical percentile, peer gap, curve shape, and selected trade activity. The AI then converts that package into polished institutional commentary.
+
+**Recommended use:**
+
+- Use **Dashboard Analytics Only** when you want controlled commentary from internal numbers.
+- Add **manual market context** when you already know what happened during the period.
+- Enable **web search** only when you want current public market/news context. Review the output carefully.
+
+**Important limitation:**
+
+This commentary is for market discussion and screening. It is not an investment recommendation, credit opinion, or substitute for trader/PM judgment.
+        """
+    )
+
+ai_col1, ai_col2, ai_col3, ai_col4 = st.columns([1, 1, 1, 1])
+with ai_col1:
+    ai_bucket = st.selectbox(
+        "AI Commentary Bucket",
+        ["Short", "10Y", "20Y", "30Y"],
+        index=3,
+        key="ai_commentary_bucket",
+    )
+with ai_col2:
+    ai_rating = st.selectbox(
+        "AI Benchmark",
+        BENCHMARK_RATINGS,
+        index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+        key="ai_commentary_rating",
+    )
+with ai_col3:
+    ai_period = st.selectbox(
+        "AI Commentary Period",
+        ["1W", "1M", "3M", "6M", "1Y"],
+        index=1,
+        key="ai_commentary_period",
+    )
+with ai_col4:
+    ai_model = st.selectbox(
+        "AI Model",
+        ["gpt-4.1-mini", "gpt-4o-mini"],
+        index=0,
+        key="ai_commentary_model",
+    )
+
+ai_period_days = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}[ai_period]
+
+manual_market_context = st.text_area(
+    "Optional market / sector context",
+    placeholder=(
+        "Example: Treasury curve steepened during the period; long-duration munis underperformed; "
+        "utility sector saw weaker tone after fund outflows..."
+    ),
+    height=120,
+    key="manual_ai_market_context",
+)
+
+use_ai_web_search = st.checkbox(
+    "Use OpenAI web search for public market context",
+    value=False,
+    key="use_ai_web_search",
+    help=(
+        "Optional. This can retrieve public web context, but the output should still be reviewed. "
+        "For sensitive internal work, keep this off and provide manual context."
+    ),
+)
+
+# -----------------------------
+# Build structured context package
+# -----------------------------
+ai_context = {
+    "issuer": selected_issuer,
+    "sector": selected_sector,
+    "bucket": ai_bucket,
+    "benchmark": ai_rating,
+    "period": ai_period,
+    "analytics_as_of": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+    "executive_snapshot": {
+        "bonds": len(issuer_bonds),
+        "trades_current_filter": len(issuer_trades),
+        "latest_trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else None,
+    },
+    "signals": {},
+    "market_context_request": {
+        "sector": selected_sector,
+        "issuer": selected_issuer,
+        "period_days": ai_period_days,
+        "requested_public_context": [
+            "Treasury curve / rates move",
+            "municipal market tone",
+            "fund flows if available",
+            "sector-specific headlines",
+            "issuer-specific public news only if available",
+        ],
+    },
+}
+
+# Spread movement and historical percentile.
+try:
+    ai_obs = build_spread_observations(
+        market_df=market_df,
+        mmd_df=mmd_df,
+        issuer=selected_issuer,
+        rating=ai_rating,
+    )
+    ai_obs = ai_obs.copy()
+    ai_obs["trade_date"] = pd.to_datetime(ai_obs["trade_date"], errors="coerce").dt.normalize()
+    ai_obs = ai_obs[
+        (ai_obs["maturity_bucket"] == ai_bucket)
+        & ai_obs["spread_to_benchmark_bps"].notna()
+    ].sort_values("trade_date")
+
+    if not ai_obs.empty:
+        ai_latest = ai_obs.iloc[-1]
+        ai_latest_date = ai_latest["trade_date"]
+        ai_current_spread = float(ai_latest["spread_to_benchmark_bps"])
+        ai_target_date = ai_latest_date - pd.Timedelta(days=ai_period_days)
+        ai_hist_candidates = ai_obs[ai_obs["trade_date"] <= ai_target_date]
+
+        if not ai_hist_candidates.empty:
+            ai_hist_row = ai_hist_candidates.iloc[-1]
+            ai_spread_change = ai_current_spread - float(ai_hist_row["spread_to_benchmark_bps"])
+        else:
+            ai_spread_change = None
+
+        ai_1y = ai_obs[ai_obs["trade_date"] >= ai_latest_date - pd.Timedelta(days=365)]
+        ai_values = pd.to_numeric(ai_1y["spread_to_benchmark_bps"], errors="coerce").dropna()
+        ai_percentile = float((ai_values <= ai_current_spread).mean() * 100) if len(ai_values) >= 2 else None
+
+        ai_context["signals"]["spread"] = {
+            "current_spread_bps": round(ai_current_spread, 2),
+            "spread_change_bps": None if ai_spread_change is None else round(ai_spread_change, 2),
+            "historical_percentile_1y": None if ai_percentile is None else round(ai_percentile, 1),
+            "latest_spread_date": ai_latest_date.strftime("%Y-%m-%d"),
+            "benchmark_source": ai_latest.get("benchmark_source"),
+            "benchmark_column": ai_latest.get("source_column"),
+        }
+except Exception as exc:
+    ai_context["signals"]["spread_error"] = str(exc)
+
+# Liquidity proxy.
+try:
+    ai_trades = market_df[
+        (market_df["issuer"] == selected_issuer)
+        & (market_df["maturity_bucket"] == ai_bucket)
+    ].copy()
+    ai_trades["trade_date"] = pd.to_datetime(ai_trades["trade_date"], errors="coerce").dt.normalize()
+    if "trade_amount" in ai_trades.columns:
+        ai_trades["trade_amount"] = pd.to_numeric(ai_trades["trade_amount"], errors="coerce").fillna(0)
+    else:
+        ai_trades["trade_amount"] = 0.0
+    ai_trades = ai_trades.dropna(subset=["trade_date"])
+    if not ai_trades.empty:
+        ai_latest_trade = ai_trades["trade_date"].max()
+        ai_trade_window = ai_trades[ai_trades["trade_date"] >= ai_latest_trade - pd.Timedelta(days=ai_period_days)].copy()
+        ai_trade_count = len(ai_trade_window)
+        ai_total_amount = float(ai_trade_window["trade_amount"].sum())
+        ai_days_since_last = int((pd.Timestamp.today().normalize() - ai_latest_trade).days)
+        ai_liq_score = (
+            min(ai_trade_count / 10, 1) * 35
+            + min(ai_total_amount / 5_000_000, 1) * 35
+            + max(0, 1 - min(ai_days_since_last / 180, 1)) * 30
+        )
+
+        ai_context["signals"]["liquidity"] = {
+            "liquidity_score_proxy": round(ai_liq_score, 1),
+            "trade_count": int(ai_trade_count),
+            "total_trade_amount": round(ai_total_amount, 0),
+            "days_since_last_trade": ai_days_since_last,
+        }
+except Exception as exc:
+    ai_context["signals"]["liquidity_error"] = str(exc)
+
+# Peer gap proxy.
+try:
+    if "sector" in market_df.columns and selected_sector and selected_sector != "Unknown":
+        ai_peer_universe = market_df[
+            (market_df["sector"].astype(str) == str(selected_sector))
+            & (market_df["issuer"].astype(str) != str(selected_issuer))
+            & (market_df["maturity_bucket"] == ai_bucket)
+        ].copy()
+    else:
+        ai_peer_universe = market_df[
+            (market_df["issuer"].astype(str) != str(selected_issuer))
+            & (market_df["maturity_bucket"] == ai_bucket)
+        ].copy()
+
+    if not ai_peer_universe.empty and "spread" in ai_context["signals"]:
+        ai_peer_universe["trade_date"] = pd.to_datetime(ai_peer_universe["trade_date"], errors="coerce").dt.normalize()
+        ai_peer_universe["yield"] = pd.to_numeric(ai_peer_universe["yield"], errors="coerce")
+        ai_peer_universe = ai_peer_universe.dropna(subset=["trade_date", "yield"])
+        if not ai_peer_universe.empty:
+            ai_peer_latest = ai_peer_universe["trade_date"].max()
+            ai_peer_universe = ai_peer_universe[
+                ai_peer_universe["trade_date"] >= ai_peer_latest - pd.Timedelta(days=ai_period_days)
+            ].copy()
+
+            ai_date_col = _detect_mmd_date_column(mmd_df)
+            if ai_date_col is not None and not ai_peer_universe.empty:
+                ai_peer_mmd = mmd_df.copy()
+                ai_peer_mmd[ai_date_col] = pd.to_datetime(ai_peer_mmd[ai_date_col], errors="coerce")
+                ai_peer_mmd = ai_peer_mmd.dropna(subset=[ai_date_col])
+                ai_peer_mmd = ai_peer_mmd[
+                    ai_peer_mmd[ai_date_col].dt.normalize() <= ai_peer_latest
+                ].sort_values(ai_date_col)
+
+                if not ai_peer_mmd.empty:
+                    ai_peer_tenor = MMD_BUCKET_MAP.get(ai_bucket, "10Y")
+                    ai_peer_bench, _ = get_benchmark_curve(ai_peer_mmd.iloc[[-1]], ai_peer_tenor, ai_rating)
+                    if ai_peer_bench is not None and pd.notna(ai_peer_bench.iloc[0]):
+                        ai_peer_benchmark_yield = float(ai_peer_bench.iloc[0])
+                        ai_peer_summary = (
+                            ai_peer_universe.groupby("issuer", as_index=False)
+                            .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"))
+                        )
+                        ai_peer_summary["peer_spread_bps"] = (
+                            ai_peer_summary["avg_yield"] - ai_peer_benchmark_yield
+                        ) * 100
+                        ai_peer_median = float(ai_peer_summary["peer_spread_bps"].median())
+                        ai_peer_gap = ai_context["signals"]["spread"]["current_spread_bps"] - ai_peer_median
+
+                        ai_context["signals"]["peer_comparison"] = {
+                            "peer_median_spread_bps": round(ai_peer_median, 2),
+                            "peer_gap_bps": round(ai_peer_gap, 2),
+                            "peer_count": int(len(ai_peer_summary)),
+                        }
+except Exception as exc:
+    ai_context["signals"]["peer_error"] = str(exc)
+
+# Curve shape snapshot if enough points.
+try:
+    ai_curve = market_df[market_df["issuer"] == selected_issuer].copy()
+    ai_curve["trade_date"] = pd.to_datetime(ai_curve["trade_date"], errors="coerce").dt.normalize()
+    ai_curve["yield"] = pd.to_numeric(ai_curve["yield"], errors="coerce")
+    ai_curve = ai_curve.dropna(subset=["trade_date", "yield", "maturity_bucket"])
+    ai_curve = ai_curve[ai_curve["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])]
+    if not ai_curve.empty:
+        ai_curve_latest = ai_curve["trade_date"].max()
+        ai_curve_window = ai_curve[ai_curve["trade_date"] >= ai_curve_latest - pd.Timedelta(days=30)]
+        ai_curve_summary = ai_curve_window.groupby("maturity_bucket")["yield"].mean().to_dict()
+        ai_context["signals"]["curve_shape"] = {
+            "short_yield": ai_curve_summary.get("Short"),
+            "ten_yield": ai_curve_summary.get("10Y"),
+            "twenty_yield": ai_curve_summary.get("20Y"),
+            "thirty_yield": ai_curve_summary.get("30Y"),
+        }
+        if "10Y" in ai_curve_summary and "30Y" in ai_curve_summary:
+            ai_context["signals"]["curve_shape"]["10s30s_slope_pct"] = round(
+                ai_curve_summary["30Y"] - ai_curve_summary["10Y"], 4
+            )
+except Exception as exc:
+    ai_context["signals"]["curve_error"] = str(exc)
+
+st.subheader("AI Context Package")
+with st.expander("Review structured evidence before sending to AI", expanded=False):
+    st.json(ai_context)
+
+if use_ai_web_search:
+    st.warning(
+        "Web search is enabled. The AI may retrieve public context from the web. "
+        "Do not include confidential or proprietary information in manual context."
+    )
+
+if st.button("Generate AI Institutional Commentary", key="generate_ai_institutional_commentary"):
+    with st.spinner("Generating evidence-linked commentary..."):
+        commentary = generate_ai_market_commentary(
+            context_package=ai_context,
+            manual_market_context=manual_market_context,
+            use_web_search=use_ai_web_search,
+            model=ai_model,
+        )
+        st.session_state["latest_ai_commentary"] = commentary
+
+if "latest_ai_commentary" in st.session_state:
+    st.subheader("Generated Institutional Commentary")
+    st.markdown(st.session_state["latest_ai_commentary"])
+
+    st.download_button(
+        label="Download AI Commentary Markdown",
+        data=st.session_state["latest_ai_commentary"].encode("utf-8"),
+        file_name=f"{selected_issuer}_ai_market_commentary.md".replace(" ", "_"),
+        mime="text/markdown",
+    )
+
+with st.expander("Where should AI commentary live?", expanded=False):
+    st.markdown(
+        """
+I recommend **not** putting an AI button inside every single section.
+
+A cleaner institutional structure is:
+
+1. **Section-level rule commentary** stays deterministic and auditable.
+2. **AI Commentary Studio** synthesizes across multiple sections.
+3. Specific section AI can be added later only for the highest-value areas:
+   - Historical Spread Percentile
+   - Peer / Cross-Issuer RV
+   - Security Screener
+   - Recommendation Narrative
+
+This keeps cost lower, avoids repeated/conflicting narratives, and makes the output easier for a team to review.
+        """
+    )
 
 
 section_anchor("scenario-shock", "Scenario Shock Analysis")
