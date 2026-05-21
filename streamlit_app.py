@@ -160,6 +160,54 @@ MMD_REQUIRED = ["date"]
 MMD_RECOMMENDED = ["1Y", "2Y", "5Y", "10Y", "20Y", "30Y"]
 
 
+# -----------------------------------------------------------------------------
+# Benchmark curve assumptions
+# -----------------------------------------------------------------------------
+# MMD is treated as the AAA municipal benchmark curve. Non-AAA curves are
+# approximated by adding transparent, maturity-adjusted credit spread assumptions
+# to the selected MMD tenor. Units are percentage points, not basis points:
+#   0.10 = 10 bps.
+# These assumptions are intentionally visible in the app so the team can review,
+# override, or replace them with paid/internal curve data later.
+
+RATING_SPREADS: dict[str, dict[str, float]] = {
+    "AAA": {"5Y": 0.00, "10Y": 0.00, "20Y": 0.00, "30Y": 0.00},
+    "AA+": {"5Y": 0.08, "10Y": 0.10, "20Y": 0.12, "30Y": 0.15},
+    "AA": {"5Y": 0.10, "10Y": 0.14, "20Y": 0.17, "30Y": 0.20},
+    "AA-": {"5Y": 0.14, "10Y": 0.18, "20Y": 0.22, "30Y": 0.28},
+    "A+": {"5Y": 0.22, "10Y": 0.28, "20Y": 0.35, "30Y": 0.42},
+    "A": {"5Y": 0.30, "10Y": 0.38, "20Y": 0.48, "30Y": 0.58},
+    "A-": {"5Y": 0.42, "10Y": 0.55, "20Y": 0.68, "30Y": 0.82},
+    "BBB": {"5Y": 0.60, "10Y": 0.80, "20Y": 1.00, "30Y": 1.20},
+}
+
+MMD_BUCKET_MAP = {"Short": "5Y", "10Y": "10Y", "20Y": "20Y", "30Y": "30Y", "All": "10Y"}
+BENCHMARK_RATINGS = list(RATING_SPREADS.keys())
+
+
+def benchmark_curve_from_mmd(mmd_plot: pd.DataFrame, mmd_col: str, rating: str) -> pd.Series:
+    """Return synthetic benchmark yield = MMD AAA yield + rating spread.
+
+    MMD columns are assumed to be in yield percentage terms. Rating spreads are
+    also stored in percentage-point terms, so 0.10 means 10 basis points.
+    """
+    base_curve = pd.to_numeric(mmd_plot[mmd_col], errors="coerce")
+    spread_adjustment = RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(mmd_col, 0.00)
+    return base_curve + spread_adjustment
+
+
+def rating_spread_table() -> pd.DataFrame:
+    """User-facing spread assumption table in both percentage points and bps."""
+    rows = []
+    for rating, tenors in RATING_SPREADS.items():
+        row = {"Rating": rating}
+        for tenor, spread_pct in tenors.items():
+            row[f"{tenor} Spread"] = spread_pct
+            row[f"{tenor} Spread (bps)"] = round(spread_pct * 100, 1)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def _normalize_col_name(name: object) -> str:
     """Normalize external column names so Munipro/Excel variants can be detected."""
     text = str(name).strip().lower()
@@ -488,12 +536,37 @@ col4.metric("Trades", f"{len(issuer_trades):,}")
 col5.metric("Latest Trade", issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades")
 
 st.header("Yield Trend / Relative Value Comparison")
-with st.expander("Methodology", expanded=False):
-    st.write("This section groups uploaded trade rows by trade date and issuer, then plots average observed trade yield. If an MMD file is uploaded, the selected maturity bucket is mapped to a benchmark MMD tenor for visual comparison.")
+with st.expander("Methodology: benchmark curve framework", expanded=False):
+    st.markdown(
+        """
+This section groups uploaded trade rows by **trade date** and **issuer**, then plots average observed trade yield.
+
+**Benchmark logic:**
+
+- **AAA Curve = uploaded MMD curve.**
+- **AA+/AA/AA-/A+/A/A-/BBB Curves = MMD + transparent rating-spread assumptions.**
+- Spread assumptions are **maturity-adjusted**. For example, the 30Y AA spread can be wider than the 5Y AA spread.
+- Units in the code are percentage points: `0.10 = 10 bps`.
+- This is an internal analytical benchmark, not a live Bloomberg/BVAL/ICE curve. Replace the assumptions with firm-approved or vendor curves when available.
+        """
+    )
+    st.dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
+
 issuer_choices = uploaded_issuers
 default_compare = [selected_issuer] if selected_issuer in issuer_choices else issuer_choices[:1]
 compare_issuers = st.multiselect("Compare Issuers", issuer_choices, default=default_compare)
 compare_bucket = st.selectbox("Comparison Maturity Bucket", ["All", "Short", "10Y", "20Y", "30Y"], key="compare_bucket")
+benchmark_ratings = st.multiselect(
+    "Benchmark Curve(s)",
+    BENCHMARK_RATINGS,
+    default=["AAA", "AA"],
+    help="AAA is the uploaded MMD curve. Other ratings are approximated as MMD plus the visible rating-spread assumptions above.",
+)
+show_spread_to_benchmark = st.checkbox(
+    "Show issuer spread to selected benchmark",
+    value=True,
+    help="Calculates average issuer yield minus selected benchmark curve for dates where both are available.",
+)
 
 chart_df = market_df[market_df["issuer"].isin(compare_issuers)].copy()
 if compare_bucket != "All":
@@ -523,18 +596,90 @@ else:
         title="Average Trade Yield by Issuer",
     )
 
-    if not mmd_df.empty and st.checkbox("Compare with MMD", value=True):
+    benchmark_daily = pd.DataFrame()
+    benchmark_ready = False
+    if not mmd_df.empty and benchmark_ratings:
         date_col = "Date" if "Date" in mmd_df.columns else "date" if "date" in mmd_df.columns else None
-        mmd_bucket_map = {"Short": "5Y", "10Y": "10Y", "20Y": "20Y", "30Y": "30Y", "All": "10Y"}
-        mmd_col = mmd_bucket_map.get(compare_bucket, "10Y")
+        mmd_col = MMD_BUCKET_MAP.get(compare_bucket, "10Y")
         if date_col and mmd_col in mmd_df.columns:
             mmd_plot = mmd_df.copy()
+            mmd_plot[date_col] = pd.to_datetime(mmd_plot[date_col], errors="coerce")
+            mmd_plot = mmd_plot.dropna(subset=[date_col])
             if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
                 mmd_plot = mmd_plot[(mmd_plot[date_col].dt.date >= start_date) & (mmd_plot[date_col].dt.date <= end_date)]
-            fig.add_scatter(x=mmd_plot[date_col], y=mmd_plot[mmd_col], mode="lines", name=f"MMD {mmd_col}")
+
+            benchmark_frames = []
+            for rating in benchmark_ratings:
+                y = benchmark_curve_from_mmd(mmd_plot, mmd_col, rating)
+                fig.add_scatter(
+                    x=mmd_plot[date_col],
+                    y=y,
+                    mode="lines",
+                    name=f"{rating} Curve ({mmd_col})",
+                )
+                benchmark_frames.append(
+                    pd.DataFrame({
+                        "trade_date": mmd_plot[date_col].dt.normalize(),
+                        "benchmark_rating": rating,
+                        "benchmark_yield": y,
+                        "mmd_tenor": mmd_col,
+                        "rating_spread_bps": RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(mmd_col, 0.00) * 100,
+                    })
+                )
+            benchmark_daily = pd.concat(benchmark_frames, ignore_index=True) if benchmark_frames else pd.DataFrame()
+            benchmark_ready = not benchmark_daily.empty
+        else:
+            st.warning(f"MMD benchmark could not be plotted because the file does not contain a usable date column and {mmd_col} tenor column.")
 
     fig.update_layout(xaxis_title="Trade Date", yaxis_title="Yield (%)", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
+
+    if show_spread_to_benchmark and benchmark_ready and not daily.empty:
+        spread_base = daily.copy()
+        spread_base["trade_date"] = pd.to_datetime(spread_base["trade_date"], errors="coerce").dt.normalize()
+        spread_to_benchmark = spread_base.merge(benchmark_daily, on="trade_date", how="inner")
+        if spread_to_benchmark.empty:
+            st.info("No overlapping dates were found between issuer trades and the selected benchmark curve.")
+        else:
+            spread_to_benchmark["spread_to_benchmark_bps"] = (
+                spread_to_benchmark["avg_yield"] - spread_to_benchmark["benchmark_yield"]
+            ) * 100
+            spread_fig = px.line(
+                spread_to_benchmark.sort_values("trade_date"),
+                x="trade_date",
+                y="spread_to_benchmark_bps",
+                color="issuer",
+                line_dash="benchmark_rating",
+                markers=True,
+                hover_data=["benchmark_rating", "mmd_tenor", "rating_spread_bps", "trade_count", "total_trade_amount"],
+                title="Issuer Spread to Selected Benchmark Curve(s)",
+            )
+            spread_fig.update_layout(xaxis_title="Trade Date", yaxis_title="Spread to Benchmark (bps)", hovermode="x unified")
+            st.plotly_chart(spread_fig, use_container_width=True)
+
+            with st.expander("Spread-to-benchmark calculation details", expanded=False):
+                st.markdown(
+                    """
+For each issuer/date/rating benchmark:
+
+`Spread to Benchmark (bps) = (Average Issuer Trade Yield - Synthetic Benchmark Yield) × 100`
+
+Where:
+
+`Synthetic Benchmark Yield = MMD Tenor Yield + Rating Spread Assumption`
+                    """
+                )
+                st.dataframe(
+                    spread_to_benchmark[[
+                        "trade_date", "issuer", "benchmark_rating", "mmd_tenor", "avg_yield",
+                        "benchmark_yield", "rating_spread_bps", "spread_to_benchmark_bps",
+                        "trade_count", "total_trade_amount",
+                    ]].sort_values(["trade_date", "issuer", "benchmark_rating"], ascending=[False, True, True]).head(1000),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+    elif show_spread_to_benchmark and mmd_df.empty:
+        st.info("Upload an MMD curve file to enable AAA/AA/A/BBB benchmark curves and spread-to-benchmark analytics.")
 
 st.header("Liquidity / Trading Frequency Analysis")
 with st.expander("Methodology", expanded=False):
