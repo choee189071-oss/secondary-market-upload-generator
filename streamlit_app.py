@@ -163,12 +163,13 @@ def section_directory():
 <a href="#issuer-curve">4. Issuer Curve vs Benchmark</a> ·
 <a href="#spread-level">5. Current Spread Level</a> ·
 <a href="#spread-attribution">6. Spread Attribution</a> ·
-<a href="#spread-movement">7. Spread Movement</a> ·
-<a href="#rv-positioning">8. RV Positioning Map</a> ·
-<a href="#liquidity">9. Liquidity</a> ·
-<a href="#bond-master">10. Bond Master</a> ·
-<a href="#trade-detail">11. Trade Detail</a> ·
-<a href="#downloads">12. Downloads</a>
+<a href="#market-narrative">7. Market Narrative & Opportunity Map</a> ·
+<a href="#spread-movement">8. Spread Movement</a> ·
+<a href="#rv-positioning">9. RV Positioning Map</a> ·
+<a href="#liquidity">10. Liquidity</a> ·
+<a href="#bond-master">11. Bond Master</a> ·
+<a href="#trade-detail">12. Trade Detail</a> ·
+<a href="#downloads">13. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -2029,6 +2030,345 @@ else:
                                     ]
                                 )
                                 st.dataframe(audit_df, use_container_width=True, hide_index=True)
+
+
+
+section_anchor("market-narrative", "Market Narrative & Opportunity Map")
+with st.expander("Methodology: market narrative and opportunity map", expanded=False):
+    st.markdown(
+        """
+This section combines recent trading behavior with relative-value positioning.
+
+**Trading Activity Timeline**
+
+- Aggregates selected issuer trades by day.
+- Shows daily trade count and total par traded.
+- Adds a daily average yield line.
+- Generates simple narrative events when activity, volume, or yield moves are unusually high relative to the issuer's recent history.
+
+**Rich / Cheap Quadrant**
+
+- Uses security-level observations.
+- `x = Liquidity Score`
+- `y = Spread to Benchmark` when benchmark data is available; otherwise `y = Average Yield`
+- Vertical and horizontal median lines divide the map into four desk-style zones:
+    - **Cheap + Liquid**: potential buy candidate
+    - **Cheap + Illiquid**: opportunistic / liquidity premium required
+    - **Rich + Liquid**: benchmark-like / monitor
+    - **Rich + Illiquid**: low priority / avoid
+        """
+    )
+
+mn_tab1, mn_tab2 = st.tabs(["Trading Activity Timeline", "Rich / Cheap Quadrant"])
+
+with mn_tab1:
+    if issuer_trades.empty:
+        st.warning("No trade rows found for the selected issuer and filters.")
+    else:
+        timeline_df = issuer_trades.copy()
+        timeline_df["trade_date"] = pd.to_datetime(timeline_df["trade_date"], errors="coerce")
+        timeline_df["yield"] = pd.to_numeric(timeline_df["yield"], errors="coerce")
+        if "trade_amount" in timeline_df.columns:
+            timeline_df["trade_amount"] = pd.to_numeric(timeline_df["trade_amount"], errors="coerce").fillna(0)
+        else:
+            timeline_df["trade_amount"] = 0.0
+
+        timeline_df = timeline_df.dropna(subset=["trade_date"])
+        if timeline_df.empty:
+            st.warning("Timeline cannot be generated because no valid trade dates were found.")
+        else:
+            timeline_daily = (
+                timeline_df.groupby(timeline_df["trade_date"].dt.normalize(), as_index=False)
+                .agg(
+                    trade_date=("trade_date", "first"),
+                    trade_count=("cusip", "count") if "cusip" in timeline_df.columns else ("yield", "count"),
+                    total_trade_amount=("trade_amount", "sum"),
+                    avg_yield=("yield", "mean"),
+                )
+                .sort_values("trade_date")
+            )
+            timeline_daily["yield_change_bp"] = timeline_daily["avg_yield"].diff() * 100
+
+            lookback_options = {
+                "Latest 30D": 30,
+                "Latest 60D": 60,
+                "Latest 90D": 90,
+                "All": None,
+            }
+            timeline_window_label = st.selectbox(
+                "Timeline Window",
+                list(lookback_options.keys()),
+                index=2,
+                key="timeline_window",
+            )
+            timeline_days = lookback_options[timeline_window_label]
+            timeline_plot = timeline_daily.copy()
+            if timeline_days is not None and not timeline_plot.empty:
+                cutoff = timeline_plot["trade_date"].max() - pd.Timedelta(days=timeline_days)
+                timeline_plot = timeline_plot[timeline_plot["trade_date"] >= cutoff].copy()
+
+            if timeline_plot.empty:
+                st.info("No timeline observations are available for the selected window.")
+            else:
+                tl_fig = px.bar(
+                    timeline_plot,
+                    x="trade_date",
+                    y="trade_count",
+                    hover_data={
+                        "total_trade_amount": ":,.0f",
+                        "avg_yield": ":.2f",
+                        "yield_change_bp": ":.1f",
+                    },
+                    title=f"{selected_issuer} Trading Activity Timeline",
+                    labels={
+                        "trade_date": "Trade Date",
+                        "trade_count": "Trade Count",
+                        "total_trade_amount": "Total Trade Amount",
+                        "avg_yield": "Average Yield",
+                        "yield_change_bp": "Daily Yield Change (bp)",
+                    },
+                )
+                tl_fig.add_scatter(
+                    x=timeline_plot["trade_date"],
+                    y=timeline_plot["avg_yield"],
+                    mode="lines+markers",
+                    name="Average Yield",
+                    yaxis="y2",
+                )
+                tl_fig.update_layout(
+                    height=500,
+                    yaxis=dict(title="Trade Count"),
+                    yaxis2=dict(title="Average Yield (%)", overlaying="y", side="right"),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(tl_fig, use_container_width=True)
+
+                amount_fig = px.bar(
+                    timeline_plot,
+                    x="trade_date",
+                    y="total_trade_amount",
+                    title="Daily Total Par Traded",
+                    labels={
+                        "trade_date": "Trade Date",
+                        "total_trade_amount": "Total Trade Amount",
+                    },
+                    hover_data={"trade_count": ":,.0f", "avg_yield": ":.2f"},
+                )
+                amount_fig.update_layout(height=380)
+                st.plotly_chart(amount_fig, use_container_width=True)
+
+                # Simple narrative event detection
+                event_rows = []
+                tc_mean = timeline_daily["trade_count"].mean()
+                tc_std = timeline_daily["trade_count"].std()
+                amt_mean = timeline_daily["total_trade_amount"].mean()
+                amt_std = timeline_daily["total_trade_amount"].std()
+                yield_abs_threshold = 10.0
+
+                for _, row in timeline_plot.iterrows():
+                    notes = []
+                    if pd.notna(tc_std) and tc_std > 0 and row["trade_count"] >= tc_mean + tc_std:
+                        notes.append("Trade count above recent norm")
+                    if pd.notna(amt_std) and amt_std > 0 and row["total_trade_amount"] >= amt_mean + amt_std:
+                        notes.append("Heavy par traded")
+                    if pd.notna(row.get("yield_change_bp")) and abs(row["yield_change_bp"]) >= yield_abs_threshold:
+                        direction = "moved higher" if row["yield_change_bp"] > 0 else "moved lower"
+                        notes.append(f"Average yield {direction} by {row['yield_change_bp']:+.1f} bp")
+                    if notes:
+                        event_rows.append(
+                            {
+                                "Date": row["trade_date"].strftime("%Y-%m-%d"),
+                                "Narrative Signal": "; ".join(notes),
+                                "Trade Count": int(row["trade_count"]),
+                                "Total Trade Amount": row["total_trade_amount"],
+                                "Average Yield": row["avg_yield"],
+                                "Yield Change (bp)": row.get("yield_change_bp"),
+                            }
+                        )
+
+                if event_rows:
+                    st.subheader("Narrative Signals")
+                    events_df = pd.DataFrame(event_rows)
+                    st.dataframe(events_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No unusually large activity/volume/yield-move events were detected in the selected timeline window.")
+
+with mn_tab2:
+    if "liq" not in locals() or liq.empty:
+        st.info("The quadrant map will be available after liquidity metrics are calculated for the selected issuer.")
+    else:
+        quadrant_df = liq.copy()
+
+        # Choose Y-axis: spread to benchmark when available, else avg yield.
+        quadrant_y_col = "avg_yield"
+        quadrant_y_label = "Average Yield (%)"
+        quadrant_source_note = "Using Average Yield because benchmark spread is not available inside this liquidity section."
+
+        if not mmd_df.empty:
+            try:
+                q_rating = st.selectbox(
+                    "Quadrant Benchmark Curve",
+                    BENCHMARK_RATINGS,
+                    index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+                    key="quadrant_benchmark_rating",
+                )
+                q_spread_obs = build_spread_observations(
+                    market_df=market_df,
+                    mmd_df=mmd_df,
+                    issuer=selected_issuer,
+                    rating=q_rating,
+                )
+                if not q_spread_obs.empty and "cusip" in issuer_trades.columns:
+                    # Approximate CUSIP-level benchmark spread by merging the latest bucket-level spread to each CUSIP bucket.
+                    latest_bucket_spread = (
+                        q_spread_obs.sort_values("trade_date")
+                        .groupby("maturity_bucket", as_index=False)
+                        .tail(1)[["maturity_bucket", "spread_to_benchmark_bps"]]
+                    )
+                    if "maturity" in quadrant_df.columns:
+                        pass
+                    if "maturity_bucket" not in quadrant_df.columns and "maturity" in quadrant_df.columns:
+                        # If liquidity table does not retain bucket, infer from maturity when possible.
+                        maturity_tmp = pd.to_datetime(quadrant_df["maturity"], errors="coerce")
+                        years_tmp = (maturity_tmp - pd.Timestamp.today()).dt.days / 365.25
+                        quadrant_df["maturity_bucket"] = pd.cut(
+                            years_tmp,
+                            bins=[-float("inf"), 7, 15, 25, float("inf")],
+                            labels=["Short", "10Y", "20Y", "30Y"],
+                        ).astype("string")
+                    if "maturity_bucket" in quadrant_df.columns:
+                        quadrant_df = quadrant_df.merge(latest_bucket_spread, on="maturity_bucket", how="left")
+                        if quadrant_df["spread_to_benchmark_bps"].notna().any():
+                            quadrant_y_col = "spread_to_benchmark_bps"
+                            quadrant_y_label = f"Spread to {q_rating} Benchmark (bps)"
+                            quadrant_source_note = (
+                                "Using latest available bucket-level spread to benchmark. "
+                                "Higher values generally indicate cheaper relative value."
+                            )
+            except Exception as exc:
+                st.warning(f"Benchmark spread overlay was unavailable, so the quadrant uses average yield. Details: {exc}")
+
+        required_cols = ["liquidity_score", quadrant_y_col]
+        for col in required_cols:
+            if col in quadrant_df.columns:
+                quadrant_df[col] = pd.to_numeric(quadrant_df[col], errors="coerce")
+        quadrant_df = quadrant_df.dropna(subset=[c for c in required_cols if c in quadrant_df.columns])
+
+        if quadrant_df.empty:
+            st.warning("No usable observations were available for the rich/cheap quadrant.")
+        else:
+            valid_buckets = ["Short", "10Y", "20Y", "30Y"]
+            if "maturity_bucket" not in quadrant_df.columns:
+                quadrant_df["maturity_bucket"] = "Unknown"
+            quadrant_df["maturity_bucket"] = quadrant_df["maturity_bucket"].astype(str)
+
+            if "total_trade_amount" not in quadrant_df.columns:
+                quadrant_df["total_trade_amount"] = 1
+            quadrant_df["total_trade_amount"] = pd.to_numeric(
+                quadrant_df["total_trade_amount"], errors="coerce"
+            ).fillna(0).clip(lower=0)
+            if quadrant_df["total_trade_amount"].sum() <= 0:
+                quadrant_df["point_size"] = 10
+                q_size_col = "point_size"
+            else:
+                q_size_col = "total_trade_amount"
+
+            q_median_liq = quadrant_df["liquidity_score"].median()
+            q_median_y = quadrant_df[quadrant_y_col].median()
+
+            quadrant_df["Quadrant"] = "Unclassified"
+            quadrant_df.loc[
+                (quadrant_df["liquidity_score"] >= q_median_liq) & (quadrant_df[quadrant_y_col] >= q_median_y),
+                "Quadrant",
+            ] = "Cheap + Liquid"
+            quadrant_df.loc[
+                (quadrant_df["liquidity_score"] < q_median_liq) & (quadrant_df[quadrant_y_col] >= q_median_y),
+                "Quadrant",
+            ] = "Cheap + Illiquid"
+            quadrant_df.loc[
+                (quadrant_df["liquidity_score"] >= q_median_liq) & (quadrant_df[quadrant_y_col] < q_median_y),
+                "Quadrant",
+            ] = "Rich + Liquid"
+            quadrant_df.loc[
+                (quadrant_df["liquidity_score"] < q_median_liq) & (quadrant_df[quadrant_y_col] < q_median_y),
+                "Quadrant",
+            ] = "Rich + Illiquid"
+
+            st.caption(quadrant_source_note)
+
+            q_fig = px.scatter(
+                quadrant_df,
+                x="liquidity_score",
+                y=quadrant_y_col,
+                size=q_size_col,
+                size_max=38,
+                color="Quadrant",
+                hover_name="cusip" if "cusip" in quadrant_df.columns else None,
+                hover_data=[c for c in [
+                    "maturity_bucket", "liquidity_tier", "trade_count", "recent_90d_trades",
+                    "days_since_last_trade", "avg_yield", "spread_to_benchmark_bps",
+                    "total_trade_amount", "outstanding_amount"
+                ] if c in quadrant_df.columns],
+                title=f"{selected_issuer} Rich / Cheap Liquidity Quadrant",
+                labels={
+                    "liquidity_score": "Liquidity Score",
+                    quadrant_y_col: quadrant_y_label,
+                    "total_trade_amount": "Total Trade Amount",
+                },
+            )
+            q_fig.add_vline(x=q_median_liq, line_dash="dash", opacity=0.45)
+            q_fig.add_hline(y=q_median_y, line_dash="dash", opacity=0.45)
+            q_fig.add_annotation(
+                x=0.98, y=0.98, xref="paper", yref="paper",
+                text="Cheap + Liquid<br>Buy candidate",
+                showarrow=False, align="right",
+                bgcolor="rgba(255,255,255,0.75)",
+            )
+            q_fig.add_annotation(
+                x=0.02, y=0.98, xref="paper", yref="paper",
+                text="Cheap + Illiquid<br>Opportunistic",
+                showarrow=False, align="left",
+                bgcolor="rgba(255,255,255,0.75)",
+            )
+            q_fig.add_annotation(
+                x=0.98, y=0.02, xref="paper", yref="paper",
+                text="Rich + Liquid<br>Benchmark / monitor",
+                showarrow=False, align="right",
+                bgcolor="rgba(255,255,255,0.75)",
+            )
+            q_fig.add_annotation(
+                x=0.02, y=0.02, xref="paper", yref="paper",
+                text="Rich + Illiquid<br>Low priority",
+                showarrow=False, align="left",
+                bgcolor="rgba(255,255,255,0.75)",
+            )
+            q_fig.update_layout(height=560, hovermode="closest")
+            st.plotly_chart(q_fig, use_container_width=True)
+
+            q_summary = (
+                quadrant_df.groupby("Quadrant", as_index=False)
+                .agg(
+                    cusip_count=("cusip", "count") if "cusip" in quadrant_df.columns else ("liquidity_score", "count"),
+                    avg_liquidity_score=("liquidity_score", "mean"),
+                    avg_y_axis=(quadrant_y_col, "mean"),
+                    total_trade_amount=("total_trade_amount", "sum") if "total_trade_amount" in quadrant_df.columns else ("liquidity_score", "count"),
+                )
+            )
+            st.dataframe(q_summary, use_container_width=True, hide_index=True)
+
+            with st.expander("Quadrant security-level table", expanded=False):
+                display_cols = [
+                    "Quadrant", "cusip", "maturity_bucket", "liquidity_score", quadrant_y_col,
+                    "avg_yield", "trade_count", "recent_90d_trades", "days_since_last_trade",
+                    "total_trade_amount", "outstanding_amount", "liquidity_tier",
+                ]
+                st.dataframe(
+                    quadrant_df[[c for c in display_cols if c in quadrant_df.columns]]
+                    .sort_values(["Quadrant", "liquidity_score"], ascending=[True, False])
+                    .head(5000),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 
 section_anchor("spread-movement", "Spread Movement Heatmap")
