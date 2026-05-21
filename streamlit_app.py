@@ -159,12 +159,13 @@ def section_directory():
 <a href="#file-readiness">1. File Readiness Check</a> ·
 <a href="#executive-snapshot">2. Executive Snapshot</a> ·
 <a href="#yield-relative-value">3. Yield & Relative Value</a> ·
-<a href="#spread-level">4. Current Spread Level</a> ·
-<a href="#spread-movement">5. Spread Movement</a> ·
-<a href="#liquidity">6. Liquidity</a> ·
-<a href="#bond-master">7. Bond Master</a> ·
-<a href="#trade-detail">8. Trade Detail</a> ·
-<a href="#downloads">9. Downloads</a>
+<a href="#issuer-curve">4. Issuer Curve vs Benchmark</a> ·
+<a href="#spread-level">5. Current Spread Level</a> ·
+<a href="#spread-movement">6. Spread Movement</a> ·
+<a href="#liquidity">7. Liquidity</a> ·
+<a href="#bond-master">8. Bond Master</a> ·
+<a href="#trade-detail">9. Trade Detail</a> ·
+<a href="#downloads">10. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -718,6 +719,162 @@ def build_spread_level_data(
             )
 
     return matrix, pd.DataFrame(audit_rows)
+
+
+def build_issuer_curve_snapshot(
+    market_df: pd.DataFrame,
+    mmd_df: pd.DataFrame,
+    issuer: str,
+    ratings: list[str],
+    as_of_date: pd.Timestamp,
+    lookback_days: int,
+    aggregation_method: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build issuer yield curve vs benchmark curves by maturity bucket.
+
+    This is a cross-sectional curve snapshot, not a time-series chart.
+
+    Issuer curve logic:
+    - Average Last N Days: average uploaded trade yield by maturity bucket over the
+      lookback window ending on the selected as-of date.
+    - Latest Trade Per Bucket: latest available trade observation at or before the
+      selected as-of date for each maturity bucket.
+
+    Benchmark curve logic:
+    - Use uploaded rating curve columns when available.
+    - Otherwise use MMD/AAA + visible rating spread assumptions.
+    - For each bucket/rating, use the latest benchmark observation at or before
+      the selected as-of date.
+    """
+    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+    clean_ratings = [r for r in ratings if r in BENCHMARK_RATINGS]
+
+    if market_df.empty or mmd_df.empty or not clean_ratings:
+        return pd.DataFrame(), pd.DataFrame()
+
+    required_cols = {"issuer", "trade_date", "maturity_bucket", "yield"}
+    if not required_cols.issubset(set(market_df.columns)):
+        return pd.DataFrame(), pd.DataFrame()
+
+    as_of_date = pd.to_datetime(as_of_date).normalize()
+    issuer_df = market_df[market_df["issuer"] == issuer].copy()
+    issuer_df = issuer_df[issuer_df["maturity_bucket"].isin(maturity_order)]
+    issuer_df["trade_date"] = pd.to_datetime(issuer_df["trade_date"], errors="coerce").dt.normalize()
+    issuer_df["yield"] = pd.to_numeric(issuer_df["yield"], errors="coerce")
+    issuer_df = issuer_df.dropna(subset=["trade_date", "yield", "maturity_bucket"])
+    issuer_df = issuer_df[issuer_df["trade_date"] <= as_of_date]
+    if issuer_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    if aggregation_method == "Latest trade per bucket":
+        latest_rows = (
+            issuer_df.sort_values(["maturity_bucket", "trade_date"])
+            .groupby("maturity_bucket", as_index=False)
+            .tail(1)
+        )
+        issuer_curve = latest_rows[["maturity_bucket", "trade_date", "yield"]].rename(
+            columns={"trade_date": "issuer_observation_date", "yield": "issuer_yield"}
+        )
+        counts = issuer_df.groupby("maturity_bucket", as_index=False).agg(trade_count=("yield", "count"))
+        issuer_curve = issuer_curve.merge(counts, on="maturity_bucket", how="left")
+        issuer_curve["aggregation_method"] = aggregation_method
+        issuer_curve["lookback_start"] = pd.NaT
+        issuer_curve["lookback_end"] = as_of_date
+    else:
+        lookback_start = as_of_date - pd.Timedelta(days=int(lookback_days))
+        window_df = issuer_df[(issuer_df["trade_date"] >= lookback_start) & (issuer_df["trade_date"] <= as_of_date)].copy()
+        if window_df.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        agg_dict = {
+            "issuer_yield": ("yield", "mean"),
+            "trade_count": ("yield", "count"),
+            "issuer_observation_date": ("trade_date", "max"),
+        }
+        if "trade_amount" in window_df.columns:
+            agg_dict["total_trade_amount"] = ("trade_amount", "sum")
+        issuer_curve = window_df.groupby("maturity_bucket", as_index=False).agg(**agg_dict)
+        issuer_curve["aggregation_method"] = f"Average last {lookback_days} days"
+        issuer_curve["lookback_start"] = lookback_start
+        issuer_curve["lookback_end"] = as_of_date
+
+    # Preserve intuitive curve order.
+    issuer_curve["maturity_bucket"] = pd.Categorical(
+        issuer_curve["maturity_bucket"], categories=maturity_order, ordered=True
+    )
+    issuer_curve = issuer_curve.sort_values("maturity_bucket")
+
+    date_col = _detect_mmd_date_column(mmd_df)
+    if date_col is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    mmd_base = mmd_df.copy()
+    mmd_base[date_col] = pd.to_datetime(mmd_base[date_col], errors="coerce").dt.normalize()
+    mmd_base = mmd_base.dropna(subset=[date_col])
+    mmd_base = mmd_base[mmd_base[date_col] <= as_of_date]
+    if mmd_base.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    rows = []
+    for rating in clean_ratings:
+        for bucket in maturity_order:
+            tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
+            y, meta = get_benchmark_curve(mmd_base, tenor, rating)
+            if y is None:
+                continue
+            tmp = mmd_base[[date_col]].copy()
+            tmp["benchmark_yield"] = pd.to_numeric(y, errors="coerce")
+            tmp = tmp.dropna(subset=["benchmark_yield"])
+            if tmp.empty:
+                continue
+            latest_bench = tmp.iloc[-1]
+            rows.append(
+                {
+                    "maturity_bucket": bucket,
+                    "benchmark_rating": rating,
+                    "benchmark_date": latest_bench[date_col],
+                    "benchmark_yield": latest_bench["benchmark_yield"],
+                    "mmd_tenor": tenor,
+                    "benchmark_source": meta.get("benchmark_source"),
+                    "source_column": meta.get("source_column"),
+                    "rating_spread_bps": meta.get("rating_spread_bps"),
+                }
+            )
+
+    benchmark_curve = pd.DataFrame(rows)
+    if benchmark_curve.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    curve_data = issuer_curve.merge(benchmark_curve, on="maturity_bucket", how="inner")
+    if curve_data.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    curve_data["spread_to_benchmark_bps"] = (
+        curve_data["issuer_yield"] - curve_data["benchmark_yield"]
+    ) * 100
+
+    # Long format for one clean Plotly line chart.
+    issuer_line = issuer_curve[["maturity_bucket", "issuer_yield", "trade_count", "issuer_observation_date"]].copy()
+    issuer_line = issuer_line.rename(columns={"issuer_yield": "yield_value"})
+    issuer_line["curve"] = f"{issuer} issuer curve"
+    issuer_line["curve_type"] = "Issuer"
+
+    benchmark_line = benchmark_curve.rename(columns={"benchmark_yield": "yield_value"}).copy()
+    benchmark_line["curve"] = benchmark_line["benchmark_rating"].astype(str) + " benchmark curve"
+    benchmark_line["curve_type"] = "Benchmark"
+    benchmark_line["trade_count"] = pd.NA
+    benchmark_line["issuer_observation_date"] = pd.NaT
+
+    plot_df = pd.concat(
+        [
+            issuer_line[["maturity_bucket", "yield_value", "curve", "curve_type", "trade_count", "issuer_observation_date"]],
+            benchmark_line[["maturity_bucket", "yield_value", "curve", "curve_type", "trade_count", "issuer_observation_date"]],
+        ],
+        ignore_index=True,
+    )
+    plot_df["maturity_bucket"] = pd.Categorical(plot_df["maturity_bucket"], categories=maturity_order, ordered=True)
+    plot_df = plot_df.sort_values(["curve_type", "curve", "maturity_bucket"])
+
+    return plot_df, curve_data
 
 
 def _normalize_col_name(name: object) -> str:
@@ -1319,6 +1476,146 @@ Where:
                 )
     elif show_spread_to_benchmark and mmd_df.empty:
         st.info("Upload an MMD curve file to enable AAA/AA/A/BBB benchmark curves and spread-to-benchmark analytics.")
+
+
+section_anchor("issuer-curve", "Issuer Curve vs Benchmark Curve")
+with st.expander("Methodology: issuer curve vs benchmark curve", expanded=False):
+    st.markdown(
+        """
+This chart shows a **cross-sectional yield curve** by maturity bucket, rather than a time-series trend.
+
+**Issuer curve logic:**
+
+- The issuer curve is built from uploaded trade yields by maturity bucket: **Short / 10Y / 20Y / 30Y**.
+- Default aggregation uses **average yield over the latest selected window** ending on the curve date. This reduces noise from sparse municipal trading.
+- You can also use **latest trade per bucket** when you want the most recent observation in each maturity bucket.
+
+**Benchmark curve logic:**
+
+- The benchmark curve uses uploaded rating curve columns when available.
+- If an uploaded AA/A/BBB curve is missing, the app falls back to **MMD/AAA + transparent rating-spread assumptions**.
+- The benchmark value uses the latest available curve observation at or before the selected curve date.
+
+**How to read it:**
+
+- If the issuer line is above the benchmark line, the issuer trades cheaper / wider for that bucket.
+- If the issuer line is below the benchmark line, the issuer trades richer / tighter for that bucket.
+- The accompanying table shows exact yields and spreads in basis points.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD / benchmark curve file to enable Issuer Curve vs Benchmark Curve analysis.")
+else:
+    selected_issuer_dates = pd.to_datetime(
+        market_df.loc[market_df["issuer"] == selected_issuer, "trade_date"], errors="coerce"
+    ).dropna()
+
+    if selected_issuer_dates.empty:
+        st.warning("No valid trade dates were found for the selected issuer, so the issuer curve cannot be built.")
+    else:
+        curve_min_date = selected_issuer_dates.min().date()
+        curve_max_date = selected_issuer_dates.max().date()
+
+        curve_ctrl1, curve_ctrl2, curve_ctrl3 = st.columns([1, 1, 1.4])
+        with curve_ctrl1:
+            curve_as_of_date = st.date_input(
+                "Curve Date",
+                value=curve_max_date,
+                min_value=curve_min_date,
+                max_value=curve_max_date,
+                key="issuer_curve_as_of_date",
+                help="The issuer and benchmark curves use observations available at or before this date.",
+            )
+        with curve_ctrl2:
+            curve_aggregation = st.selectbox(
+                "Issuer Curve Aggregation",
+                ["Average last N days", "Latest trade per bucket"],
+                index=0,
+                key="issuer_curve_aggregation",
+            )
+        with curve_ctrl3:
+            curve_benchmark_ratings = st.multiselect(
+                "Benchmark Curve(s) for Curve Chart",
+                BENCHMARK_RATINGS,
+                default=[r for r in ["AAA", "AA"] if r in BENCHMARK_RATINGS],
+                key="issuer_curve_benchmark_ratings",
+                help="Priority: uploaded rating curve columns first; otherwise MMD/AAA plus the visible spread assumptions.",
+            )
+
+        curve_lookback_days = 30
+        if curve_aggregation == "Average last N days":
+            curve_lookback_days = st.select_slider(
+                "Lookback Window for Issuer Curve",
+                options=[7, 14, 30, 60, 90, 180],
+                value=30,
+                format_func=lambda x: f"{x} days",
+                key="issuer_curve_lookback_days",
+                help="Municipal trades can be sparse, so averaging over a window usually gives a more stable curve than using one day only.",
+            )
+
+        if not curve_benchmark_ratings:
+            st.info("Select at least one benchmark curve to display the issuer curve comparison.")
+        else:
+            issuer_curve_plot_df, issuer_curve_audit = build_issuer_curve_snapshot(
+                market_df=market_df,
+                mmd_df=mmd_df,
+                issuer=selected_issuer,
+                ratings=curve_benchmark_ratings,
+                as_of_date=pd.Timestamp(curve_as_of_date),
+                lookback_days=curve_lookback_days,
+                aggregation_method=curve_aggregation,
+            )
+
+            if issuer_curve_plot_df.empty or issuer_curve_audit.empty:
+                st.warning(
+                    "No overlapping issuer trades and benchmark curve observations were found for this curve setup. "
+                    "Try a longer lookback window, a different curve date, or check that the benchmark file has usable 5Y/10Y/20Y/30Y columns."
+                )
+            else:
+                curve_fig = px.line(
+                    issuer_curve_plot_df,
+                    x="maturity_bucket",
+                    y="yield_value",
+                    color="curve",
+                    markers=True,
+                    hover_data=["curve_type", "trade_count", "issuer_observation_date"],
+                    title=f"{selected_issuer} Issuer Curve vs Benchmark Curve(s)",
+                    labels={
+                        "maturity_bucket": "Maturity Bucket",
+                        "yield_value": "Yield (%)",
+                        "curve": "Curve",
+                    },
+                )
+                curve_fig.update_layout(hovermode="x unified", height=500)
+                st.plotly_chart(curve_fig, use_container_width=True)
+
+                table_cols = [
+                    "maturity_bucket", "benchmark_rating", "issuer_yield", "benchmark_yield",
+                    "spread_to_benchmark_bps", "trade_count", "issuer_observation_date", "benchmark_date",
+                    "mmd_tenor", "benchmark_source", "source_column", "rating_spread_bps",
+                    "aggregation_method", "lookback_start", "lookback_end",
+                ]
+                curve_table = issuer_curve_audit[[c for c in table_cols if c in issuer_curve_audit.columns]].copy()
+                for c in ["issuer_yield", "benchmark_yield", "spread_to_benchmark_bps", "rating_spread_bps"]:
+                    if c in curve_table.columns:
+                        curve_table[c] = pd.to_numeric(curve_table[c], errors="coerce").round(2)
+
+                st.subheader("Curve Spread Table")
+                st.dataframe(curve_table, use_container_width=True, hide_index=True)
+
+                primary_curve_rating = curve_benchmark_ratings[0]
+                primary_rows = issuer_curve_audit[issuer_curve_audit["benchmark_rating"] == primary_curve_rating].copy()
+                primary_rows = primary_rows.dropna(subset=["spread_to_benchmark_bps"])
+                if not primary_rows.empty:
+                    cheap_row = primary_rows.loc[primary_rows["spread_to_benchmark_bps"].idxmax()]
+                    rich_row = primary_rows.loc[primary_rows["spread_to_benchmark_bps"].idxmin()]
+                    st.info(
+                        f"Curve read-through vs {primary_curve_rating}: "
+                        f"{cheap_row['maturity_bucket']} is the widest bucket at {cheap_row['spread_to_benchmark_bps']:+.1f} bp, "
+                        f"while {rich_row['maturity_bucket']} is the tightest bucket at {rich_row['spread_to_benchmark_bps']:+.1f} bp."
+                    )
+
 
 section_anchor("spread-level", "Current Spread Level Framework")
 with st.expander("Methodology: current spread level", expanded=False):
