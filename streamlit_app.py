@@ -726,6 +726,12 @@ def process_uploads(
             failed_files.append((trade_name, str(exc)))
 
     trades_df = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
+
+    # Data Health metric: remove exact duplicate trade rows before analytics.
+    before_dedup = len(trades_df)
+    trades_df = trades_df.drop_duplicates().reset_index(drop=True)
+    duplicates_removed = before_dedup - len(trades_df)
+
     market_df = merge_market_data(bonds_df, trades_df, issuer_master)
 
     mmd_df = pd.DataFrame()
@@ -734,7 +740,7 @@ def process_uploads(
         raw_mmd = read_uploaded_file(io.BytesIO(payload), name)
         mmd_df = standardize_mmd(raw_mmd)
 
-    return bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files
+    return bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files, duplicates_removed
 
 
 def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
@@ -825,7 +831,15 @@ with st.expander("Methodology: how the app decides whether a file is usable", ex
         """
     )
 
-bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files = process_uploads(
+(
+    bonds_df,
+    trades_df,
+    issuer_master,
+    market_df,
+    mmd_df,
+    failed_files,
+    duplicates_removed,
+) = process_uploads(
     bond_bytes=bond_bytes,
     bond_name=bond_file.name,
     trade_payloads=trade_payloads,
@@ -857,6 +871,69 @@ st.success(
 )
 
 with st.sidebar:
+    st.markdown("---")
+    st.header("Data Health")
+
+    if not market_df.empty and "trade_date" in market_df.columns:
+        trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
+        if not trade_dates.empty:
+            earliest_trade = trade_dates.min()
+            latest_trade = trade_dates.max()
+            st.caption(
+                f"📅 Data Coverage:\n"
+                f"{earliest_trade:%Y-%m-%d} → {latest_trade:%Y-%m-%d}"
+            )
+        else:
+            st.caption("📅 Data Coverage:\nNo valid trade dates detected")
+    else:
+        st.caption("📅 Data Coverage:\nNo trade data loaded")
+
+    st.caption(
+        f"📊 Trades Loaded:\n"
+        f"{len(market_df):,}"
+    )
+
+    total_rows = len(market_df)
+    if total_rows > 0 and "cusip" in market_df.columns:
+        bond_cusips = set(bonds_df["cusip"].dropna().astype(str).str.upper()) if "cusip" in bonds_df.columns else set()
+        trade_cusips = market_df["cusip"].dropna().astype(str).str.upper()
+        matched_cusips_count = trade_cusips.isin(bond_cusips).sum() if bond_cusips else 0
+        match_rate = matched_cusips_count / total_rows * 100
+    else:
+        matched_cusips_count = 0
+        match_rate = 0
+
+    match_icon = "🟢" if match_rate >= 95 else "🟡" if match_rate >= 80 else "🔴"
+    st.caption(
+        f"{match_icon} CUSIP Match Rate:\n"
+        f"{match_rate:.1f}%"
+    )
+
+    missing_issuers = market_df["issuer"].isna().sum() if "issuer" in market_df.columns else total_rows
+    missing_issuer_rate = missing_issuers / total_rows * 100 if total_rows > 0 else 0
+    missing_icon = "🟢" if missing_issuers == 0 else "🟡" if missing_issuer_rate <= 5 else "🔴"
+    st.caption(
+        f"{missing_icon} Missing Issuers:\n"
+        f"{missing_issuers:,}"
+    )
+
+    st.caption(
+        f"🧹 Duplicate Trades Removed:\n"
+        f"{duplicates_removed:,}"
+    )
+
+    with st.expander("Data Health methodology", expanded=False):
+        st.markdown(
+            """
+- **Data Coverage** uses the earliest and latest valid trade dates after standardization.
+- **Trades Loaded** counts merged trade rows available for analytics.
+- **CUSIP Match Rate** is the share of merged trade rows whose CUSIP appears in the uploaded bond master.
+- **Missing Issuers** counts rows without an issuer after the bond/trade merge and issuer-mapping logic.
+- **Duplicate Trades Removed** counts exact duplicate standardized trade rows removed before analytics.
+            """
+        )
+
+    st.markdown("---")
     st.header("2. Select From Uploaded Issuers")
     selected_issuer = st.selectbox(
         "Issuer detected from uploaded files",
