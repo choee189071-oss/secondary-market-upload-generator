@@ -190,6 +190,7 @@ def section_directory():
 <b>5. Outputs, methodology & raw detail</b><br>
 <a href="#spread-movement">Spread Movement</a> ·
 <a href="#cusip-drilldown">CUSIP Drilldown</a> ·
+<a href="#report-export-center">Report Export Center</a> ·
 <a href="#export-summary">Export Summary</a> ·
 <a href="#admin-methodology">Admin Methodology</a> ·
 <a href="#version-changelog">Version / Change Log</a> ·
@@ -1141,10 +1142,11 @@ with st.sidebar:
 <b>Reference / Admin / Outputs</b><br>
 <a href="#bond-master">22. Bond Master</a><br>
 <a href="#trade-detail">23. Trade Detail</a><br>
-<a href="#export-summary">24. Export Summary</a><br>
-<a href="#admin-methodology">25. Admin Methodology</a><br>
-<a href="#version-changelog">26. Version / Change Log</a><br>
-<a href="#downloads">27. Downloads</a>
+<a href="#report-export-center">24. Report Export Center</a><br>
+<a href="#export-summary">25. Export Summary</a><br>
+<a href="#admin-methodology">26. Admin Methodology</a><br>
+<a href="#version-changelog">27. Version / Change Log</a><br>
+<a href="#downloads">28. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -6272,6 +6274,360 @@ st.dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].s
 section_anchor("trade-detail", "Underlying Trade Detail")
 trade_cols = ["trade_datetime", "cusip", "description", "maturity_trade", "maturity_bond", "maturity_bucket", "coupon_trade", "yield", "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"]
 st.dataframe(issuer_trades[[c for c in trade_cols if c in issuer_trades.columns]].sort_values("trade_datetime", ascending=False).head(20000), use_container_width=True)
+
+
+
+section_anchor("report-export-center", "Report Export Center")
+with st.expander("Methodology: report export center", expanded=False):
+    st.markdown(
+        """
+This section creates exportable reporting packages from the current dashboard state.
+
+**Export options:**
+
+- **Interactive HTML report:** includes selected charts, summary metrics, methodology notes, and key tables.
+- **PDF summary:** creates a lightweight PDF using `reportlab` when available. For a full visual PDF, download the HTML report and use browser **Print → Save as PDF**.
+- **PowerPoint slides:** creates a simple presentation using `python-pptx` when available.
+- **Chart HTML bundle:** exports selected Plotly charts as standalone HTML files inside a ZIP.
+- **Chart data CSV bundle:** exports the underlying data used to generate selected charts.
+
+**Important limitation:**
+
+A Streamlit app cannot reliably export the exact live browser page, all expanded/collapsed states, and all interactive widgets into a perfect PDF/PPTX without a browser automation service. This module therefore exports a clean, reproducible report built from the uploaded data and current issuer selection.
+        """
+    )
+
+# -----------------------------
+# Build exportable chart/data objects
+# -----------------------------
+export_chart_items = []
+export_data_items = {}
+
+def add_export_chart(name: str, fig, data: pd.DataFrame | None = None):
+    """Collect charts for HTML/ZIP/PPT export without breaking if one chart fails."""
+    try:
+        export_chart_items.append((name, fig))
+        if data is not None and not data.empty:
+            export_data_items[name] = data.copy()
+    except Exception:
+        pass
+
+# 1) Yield trend chart
+try:
+    export_yield_df = market_df[market_df["issuer"] == selected_issuer].copy()
+    export_yield_df["trade_date"] = pd.to_datetime(export_yield_df["trade_date"], errors="coerce")
+    export_yield_df["yield"] = pd.to_numeric(export_yield_df["yield"], errors="coerce")
+    export_yield_df = export_yield_df.dropna(subset=["trade_date", "yield"])
+    if not export_yield_df.empty:
+        export_yield_daily = (
+            export_yield_df.groupby("trade_date", as_index=False)
+            .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"), total_trade_amount=("trade_amount", "sum") if "trade_amount" in export_yield_df.columns else ("yield", "count"))
+            .sort_values("trade_date")
+        )
+        export_yield_fig = px.line(
+            export_yield_daily,
+            x="trade_date",
+            y="avg_yield",
+            markers=True,
+            title=f"{selected_issuer} Average Trade Yield",
+            labels={"trade_date": "Trade Date", "avg_yield": "Average Yield (%)"},
+        )
+        add_export_chart("yield_trend", export_yield_fig, export_yield_daily)
+except Exception:
+    pass
+
+# 2) Issuer curve chart
+try:
+    export_curve_df = market_df[market_df["issuer"] == selected_issuer].copy()
+    export_curve_df["trade_date"] = pd.to_datetime(export_curve_df["trade_date"], errors="coerce").dt.normalize()
+    export_curve_df["yield"] = pd.to_numeric(export_curve_df["yield"], errors="coerce")
+    export_curve_df = export_curve_df.dropna(subset=["trade_date", "yield", "maturity_bucket"])
+    export_curve_df = export_curve_df[export_curve_df["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+    if not export_curve_df.empty:
+        latest_curve_date = export_curve_df["trade_date"].max()
+        export_curve_df = export_curve_df[export_curve_df["trade_date"] >= latest_curve_date - pd.Timedelta(days=30)]
+        export_curve_summary = (
+            export_curve_df.groupby("maturity_bucket", as_index=False)
+            .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"))
+        )
+        export_curve_summary["maturity_bucket"] = pd.Categorical(
+            export_curve_summary["maturity_bucket"],
+            categories=["Short", "10Y", "20Y", "30Y"],
+            ordered=True,
+        )
+        export_curve_summary = export_curve_summary.sort_values("maturity_bucket")
+        export_curve_fig = px.line(
+            export_curve_summary,
+            x="maturity_bucket",
+            y="avg_yield",
+            markers=True,
+            title=f"{selected_issuer} Issuer Curve — Latest 30D Average",
+            labels={"maturity_bucket": "Maturity Bucket", "avg_yield": "Average Yield (%)"},
+        )
+        add_export_chart("issuer_curve_latest_30d", export_curve_fig, export_curve_summary)
+except Exception:
+    pass
+
+# 3) Current spread level heatmap
+try:
+    if not mmd_df.empty:
+        export_level_matrix, export_level_audit = build_spread_level_data(
+            market_df=market_df,
+            mmd_df=mmd_df,
+            issuer=selected_issuer,
+            ratings=["AAA", "AA", "A", "BBB"],
+        )
+        if not export_level_matrix.empty and not export_level_matrix.isna().all().all():
+            export_level_text = export_level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+            export_level_fig = px.imshow(
+                export_level_matrix.astype(float),
+                x=export_level_matrix.columns,
+                y=export_level_matrix.index,
+                color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
+                color_continuous_midpoint=0,
+                aspect="auto",
+                title=f"{selected_issuer} Current Spread Level",
+                labels={"x": "Benchmark Curve", "y": "Maturity Bucket", "color": "Spread (bps)"},
+            )
+            export_level_fig.update_traces(text=export_level_text.values, texttemplate="%{text}")
+            add_export_chart("current_spread_level_heatmap", export_level_fig, export_level_audit)
+except Exception:
+    pass
+
+# 4) Liquidity monthly activity chart
+try:
+    export_liq_df = market_df[market_df["issuer"] == selected_issuer].copy()
+    export_liq_df["trade_date"] = pd.to_datetime(export_liq_df["trade_date"], errors="coerce")
+    export_liq_df = export_liq_df.dropna(subset=["trade_date"])
+    if "trade_amount" in export_liq_df.columns:
+        export_liq_df["trade_amount"] = pd.to_numeric(export_liq_df["trade_amount"], errors="coerce").fillna(0)
+    else:
+        export_liq_df["trade_amount"] = 0.0
+    if not export_liq_df.empty:
+        export_liq_df["trade_month"] = export_liq_df["trade_date"].dt.to_period("M").astype(str)
+        export_monthly = (
+            export_liq_df.groupby("trade_month", as_index=False)
+            .agg(trade_count=("trade_date", "count"), total_trade_amount=("trade_amount", "sum"))
+        )
+        export_monthly_fig = px.line(
+            export_monthly,
+            x="trade_month",
+            y="trade_count",
+            markers=True,
+            title=f"{selected_issuer} Monthly Trade Count",
+            labels={"trade_month": "Trade Month", "trade_count": "Trade Count"},
+        )
+        add_export_chart("monthly_trade_count", export_monthly_fig, export_monthly)
+except Exception:
+    pass
+
+# -----------------------------
+# Export controls
+# -----------------------------
+export_options = st.multiselect(
+    "Select charts to include",
+    [name for name, _fig in export_chart_items],
+    default=[name for name, _fig in export_chart_items],
+    help="These are reconstructed export charts based on current selected issuer and uploaded data.",
+)
+
+selected_export_charts = [(name, fig) for name, fig in export_chart_items if name in export_options]
+
+export_meta = {
+    "Generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+    "Selected Issuer": selected_issuer,
+    "Sector": selected_sector,
+    "Bonds": f"{len(issuer_bonds):,}",
+    "Trades in Current Filter": f"{len(issuer_trades):,}",
+    "Latest Trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades",
+}
+
+report_html_parts = [
+    "<html><head><meta charset='utf-8'><title>Municipal Secondary Market Dashboard Report</title>",
+    "<style>body{font-family:Arial,sans-serif;margin:32px;color:#111827;} h1,h2{color:#111827;} table{border-collapse:collapse;width:100%;margin:16px 0;} td,th{border:1px solid #e5e7eb;padding:8px;text-align:left;} .note{color:#64748b;font-size:13px;}</style>",
+    "</head><body>",
+    "<h1>Municipal Secondary Market Dashboard Report</h1>",
+    "<h2>Executive Summary</h2>",
+    "<table>",
+]
+for k, v in export_meta.items():
+    report_html_parts.append(f"<tr><th>{k}</th><td>{v}</td></tr>")
+report_html_parts.extend([
+    "</table>",
+    "<p class='note'>Benchmark curves use uploaded rating curves when available; otherwise the app falls back to MMD/AAA plus transparent spread assumptions. Screening outputs are not investment recommendations.</p>",
+])
+
+for name, fig in selected_export_charts:
+    report_html_parts.append(f"<h2>{name.replace('_', ' ').title()}</h2>")
+    report_html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+
+report_html_parts.append("</body></html>")
+full_report_html = "\n".join(report_html_parts)
+
+export_col1, export_col2, export_col3 = st.columns(3)
+
+with export_col1:
+    st.download_button(
+        label="Download Interactive HTML Report",
+        data=full_report_html.encode("utf-8"),
+        file_name=f"{selected_issuer}_dashboard_report.html".replace(" ", "_"),
+        mime="text/html",
+        help="Open this file in a browser. For a visual PDF, use browser Print → Save as PDF.",
+    )
+
+with export_col2:
+    # Lightweight PDF summary via reportlab, if installed.
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib import colors
+
+        pdf_buffer = io.BytesIO()
+        doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = [
+            Paragraph("Municipal Secondary Market Dashboard Summary", styles["Title"]),
+            Spacer(1, 12),
+        ]
+        meta_table = Table([[k, str(v)] for k, v in export_meta.items()])
+        meta_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(meta_table)
+        story.append(Spacer(1, 14))
+        story.append(Paragraph("Included Charts", styles["Heading2"]))
+        for name, _fig in selected_export_charts:
+            story.append(Paragraph(f"• {name.replace('_', ' ').title()}", styles["BodyText"]))
+        story.append(Spacer(1, 14))
+        story.append(Paragraph("Methodology Note", styles["Heading2"]))
+        story.append(Paragraph(
+            "This PDF is a lightweight summary. For interactive charts and fuller visual output, use the HTML report and browser Print → Save as PDF.",
+            styles["BodyText"],
+        ))
+        doc.build(story)
+        pdf_bytes = pdf_buffer.getvalue()
+
+        st.download_button(
+            label="Download PDF Summary",
+            data=pdf_bytes,
+            file_name=f"{selected_issuer}_dashboard_summary.pdf".replace(" ", "_"),
+            mime="application/pdf",
+        )
+    except Exception:
+        st.info("PDF summary export requires `reportlab`. Add `reportlab` to requirements.txt, or download HTML and print/save as PDF.")
+
+with export_col3:
+    # PPTX summary via python-pptx, if installed.
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[0])
+        slide.shapes.title.text = "Municipal Secondary Market Dashboard"
+        slide.placeholders[1].text = f"{selected_issuer} | {selected_sector} | Generated {export_meta['Generated']}"
+
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Executive Snapshot"
+        body = slide.placeholders[1].text_frame
+        body.clear()
+        for k, v in export_meta.items():
+            p = body.add_paragraph()
+            p.text = f"{k}: {v}"
+            p.font.size = Pt(18)
+
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Included Dashboard Charts"
+        body = slide.placeholders[1].text_frame
+        body.clear()
+        for name, _fig in selected_export_charts:
+            p = body.add_paragraph()
+            p.text = name.replace("_", " ").title()
+            p.level = 0
+            p.font.size = Pt(18)
+
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Methodology Notes"
+        body = slide.placeholders[1].text_frame
+        body.clear()
+        notes = [
+            "Benchmark curves use uploaded rating curves when available.",
+            "Fallback curves use MMD/AAA plus visible rating-spread assumptions.",
+            "Liquidity and RV scores are screening tools, not trade recommendations.",
+            "Scenario shock uses duration proxies, not full cash-flow pricing.",
+        ]
+        for note in notes:
+            p = body.add_paragraph()
+            p.text = note
+            p.font.size = Pt(16)
+
+        pptx_buffer = io.BytesIO()
+        prs.save(pptx_buffer)
+        pptx_bytes = pptx_buffer.getvalue()
+
+        st.download_button(
+            label="Download PowerPoint Slides",
+            data=pptx_bytes,
+            file_name=f"{selected_issuer}_dashboard_slides.pptx".replace(" ", "_"),
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+    except Exception:
+        st.info("PowerPoint export requires `python-pptx`. Add `python-pptx` to requirements.txt to enable slide export.")
+
+# Chart HTML bundle and chart data bundle
+bundle_col1, bundle_col2 = st.columns(2)
+
+with bundle_col1:
+    try:
+        import zipfile
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, fig in selected_export_charts:
+                zf.writestr(f"{name}.html", fig.to_html(full_html=True, include_plotlyjs="cdn"))
+        st.download_button(
+            label="Download Chart HTML Bundle",
+            data=zip_buffer.getvalue(),
+            file_name=f"{selected_issuer}_chart_html_bundle.zip".replace(" ", "_"),
+            mime="application/zip",
+        )
+    except Exception as exc:
+        st.info(f"Chart bundle export unavailable: {exc}")
+
+with bundle_col2:
+    try:
+        import zipfile
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, df in export_data_items.items():
+                if name in export_options and df is not None and not df.empty:
+                    zf.writestr(f"{name}_data.csv", df.to_csv(index=False))
+        st.download_button(
+            label="Download Chart Data CSV Bundle",
+            data=zip_buffer.getvalue(),
+            file_name=f"{selected_issuer}_chart_data_bundle.zip".replace(" ", "_"),
+            mime="application/zip",
+        )
+    except Exception as exc:
+        st.info(f"Chart data bundle export unavailable: {exc}")
+
+with st.expander("How to export the full live webpage as PDF", expanded=False):
+    st.markdown(
+        """
+For the exact live Streamlit page:
+
+1. Open the dashboard in your browser.
+2. Expand the sections you want included.
+3. Press **Cmd+P** on Mac or **Ctrl+P** on Windows.
+4. Choose **Save as PDF**.
+5. Set scale to 70–85% if charts are too wide.
+
+For a cleaner report with reproducible charts, use **Download Interactive HTML Report** above.
+        """
+    )
 
 
 section_anchor("export-summary", "Export Summary Package")
