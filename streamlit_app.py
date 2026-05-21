@@ -165,13 +165,14 @@ def section_directory():
 <a href="#spread-attribution">6. Spread Attribution</a> ·
 <a href="#market-narrative">7. Market Narrative & Opportunity Map</a> ·
 <a href="#peer-rv">8. Peer RV Comparison</a> ·
-<a href="#spread-movement">9. Spread Movement</a> ·
-<a href="#cusip-drilldown">10. CUSIP Drilldown</a> ·
-<a href="#rv-positioning">11. RV Positioning Map</a> ·
-<a href="#liquidity">12. Liquidity</a> ·
-<a href="#bond-master">13. Bond Master</a> ·
-<a href="#trade-detail">14. Trade Detail</a> ·
-<a href="#downloads">15. Downloads</a>
+<a href="#historical-spread">9. Historical Spread Percentile</a> ·
+<a href="#spread-movement">10. Spread Movement</a> ·
+<a href="#cusip-drilldown">11. CUSIP Drilldown</a> ·
+<a href="#rv-positioning">12. RV Positioning Map</a> ·
+<a href="#liquidity">13. Liquidity</a> ·
+<a href="#bond-master">14. Bond Master</a> ·
+<a href="#trade-detail">15. Trade Detail</a> ·
+<a href="#downloads">16. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -2696,6 +2697,258 @@ else:
                                         f"Lookback window: {peer_window_label}."
                                     )
                                     st.dataframe(audit_df, use_container_width=True, hide_index=True)
+
+
+
+section_anchor("historical-spread", "Historical Spread Range & Percentile")
+with st.expander("Methodology: historical spread range and percentile", expanded=False):
+    st.markdown(
+        """
+This section compares the selected issuer's current spread against its own historical spread range.
+
+**Core question:**
+
+> Is the current spread historically wide, tight, or normal?
+
+**Calculation:**
+
+`Spread to Benchmark = (Average Issuer Yield - Benchmark Yield) × 100`
+
+The module then calculates:
+
+- **Current Spread**: latest available spread observation in the selected bucket.
+- **Historical Median**: median spread over the selected history window.
+- **Percentile**: where the current spread ranks versus the historical spread distribution.
+- **Z-Score**: current spread distance from historical mean in standard deviation units.
+
+**Signal guide:**
+
+- **> 90th percentile**: very wide / potentially cheap
+- **75th–90th percentile**: wide
+- **25th–75th percentile**: normal range
+- **10th–25th percentile**: tight
+- **< 10th percentile**: very tight / potentially rich
+
+Municipal trading can be sparse, so this is a screening signal rather than a final trade recommendation.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD/benchmark curve file to enable historical spread percentile analysis.")
+else:
+    hist_col1, hist_col2, hist_col3, hist_col4 = st.columns([1, 1, 1, 1])
+    with hist_col1:
+        hist_bucket = st.selectbox(
+            "Historical Maturity Bucket",
+            ["Short", "10Y", "20Y", "30Y"],
+            index=1,
+            key="hist_spread_bucket",
+        )
+    with hist_col2:
+        hist_rating = st.selectbox(
+            "Historical Benchmark Curve",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            key="hist_spread_benchmark",
+        )
+    with hist_col3:
+        hist_window_label = st.selectbox(
+            "History Window",
+            ["1M", "3M", "6M", "1Y", "All"],
+            index=3,
+            key="hist_spread_window",
+        )
+    with hist_col4:
+        hist_smoothing = st.selectbox(
+            "Smoothing",
+            ["Daily", "7D average", "30D average"],
+            index=0,
+            key="hist_spread_smoothing",
+        )
+
+    hist_window_days = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365, "All": None}[hist_window_label]
+
+    hist_obs = build_spread_observations(
+        market_df=market_df,
+        mmd_df=mmd_df,
+        issuer=selected_issuer,
+        rating=hist_rating,
+    )
+
+    if hist_obs.empty:
+        st.warning(
+            "No overlapping issuer trade dates and benchmark dates were found for historical spread analysis. "
+            "Check that the curve file date range overlaps with trade dates."
+        )
+    else:
+        hist_obs = hist_obs.copy()
+        hist_obs["trade_date"] = pd.to_datetime(hist_obs["trade_date"], errors="coerce").dt.normalize()
+        hist_obs = hist_obs[
+            (hist_obs["maturity_bucket"] == hist_bucket)
+            & hist_obs["spread_to_benchmark_bps"].notna()
+        ].sort_values("trade_date")
+
+        if hist_obs.empty:
+            st.warning(f"No historical spread observations found for {hist_bucket}.")
+        else:
+            latest_hist_date = hist_obs["trade_date"].max()
+            if hist_window_days is not None:
+                hist_cutoff = latest_hist_date - pd.Timedelta(days=hist_window_days)
+                hist_plot = hist_obs[hist_obs["trade_date"] >= hist_cutoff].copy()
+            else:
+                hist_plot = hist_obs.copy()
+
+            if hist_plot.empty or len(hist_plot) < 2:
+                st.info("Not enough historical spread observations to calculate a percentile for the selected window.")
+            else:
+                # Aggregate to one observation per date first.
+                hist_daily = (
+                    hist_plot.groupby("trade_date", as_index=False)
+                    .agg(
+                        spread_to_benchmark_bps=("spread_to_benchmark_bps", "mean"),
+                        avg_yield=("avg_yield", "mean"),
+                        benchmark_yield=("benchmark_yield", "mean"),
+                        trade_count=("trade_count", "sum"),
+                        total_trade_amount=("total_trade_amount", "sum"),
+                        benchmark_source=("benchmark_source", "first"),
+                        source_column=("source_column", "first"),
+                    )
+                    .sort_values("trade_date")
+                )
+
+                if hist_smoothing == "7D average":
+                    hist_daily["display_spread_bps"] = (
+                        hist_daily["spread_to_benchmark_bps"].rolling(window=7, min_periods=1).mean()
+                    )
+                    display_label = "7D Average Spread"
+                elif hist_smoothing == "30D average":
+                    hist_daily["display_spread_bps"] = (
+                        hist_daily["spread_to_benchmark_bps"].rolling(window=30, min_periods=1).mean()
+                    )
+                    display_label = "30D Average Spread"
+                else:
+                    hist_daily["display_spread_bps"] = hist_daily["spread_to_benchmark_bps"]
+                    display_label = "Daily Spread"
+
+                current_spread = float(hist_daily["display_spread_bps"].iloc[-1])
+                hist_values = pd.to_numeric(hist_daily["display_spread_bps"], errors="coerce").dropna()
+
+                hist_median = float(hist_values.median())
+                hist_mean = float(hist_values.mean())
+                hist_std = float(hist_values.std()) if len(hist_values) > 1 else 0.0
+                hist_p25 = float(hist_values.quantile(0.25))
+                hist_p75 = float(hist_values.quantile(0.75))
+                hist_p10 = float(hist_values.quantile(0.10))
+                hist_p90 = float(hist_values.quantile(0.90))
+                hist_min = float(hist_values.min())
+                hist_max = float(hist_values.max())
+
+                percentile = float((hist_values <= current_spread).mean() * 100)
+                z_score = (current_spread - hist_mean) / hist_std if hist_std and hist_std > 0 else pd.NA
+
+                # Signal label
+                if percentile >= 90:
+                    signal = "Very Wide / Potentially Cheap"
+                elif percentile >= 75:
+                    signal = "Wide"
+                elif percentile >= 25:
+                    signal = "Normal Range"
+                elif percentile >= 10:
+                    signal = "Tight"
+                else:
+                    signal = "Very Tight / Potentially Rich"
+
+                card1, card2, card3, card4 = st.columns(4)
+                card1.metric("Current Spread", f"{current_spread:+.1f} bp")
+                card2.metric("Historical Percentile", f"{percentile:.0f}th")
+                card3.metric("Historical Median", f"{hist_median:+.1f} bp")
+                card4.metric("Z-Score", "N/A" if pd.isna(z_score) else f"{z_score:+.2f}")
+
+                st.info(
+                    f"Read-through: {selected_issuer}'s {hist_bucket} spread to {hist_rating} is currently "
+                    f"at the {percentile:.0f}th percentile versus the selected {hist_window_label} history. "
+                    f"Signal: **{signal}**."
+                )
+
+                hist_fig = px.line(
+                    hist_daily,
+                    x="trade_date",
+                    y="display_spread_bps",
+                    markers=True,
+                    hover_data={
+                        "spread_to_benchmark_bps": ":.1f",
+                        "avg_yield": ":.2f",
+                        "benchmark_yield": ":.2f",
+                        "trade_count": ":,.0f",
+                        "total_trade_amount": ":,.0f",
+                        "benchmark_source": True,
+                        "source_column": True,
+                    },
+                    title=f"{selected_issuer} {hist_bucket} Spread to {hist_rating} Benchmark Over Time",
+                    labels={
+                        "trade_date": "Trade Date",
+                        "display_spread_bps": f"{display_label} (bps)",
+                        "spread_to_benchmark_bps": "Raw Daily Spread (bps)",
+                    },
+                )
+                hist_fig.add_hline(y=current_spread, line_dash="solid", opacity=0.65, annotation_text="Current")
+                hist_fig.add_hline(y=hist_median, line_dash="dash", opacity=0.65, annotation_text="Median")
+                hist_fig.add_hline(y=hist_p25, line_dash="dot", opacity=0.45, annotation_text="25th")
+                hist_fig.add_hline(y=hist_p75, line_dash="dot", opacity=0.45, annotation_text="75th")
+                hist_fig.update_layout(height=520, hovermode="x unified")
+                st.plotly_chart(hist_fig, use_container_width=True)
+
+                dist_col1, dist_col2 = st.columns([1.2, 1])
+                with dist_col1:
+                    hist_dist_fig = px.histogram(
+                        hist_daily,
+                        x="display_spread_bps",
+                        nbins=25,
+                        title=f"Historical Spread Distribution ({hist_window_label})",
+                        labels={"display_spread_bps": f"{display_label} (bps)", "count": "Observation Count"},
+                    )
+                    hist_dist_fig.add_vline(x=current_spread, line_dash="solid", annotation_text="Current")
+                    hist_dist_fig.add_vline(x=hist_median, line_dash="dash", annotation_text="Median")
+                    hist_dist_fig.update_layout(height=430)
+                    st.plotly_chart(hist_dist_fig, use_container_width=True)
+
+                with dist_col2:
+                    pct_table = pd.DataFrame(
+                        [
+                            {"Statistic": "Minimum", "Spread (bps)": hist_min},
+                            {"Statistic": "10th Percentile", "Spread (bps)": hist_p10},
+                            {"Statistic": "25th Percentile", "Spread (bps)": hist_p25},
+                            {"Statistic": "Median", "Spread (bps)": hist_median},
+                            {"Statistic": "75th Percentile", "Spread (bps)": hist_p75},
+                            {"Statistic": "90th Percentile", "Spread (bps)": hist_p90},
+                            {"Statistic": "Maximum", "Spread (bps)": hist_max},
+                            {"Statistic": "Current", "Spread (bps)": current_spread},
+                        ]
+                    )
+                    pct_table["Spread (bps)"] = pct_table["Spread (bps)"].round(2)
+                    st.dataframe(pct_table, use_container_width=True, hide_index=True)
+
+                with st.expander("Historical spread audit table", expanded=False):
+                    audit_cols = [
+                        "trade_date",
+                        "spread_to_benchmark_bps",
+                        "display_spread_bps",
+                        "avg_yield",
+                        "benchmark_yield",
+                        "trade_count",
+                        "total_trade_amount",
+                        "benchmark_source",
+                        "source_column",
+                    ]
+                    audit_hist = hist_daily[[c for c in audit_cols if c in hist_daily.columns]].copy()
+                    for c in ["spread_to_benchmark_bps", "display_spread_bps", "avg_yield", "benchmark_yield"]:
+                        if c in audit_hist.columns:
+                            audit_hist[c] = pd.to_numeric(audit_hist[c], errors="coerce").round(2)
+                    st.dataframe(
+                        audit_hist.sort_values("trade_date", ascending=False).head(1000),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
 
 section_anchor("spread-movement", "Spread Movement Heatmap")
