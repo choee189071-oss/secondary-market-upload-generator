@@ -386,6 +386,85 @@ def build_spread_movement_heatmap_data(
     return matrix, pd.DataFrame(audit_rows)
 
 
+def build_spread_level_data(
+    market_df: pd.DataFrame,
+    mmd_df: pd.DataFrame,
+    issuer: str,
+    ratings: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return current spread level matrix and audit table.
+
+    Matrix rows are maturity buckets; columns are benchmark ratings.
+    Each cell is the latest available issuer spread to that benchmark, in bps:
+        (Average Issuer Trade Yield - Synthetic Benchmark Yield) * 100
+
+    This is different from spread movement. Spread level answers "where is
+    the issuer trading now?" Movement answers "how much did it change?"
+    """
+    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+    clean_ratings = [r for r in ratings if r in BENCHMARK_RATINGS]
+    matrix = pd.DataFrame(index=maturity_order, columns=clean_ratings, dtype="float")
+    audit_rows: list[dict] = []
+
+    if not clean_ratings or market_df.empty or mmd_df.empty:
+        return matrix, pd.DataFrame(audit_rows)
+
+    for rating in clean_ratings:
+        spread_obs = build_spread_observations(
+            market_df=market_df,
+            mmd_df=mmd_df,
+            issuer=issuer,
+            rating=rating,
+        )
+        if spread_obs.empty:
+            continue
+
+        spread_obs = spread_obs.copy()
+        spread_obs["trade_date"] = pd.to_datetime(spread_obs["trade_date"], errors="coerce").dt.normalize()
+        spread_obs = spread_obs.dropna(subset=["trade_date", "spread_to_benchmark_bps"])
+
+        for bucket in maturity_order:
+            bucket_obs = spread_obs[spread_obs["maturity_bucket"] == bucket].sort_values("trade_date")
+            if bucket_obs.empty:
+                audit_rows.append(
+                    {
+                        "maturity_bucket": bucket,
+                        "benchmark_rating": rating,
+                        "latest_date": pd.NaT,
+                        "avg_yield": pd.NA,
+                        "benchmark_yield": pd.NA,
+                        "spread_to_benchmark_bps": pd.NA,
+                        "mmd_tenor": MMD_BUCKET_MAP.get(bucket),
+                        "rating_spread_bps": RATING_SPREADS.get(rating, RATING_SPREADS["AAA"]).get(MMD_BUCKET_MAP.get(bucket, "10Y"), 0.00) * 100,
+                        "trade_count": pd.NA,
+                        "total_trade_amount": pd.NA,
+                        "note": "No overlapping issuer trade and benchmark observation",
+                    }
+                )
+                continue
+
+            latest = bucket_obs.iloc[-1]
+            spread_level = latest["spread_to_benchmark_bps"]
+            matrix.loc[bucket, rating] = spread_level
+            audit_rows.append(
+                {
+                    "maturity_bucket": bucket,
+                    "benchmark_rating": rating,
+                    "latest_date": latest["trade_date"],
+                    "avg_yield": latest.get("avg_yield"),
+                    "benchmark_yield": latest.get("benchmark_yield"),
+                    "spread_to_benchmark_bps": spread_level,
+                    "mmd_tenor": latest.get("mmd_tenor"),
+                    "rating_spread_bps": latest.get("rating_spread_bps"),
+                    "trade_count": latest.get("trade_count"),
+                    "total_trade_amount": latest.get("total_trade_amount"),
+                    "note": "Latest available spread observation for maturity bucket and benchmark",
+                }
+            )
+
+    return matrix, pd.DataFrame(audit_rows)
+
+
 def _normalize_col_name(name: object) -> str:
     """Normalize external column names so Munipro/Excel variants can be detected."""
     text = str(name).strip().lower()
@@ -858,6 +937,140 @@ Where:
                 )
     elif show_spread_to_benchmark and mmd_df.empty:
         st.info("Upload an MMD curve file to enable AAA/AA/A/BBB benchmark curves and spread-to-benchmark analytics.")
+
+st.header("Current Spread Level Framework")
+with st.expander("Methodology: current spread level", expanded=False):
+    st.markdown(
+        """
+This section shows where the selected issuer is trading **now** versus transparent benchmark curves.
+
+**Calculation:**
+
+`Current Spread Level = (Average Issuer Trade Yield - Synthetic Benchmark Yield) × 100`
+
+Where:
+
+`Synthetic Benchmark Yield = MMD AAA Curve + Rating Spread Assumption`
+
+**How to read it:**
+
+- **Positive spread**: issuer yield is above the selected benchmark curve; the issuer/bucket is trading cheaper than that benchmark.
+- **Negative spread**: issuer yield is below the selected benchmark curve; the issuer/bucket is trading richer than that benchmark.
+- Rows are maturity buckets. Columns are benchmark curves.
+- This is a **level** view, not a movement view. Level answers: *is it cheap or rich right now?* Movement answers: *did it widen or tighten recently?*
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD curve file to enable current spread level analytics.")
+else:
+    level_col1, level_col2 = st.columns([1, 2])
+    with level_col1:
+        level_ratings = st.multiselect(
+            "Spread Level Benchmark Curves",
+            BENCHMARK_RATINGS,
+            default=[r for r in ["AAA", "AA", "A", "BBB"] if r in BENCHMARK_RATINGS],
+            help="AAA uses uploaded MMD directly. Other ratings use MMD plus the visible rating-spread assumptions.",
+        )
+    with level_col2:
+        st.caption(
+            "Cells show latest available issuer spread to each benchmark curve, in basis points. "
+            "Higher positive values generally indicate cheaper relative value versus that benchmark."
+        )
+
+    if not level_ratings:
+        st.info("Select at least one benchmark curve to display current spread levels.")
+    else:
+        level_matrix, level_audit = build_spread_level_data(
+            market_df=market_df,
+            mmd_df=mmd_df,
+            issuer=selected_issuer,
+            ratings=level_ratings,
+        )
+        if level_matrix.isna().all().all():
+            st.warning(
+                "No overlapping issuer trade dates and benchmark dates were found for current spread levels. "
+                "Check that the MMD file has Date plus 5Y/10Y/20Y/30Y columns, and that trade dates overlap with the MMD history."
+            )
+        else:
+            level_text = level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+
+            # 1) Spread level curve: one line per selected benchmark rating.
+            curve_df = level_matrix.reset_index().rename(columns={"index": "maturity_bucket"})
+            curve_long = curve_df.melt(
+                id_vars="maturity_bucket",
+                var_name="benchmark_rating",
+                value_name="spread_to_benchmark_bps",
+            ).dropna(subset=["spread_to_benchmark_bps"])
+            curve_long["maturity_bucket"] = pd.Categorical(
+                curve_long["maturity_bucket"],
+                categories=["Short", "10Y", "20Y", "30Y"],
+                ordered=True,
+            )
+            curve_long = curve_long.sort_values(["benchmark_rating", "maturity_bucket"])
+
+            st.subheader("1. Current Spread Curve")
+            level_curve_fig = px.line(
+                curve_long,
+                x="maturity_bucket",
+                y="spread_to_benchmark_bps",
+                color="benchmark_rating",
+                markers=True,
+                title=f"{selected_issuer} Current Spread Curve vs Selected Benchmarks",
+                labels={
+                    "maturity_bucket": "Maturity Bucket",
+                    "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
+                    "benchmark_rating": "Benchmark Curve",
+                },
+            )
+            level_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.5)
+            level_curve_fig.update_layout(hovermode="x unified")
+            st.plotly_chart(level_curve_fig, use_container_width=True)
+
+            # 2) Spread level heatmap: maturity bucket x benchmark rating.
+            st.subheader("2. Current Spread Level Heatmap")
+            level_heatmap_fig = px.imshow(
+                level_matrix.astype(float),
+                x=level_matrix.columns,
+                y=level_matrix.index,
+                color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
+                color_continuous_midpoint=0,
+                aspect="auto",
+                title=f"{selected_issuer} Current Spread Level vs Benchmark Curves",
+                labels={"x": "Benchmark Curve", "y": "Maturity Bucket", "color": "Current Spread (bps)"},
+            )
+            level_heatmap_fig.update_traces(
+                text=level_text.values,
+                texttemplate="%{text}",
+                hovertemplate="Maturity=%{y}<br>Benchmark=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
+            )
+            level_heatmap_fig.update_layout(height=420)
+            st.plotly_chart(level_heatmap_fig, use_container_width=True)
+
+            # 3) Quick signal: identify the cheapest bucket vs the first selected benchmark.
+            primary_rating = level_ratings[0]
+            if primary_rating in level_matrix.columns and level_matrix[primary_rating].notna().any():
+                cheapest_bucket = level_matrix[primary_rating].astype(float).idxmax()
+                cheapest_spread = level_matrix.loc[cheapest_bucket, primary_rating]
+                richest_bucket = level_matrix[primary_rating].astype(float).idxmin()
+                richest_spread = level_matrix.loc[richest_bucket, primary_rating]
+                st.info(
+                    f"Relative value read-through vs {primary_rating}: "
+                    f"{cheapest_bucket} appears cheapest at {cheapest_spread:+.1f} bp, "
+                    f"while {richest_bucket} appears richest at {richest_spread:+.1f} bp."
+                )
+
+            with st.expander("Current spread level audit table", expanded=False):
+                display_cols = [
+                    "maturity_bucket", "benchmark_rating", "latest_date", "avg_yield", "benchmark_yield",
+                    "spread_to_benchmark_bps", "mmd_tenor", "rating_spread_bps", "trade_count",
+                    "total_trade_amount", "note",
+                ]
+                audit_display = level_audit[[c for c in display_cols if c in level_audit.columns]].copy()
+                for c in ["avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "rating_spread_bps"]:
+                    if c in audit_display.columns:
+                        audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
+                st.dataframe(audit_display, use_container_width=True, hide_index=True)
 
 st.header("Spread Movement Heatmap")
 with st.expander("Methodology: spread movement heatmap", expanded=False):
