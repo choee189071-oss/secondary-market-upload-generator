@@ -28,17 +28,97 @@ except Exception:
     client = None
 
 
+def retrieve_market_context_with_openai(
+    context_package: dict,
+    market_context_query: str,
+    model: str = "gpt-4.1-mini",
+) -> str:
+    """Controlled market / sector context retrieval using OpenAI web search.
+
+    This is separate from final commentary generation so the app can show users
+    exactly what market context is being used before synthesis.
+    """
+
+    if not OPENAI_AVAILABLE or client is None:
+        return (
+            "Market context retrieval unavailable. Confirm that `openai` is in requirements.txt "
+            "and `OPENAI_API_KEY` is configured in Streamlit Secrets."
+        )
+
+    retrieval_prompt = {
+        "task": "Retrieve and summarize public market context for muni commentary.",
+        "strict_rules": [
+            "Focus on public market context only.",
+            "Do not invent issuer-specific explanations.",
+            "Separate rates/Treasury context, muni market context, sector context, and issuer-specific public headlines if any.",
+            "If relevant public context is not found, say so clearly.",
+            "Keep the output concise and evidence-oriented.",
+        ],
+        "dashboard_context": {
+            "issuer": context_package.get("issuer"),
+            "sector": context_package.get("sector"),
+            "bucket": context_package.get("bucket"),
+            "benchmark": context_package.get("benchmark"),
+            "period": context_package.get("period"),
+            "signals": context_package.get("signals", {}),
+        },
+        "search_focus": market_context_query,
+        "preferred_context_categories": [
+            "Treasury curve / rates movement",
+            "municipal bond market tone",
+            "municipal fund flows",
+            "sector-specific public news",
+            "issuer-specific public news only if clearly available",
+        ],
+        "output_format": {
+            "Rates / Treasury Context": "2-4 bullets",
+            "Muni Market Context": "2-4 bullets",
+            "Sector / Issuer Context": "2-4 bullets",
+            "Relevance to Dashboard Signals": "2-4 bullets",
+            "Caveats": "1-2 bullets",
+        },
+    }
+
+    try:
+        response = client.responses.create(
+            model=model,
+            tools=[{"type": "web_search_preview"}],
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a market context retrieval assistant for a municipal bond analytics dashboard. "
+                        "Retrieve public context conservatively. Do not overstate causality."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(retrieval_prompt, indent=2, default=str),
+                },
+            ],
+            temperature=0.15,
+            max_output_tokens=900,
+        )
+
+        return response.output_text
+
+    except Exception as e:
+        return f"Market Context Retrieval Error: {str(e)}"
+
+
 def generate_ai_market_commentary(
     context_package: dict,
     manual_market_context: str = "",
+    retrieved_market_context: str = "",
     use_web_search: bool = False,
+    market_context_query: str = "",
     model: str = "gpt-4.1-mini",
 ) -> str:
     """Generate evidence-linked institutional commentary.
 
     The model should only synthesize the analytics and market context provided.
-    If web search is enabled, OpenAI's hosted web search tool may add current public context.
-    The dashboard remains fully functional even if the OpenAI package/key/tool is unavailable.
+    Web search is available as an optional fallback, but preferred workflow is:
+    dashboard signals -> controlled retrieval -> review context -> commentary.
     """
 
     if not OPENAI_AVAILABLE or client is None:
@@ -55,24 +135,29 @@ Write concise, evidence-linked secondary-market commentary for a muni trading / 
 Rules:
 - Use ONLY the provided dashboard analytics and provided/retrieved market context.
 - Do NOT invent issuer-specific news, ratings actions, trades, or market events.
+- Do NOT claim causality unless the provided market context supports it.
 - If market context is missing or weak, say that context is limited.
 - Separate data-backed observations from interpretation.
-- Keep tone professional, like buy-side / broker-dealer strategy commentary.
+- Keep tone professional, like buy-side or broker-dealer strategy commentary.
 - Mention that signals are screening indicators, not investment recommendations.
-- Prefer 3 sections:
+- Prefer 4 sections:
   1) Market Commentary
   2) Why This May Be Happening
-  3) Evidence Used
+  3) Risks / Caveats
+  4) Evidence Used
 """
 
     user_payload = {
         "task": "Generate institutional municipal secondary-market commentary.",
         "manual_market_context": manual_market_context,
+        "retrieved_market_context": retrieved_market_context,
+        "market_context_query": market_context_query,
         "dashboard_context_package": context_package,
         "requested_output_format": {
             "Market Commentary": "2-4 concise bullet points",
             "Why This May Be Happening": "2-4 concise bullet points tied to evidence",
-            "Evidence Used": "bullet list of exact signals and context used",
+            "Risks / Caveats": "1-3 bullets noting weak evidence, liquidity/data limitations, or alternative explanations",
+            "Evidence Used": "bullet list of exact dashboard signals and market-context items used",
         },
     }
 
@@ -90,7 +175,7 @@ Rules:
                 },
             ],
             temperature=0.25,
-            max_output_tokens=900,
+            max_output_tokens=1100,
         )
 
         return response.output_text
@@ -5065,8 +5150,39 @@ with ai_col4:
 
 ai_period_days = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}[ai_period]
 
+st.markdown("### Controlled Market Context Retrieval")
+st.caption(
+    "Recommended workflow: first build dashboard signals, then retrieve/review public market context, "
+    "then generate final commentary. This keeps the AI evidence-linked instead of free-form."
+)
+
+context_col1, context_col2 = st.columns([1.2, 1])
+with context_col1:
+    market_context_query = st.text_area(
+        "Market / sector context search focus",
+        value=(
+            f"Municipal bond market context for {selected_sector} sector and {selected_issuer}; "
+            f"focus on Treasury curve, muni market tone, fund flows, and sector headlines over the last {ai_period_days} days."
+        ),
+        height=110,
+        key="ai_market_context_query",
+        help="This tells the AI web search what public context to retrieve. Avoid confidential internal details.",
+    )
+with context_col2:
+    ai_context_mode = st.radio(
+        "AI Context Mode",
+        [
+            "Dashboard analytics only",
+            "Manual context only",
+            "Retrieve market context first",
+            "Manual + retrieved context",
+        ],
+        index=2,
+        key="ai_context_mode",
+    )
+
 manual_market_context = st.text_area(
-    "Optional market / sector context",
+    "Optional manual market / sector context",
     placeholder=(
         "Example: Treasury curve steepened during the period; long-duration munis underperformed; "
         "utility sector saw weaker tone after fund outflows..."
@@ -5075,13 +5191,13 @@ manual_market_context = st.text_area(
     key="manual_ai_market_context",
 )
 
-use_ai_web_search = st.checkbox(
-    "Use OpenAI web search for public market context",
+direct_web_search_in_commentary = st.checkbox(
+    "Allow direct web search during final commentary generation",
     value=False,
-    key="use_ai_web_search",
+    key="direct_web_search_in_commentary",
     help=(
-        "Optional. This can retrieve public web context, but the output should still be reviewed. "
-        "For sensitive internal work, keep this off and provide manual context."
+        "Usually keep this off. Preferred workflow is: Retrieve Market Context → review it → Generate Commentary. "
+        "Turn this on only if you want the final commentary call to do additional web search."
     ),
 )
 
@@ -5275,21 +5391,60 @@ st.subheader("AI Context Package")
 with st.expander("Review structured evidence before sending to AI", expanded=False):
     st.json(ai_context)
 
-if use_ai_web_search:
+# -----------------------------
+# Controlled retrieval + synthesis workflow
+# -----------------------------
+retrieve_enabled = ai_context_mode in ["Retrieve market context first", "Manual + retrieved context"]
+manual_enabled = ai_context_mode in ["Manual context only", "Manual + retrieved context"]
+
+if retrieve_enabled or direct_web_search_in_commentary:
     st.warning(
-        "Web search is enabled. The AI may retrieve public context from the web. "
-        "Do not include confidential or proprietary information in manual context."
+        "Public web context may be retrieved. Do not include confidential, proprietary, or client-sensitive information "
+        "in the market context query or manual context field."
     )
 
-if st.button("Generate AI Institutional Commentary", key="generate_ai_institutional_commentary"):
-    with st.spinner("Generating evidence-linked commentary..."):
-        commentary = generate_ai_market_commentary(
-            context_package=ai_context,
-            manual_market_context=manual_market_context,
-            use_web_search=use_ai_web_search,
-            model=ai_model,
+action_col1, action_col2 = st.columns([1, 1])
+
+with action_col1:
+    if st.button("Retrieve Market / Sector Context", key="retrieve_ai_market_context", disabled=not retrieve_enabled):
+        with st.spinner("Retrieving controlled public market context..."):
+            retrieved_context = retrieve_market_context_with_openai(
+                context_package=ai_context,
+                market_context_query=market_context_query,
+                model=ai_model,
+            )
+            st.session_state["latest_retrieved_market_context"] = retrieved_context
+
+with action_col2:
+    if st.button("Generate AI Institutional Commentary", key="generate_ai_institutional_commentary"):
+        retrieved_context_for_commentary = (
+            st.session_state.get("latest_retrieved_market_context", "")
+            if ai_context_mode in ["Retrieve market context first", "Manual + retrieved context"]
+            else ""
         )
-        st.session_state["latest_ai_commentary"] = commentary
+        manual_context_for_commentary = manual_market_context if manual_enabled else ""
+
+        with st.spinner("Generating evidence-linked commentary..."):
+            commentary = generate_ai_market_commentary(
+                context_package=ai_context,
+                manual_market_context=manual_context_for_commentary,
+                retrieved_market_context=retrieved_context_for_commentary,
+                use_web_search=direct_web_search_in_commentary,
+                market_context_query=market_context_query,
+                model=ai_model,
+            )
+            st.session_state["latest_ai_commentary"] = commentary
+
+if "latest_retrieved_market_context" in st.session_state:
+    st.subheader("Retrieved Market / Sector Context")
+    st.markdown(st.session_state["latest_retrieved_market_context"])
+
+    st.download_button(
+        label="Download Retrieved Market Context Markdown",
+        data=st.session_state["latest_retrieved_market_context"].encode("utf-8"),
+        file_name=f"{selected_issuer}_retrieved_market_context.md".replace(" ", "_"),
+        mime="text/markdown",
+    )
 
 if "latest_ai_commentary" in st.session_state:
     st.subheader("Generated Institutional Commentary")
@@ -5300,6 +5455,27 @@ if "latest_ai_commentary" in st.session_state:
         data=st.session_state["latest_ai_commentary"].encode("utf-8"),
         file_name=f"{selected_issuer}_ai_market_commentary.md".replace(" ", "_"),
         mime="text/markdown",
+    )
+
+with st.expander("Recommended AI architecture for this dashboard", expanded=False):
+    st.markdown(
+        """
+**Best practice: use a centralized AI Commentary Studio, not one AI button per section.**
+
+Why:
+1. Lower API cost.
+2. Less duplicated commentary.
+3. Lower risk of conflicting explanations.
+4. Easier review by analysts / managers.
+5. Cleaner evidence trail.
+
+Recommended workflow:
+1. Dashboard computes deterministic analytics.
+2. AI Context Package captures the evidence.
+3. Controlled Market Context Retrieval gathers public market/sector context.
+4. User reviews retrieved context.
+5. Final AI commentary synthesizes data + context into institutional language.
+        """
     )
 
 with st.expander("Where should AI commentary live?", expanded=False):
