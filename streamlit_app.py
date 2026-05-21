@@ -7,6 +7,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+import streamlit as st
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=st.secrets["OPENAI_API_KEY"]
+)
+
 from data_utils import (
     build_issuer_master,
     merge_market_data,
