@@ -4,6 +4,7 @@ import io
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from data_utils import (
@@ -161,12 +162,13 @@ def section_directory():
 <a href="#yield-relative-value">3. Yield & Relative Value</a> ·
 <a href="#issuer-curve">4. Issuer Curve vs Benchmark</a> ·
 <a href="#spread-level">5. Current Spread Level</a> ·
-<a href="#spread-movement">6. Spread Movement</a> ·
-<a href="#rv-positioning">7. RV Positioning Map</a> ·
-<a href="#liquidity">8. Liquidity</a> ·
-<a href="#bond-master">9. Bond Master</a> ·
-<a href="#trade-detail">10. Trade Detail</a> ·
-<a href="#downloads">11. Downloads</a>
+<a href="#spread-attribution">6. Spread Attribution</a> ·
+<a href="#spread-movement">7. Spread Movement</a> ·
+<a href="#rv-positioning">8. RV Positioning Map</a> ·
+<a href="#liquidity">9. Liquidity</a> ·
+<a href="#bond-master">10. Bond Master</a> ·
+<a href="#trade-detail">11. Trade Detail</a> ·
+<a href="#downloads">12. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1754,6 +1756,280 @@ else:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
                 st.dataframe(audit_display, use_container_width=True, hide_index=True)
+
+
+section_anchor("spread-attribution", "Spread Attribution Waterfall")
+with st.expander("Methodology: spread attribution waterfall", expanded=False):
+    st.markdown(
+        """
+This section decomposes the selected issuer's spread versus the **AAA/MMD curve** into transparent, reviewable components.
+
+**Framework:**
+
+`Issuer Spread vs AAA = Rating Premium + Liquidity Premium + Callable Adjustment + Residual / Issuer-Specific Premium`
+
+**Important notes:**
+
+- This is a **modeled attribution**, not a vendor curve or investment recommendation.
+- **Rating Premium** uses the visible maturity-adjusted rating-spread assumptions already shown in the benchmark methodology.
+- **Liquidity Premium** is estimated from the issuer/bucket liquidity score. Less liquid buckets receive a larger modeled premium.
+- **Callable Adjustment** is a simple proxy based on whether bonds in the bucket appear callable.
+- **Residual / Issuer-Specific Premium** captures what remains after the modeled components. This can reflect credit, sector, structure, supply/demand, data noise, or model misspecification.
+- The purpose is pitchbook-style explanation and screening, not final pricing.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD curve file to enable spread attribution waterfall analytics.")
+else:
+    wf_col1, wf_col2, wf_col3 = st.columns([1, 1, 1])
+    with wf_col1:
+        wf_bucket = st.selectbox(
+            "Waterfall Maturity Bucket",
+            ["Short", "10Y", "20Y", "30Y"],
+            index=1,
+            help="The issuer spread will be attributed for this maturity bucket.",
+        )
+    with wf_col2:
+        wf_rating = st.selectbox(
+            "Modeled Rating Premium",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AA") if "AA" in BENCHMARK_RATINGS else 0,
+            help="Used only for the rating-premium component. The total spread is measured versus AAA/MMD.",
+        )
+    with wf_col3:
+        wf_lookback_days = st.selectbox(
+            "Issuer Yield Lookback",
+            [7, 30, 60, 90, 180],
+            index=1,
+            format_func=lambda x: f"Latest {x} days",
+            help="Average issuer yield is calculated from trades in this lookback window to reduce muni trading noise.",
+        )
+
+    wf_tenor = MMD_BUCKET_MAP.get(wf_bucket, "10Y")
+    date_col = _detect_mmd_date_column(mmd_df)
+
+    if date_col is None:
+        st.warning("Waterfall cannot run because the MMD/curve file does not contain a usable date column.")
+    else:
+        issuer_bucket_trades = market_df[
+            (market_df["issuer"] == selected_issuer)
+            & (market_df["maturity_bucket"] == wf_bucket)
+        ].copy()
+
+        if issuer_bucket_trades.empty:
+            st.warning(f"No {wf_bucket} trade rows were found for {selected_issuer}.")
+        else:
+            issuer_bucket_trades["trade_date"] = pd.to_datetime(issuer_bucket_trades["trade_date"], errors="coerce")
+            issuer_bucket_trades["yield"] = pd.to_numeric(issuer_bucket_trades["yield"], errors="coerce")
+            issuer_bucket_trades = issuer_bucket_trades.dropna(subset=["trade_date", "yield"])
+
+            if issuer_bucket_trades.empty:
+                st.warning("Waterfall cannot run because no valid trade dates/yields remain after cleaning.")
+            else:
+                wf_latest_trade_date = issuer_bucket_trades["trade_date"].max().normalize()
+                wf_start_date = wf_latest_trade_date - pd.Timedelta(days=int(wf_lookback_days))
+                wf_window_trades = issuer_bucket_trades[issuer_bucket_trades["trade_date"] >= wf_start_date].copy()
+
+                if wf_window_trades.empty:
+                    st.warning("No trades were found inside the selected lookback window.")
+                else:
+                    wf_avg_issuer_yield = wf_window_trades["yield"].mean()
+                    wf_trade_count = len(wf_window_trades)
+
+                    if "trade_amount" in wf_window_trades.columns:
+                        wf_total_trade_amount = pd.to_numeric(
+                            wf_window_trades["trade_amount"], errors="coerce"
+                        ).fillna(0).sum()
+                    else:
+                        wf_total_trade_amount = 0.0
+
+                    wf_mmd = mmd_df.copy()
+                    wf_mmd[date_col] = pd.to_datetime(wf_mmd[date_col], errors="coerce")
+                    wf_mmd = wf_mmd.dropna(subset=[date_col])
+                    wf_mmd = wf_mmd[wf_mmd[date_col].dt.normalize() <= wf_latest_trade_date].copy()
+
+                    if wf_mmd.empty:
+                        st.warning("No benchmark curve observations were available on or before the latest issuer trade date.")
+                    else:
+                        wf_mmd = wf_mmd.sort_values(date_col)
+                        wf_latest_mmd = wf_mmd.iloc[[-1]].copy()
+                        wf_benchmark_date = wf_latest_mmd[date_col].iloc[0]
+
+                        wf_aaa_yield_series, wf_aaa_meta = get_benchmark_curve(wf_latest_mmd, wf_tenor, "AAA")
+                        if wf_aaa_yield_series is None or pd.isna(wf_aaa_yield_series.iloc[0]):
+                            st.warning(f"AAA/MMD {wf_tenor} curve could not be built for the waterfall.")
+                        else:
+                            wf_aaa_yield = float(wf_aaa_yield_series.iloc[0])
+                            wf_total_spread_bps = (wf_avg_issuer_yield - wf_aaa_yield) * 100
+
+                            wf_rating_premium_bps = (
+                                RATING_SPREADS.get(wf_rating, RATING_SPREADS["AAA"]).get(wf_tenor, 0.00) * 100
+                            )
+
+                            wf_liq_source = wf_window_trades.copy()
+                            wf_liq_source["trade_month"] = wf_liq_source["trade_date"].dt.to_period("M").astype(str)
+                            wf_today = pd.Timestamp.today().normalize()
+
+                            if "trade_amount" not in wf_liq_source.columns:
+                                wf_liq_source["trade_amount"] = 0.0
+
+                            wf_liq_by_cusip = (
+                                wf_liq_source.groupby("cusip", dropna=False)
+                                .agg(
+                                    trade_count=("trade_date", "count"),
+                                    latest_trade=("trade_date", "max"),
+                                    active_months=("trade_month", "nunique"),
+                                    total_trade_amount=("trade_amount", "sum"),
+                                )
+                                .reset_index()
+                            )
+
+                            if wf_liq_by_cusip.empty:
+                                wf_avg_liquidity_score = pd.NA
+                                wf_liquidity_premium_bps = 10.0
+                                wf_liquidity_note = "No CUSIP-level liquidity score available; default proxy used."
+                            else:
+                                wf_liq_by_cusip["days_since_last_trade"] = (
+                                    wf_today - wf_liq_by_cusip["latest_trade"]
+                                ).dt.days
+                                wf_liq_by_cusip["recent_90d_trades"] = wf_liq_by_cusip["trade_count"]
+                                wf_liq_by_cusip["liquidity_score"] = (
+                                    wf_liq_by_cusip["trade_count"].rank(pct=True) * 35
+                                    + wf_liq_by_cusip["total_trade_amount"].rank(pct=True) * 25
+                                    + wf_liq_by_cusip["recent_90d_trades"].rank(pct=True) * 25
+                                    + (1 - wf_liq_by_cusip["days_since_last_trade"].rank(pct=True)) * 15
+                                )
+                                wf_avg_liquidity_score = wf_liq_by_cusip["liquidity_score"].mean()
+
+                                if pd.isna(wf_avg_liquidity_score):
+                                    wf_liquidity_premium_bps = 10.0
+                                    wf_liquidity_note = "Liquidity score unavailable; default proxy used."
+                                elif wf_avg_liquidity_score < 45:
+                                    wf_liquidity_premium_bps = 15.0
+                                    wf_liquidity_note = "Low liquidity bucket proxy."
+                                elif wf_avg_liquidity_score < 75:
+                                    wf_liquidity_premium_bps = 7.5
+                                    wf_liquidity_note = "Medium liquidity bucket proxy."
+                                else:
+                                    wf_liquidity_premium_bps = 2.5
+                                    wf_liquidity_note = "High liquidity bucket proxy."
+
+                            callable_cols = [c for c in ["call_date", "call_date_bond"] if c in wf_window_trades.columns]
+                            wf_callable_share = 0.0
+                            if callable_cols:
+                                call_col = callable_cols[0]
+                                parsed_calls = pd.to_datetime(wf_window_trades[call_col], errors="coerce")
+                                wf_callable_share = parsed_calls.notna().mean()
+                            wf_callable_adjustment_bps = 5.0 if wf_callable_share >= 0.50 else 0.0
+
+                            wf_residual_bps = (
+                                wf_total_spread_bps
+                                - wf_rating_premium_bps
+                                - wf_liquidity_premium_bps
+                                - wf_callable_adjustment_bps
+                            )
+
+                            waterfall_df = pd.DataFrame(
+                                {
+                                    "Component": [
+                                        "AAA / MMD Base",
+                                        "Rating Premium",
+                                        "Liquidity Premium",
+                                        "Callable Adjustment",
+                                        "Residual / Issuer-Specific Premium",
+                                        "Implied Issuer Yield",
+                                    ],
+                                    "Value": [
+                                        wf_aaa_yield,
+                                        wf_rating_premium_bps / 100,
+                                        wf_liquidity_premium_bps / 100,
+                                        wf_callable_adjustment_bps / 100,
+                                        wf_residual_bps / 100,
+                                        wf_avg_issuer_yield,
+                                    ],
+                                    "Display": [
+                                        f"{wf_aaa_yield:.2f}%",
+                                        f"{wf_rating_premium_bps:+.1f} bp",
+                                        f"{wf_liquidity_premium_bps:+.1f} bp",
+                                        f"{wf_callable_adjustment_bps:+.1f} bp",
+                                        f"{wf_residual_bps:+.1f} bp",
+                                        f"{wf_avg_issuer_yield:.2f}%",
+                                    ],
+                                }
+                            )
+
+                            wf_fig = go.Figure(
+                                go.Waterfall(
+                                    name="Spread Attribution",
+                                    orientation="v",
+                                    measure=["absolute", "relative", "relative", "relative", "relative", "total"],
+                                    x=waterfall_df["Component"],
+                                    y=waterfall_df["Value"],
+                                    text=waterfall_df["Display"],
+                                    textposition="outside",
+                                    connector={"line": {"width": 1}},
+                                )
+                            )
+                            wf_fig.update_layout(
+                                title=f"{selected_issuer} Spread Attribution Waterfall ({wf_bucket}, vs AAA/MMD)",
+                                yaxis_title="Yield / Spread Contribution (%)",
+                                height=540,
+                                showlegend=False,
+                            )
+                            st.plotly_chart(wf_fig, use_container_width=True)
+
+                            wf_metric1, wf_metric2, wf_metric3, wf_metric4 = st.columns(4)
+                            wf_metric1.metric("Issuer Yield", f"{wf_avg_issuer_yield:.2f}%")
+                            wf_metric2.metric("AAA / MMD Yield", f"{wf_aaa_yield:.2f}%")
+                            wf_metric3.metric("Total Spread vs AAA", f"{wf_total_spread_bps:+.1f} bp")
+                            wf_metric4.metric("Residual Premium", f"{wf_residual_bps:+.1f} bp")
+
+                            if wf_residual_bps > 15:
+                                st.info(
+                                    f"Read-through: after modeled rating, liquidity, and callable components, "
+                                    f"{selected_issuer}'s {wf_bucket} bucket still shows a positive residual premium "
+                                    f"of {wf_residual_bps:+.1f} bp. This may indicate issuer-specific cheapness, "
+                                    f"sector/supply pressure, data noise, or a component assumption that should be reviewed."
+                                )
+                            elif wf_residual_bps < -15:
+                                st.info(
+                                    f"Read-through: the modeled components exceed the observed spread by "
+                                    f"{abs(wf_residual_bps):.1f} bp. This may indicate rich trading, stronger demand, "
+                                    f"or overly conservative component assumptions."
+                                )
+                            else:
+                                st.info(
+                                    "Read-through: modeled components broadly explain the observed spread versus AAA/MMD. "
+                                    "Residual premium is relatively modest."
+                                )
+
+                            with st.expander("Waterfall calculation audit table", expanded=False):
+                                audit_df = pd.DataFrame(
+                                    [
+                                        {"Metric": "Selected issuer", "Value": selected_issuer},
+                                        {"Metric": "Maturity bucket", "Value": wf_bucket},
+                                        {"Metric": "MMD tenor", "Value": wf_tenor},
+                                        {"Metric": "Latest issuer trade date", "Value": wf_latest_trade_date.strftime("%Y-%m-%d")},
+                                        {"Metric": "Benchmark curve date", "Value": wf_benchmark_date.strftime("%Y-%m-%d")},
+                                        {"Metric": "Issuer yield lookback", "Value": f"{wf_lookback_days} days"},
+                                        {"Metric": "Trade count in lookback", "Value": f"{wf_trade_count:,}"},
+                                        {"Metric": "Total trade amount in lookback", "Value": f"{wf_total_trade_amount:,.0f}"},
+                                        {"Metric": "Average issuer yield", "Value": f"{wf_avg_issuer_yield:.4f}%"},
+                                        {"Metric": "AAA/MMD yield", "Value": f"{wf_aaa_yield:.4f}%"},
+                                        {"Metric": "Total spread vs AAA", "Value": f"{wf_total_spread_bps:+.2f} bp"},
+                                        {"Metric": "Rating premium assumption", "Value": f"{wf_rating} / {wf_tenor}: {wf_rating_premium_bps:+.2f} bp"},
+                                        {"Metric": "Average liquidity score", "Value": "" if pd.isna(wf_avg_liquidity_score) else f"{wf_avg_liquidity_score:.2f}"},
+                                        {"Metric": "Liquidity premium proxy", "Value": f"{wf_liquidity_premium_bps:+.2f} bp — {wf_liquidity_note}"},
+                                        {"Metric": "Callable share proxy", "Value": f"{wf_callable_share:.1%}"},
+                                        {"Metric": "Callable adjustment proxy", "Value": f"{wf_callable_adjustment_bps:+.2f} bp"},
+                                        {"Metric": "Residual / issuer-specific premium", "Value": f"{wf_residual_bps:+.2f} bp"},
+                                        {"Metric": "Benchmark source", "Value": wf_aaa_meta.get("benchmark_source")},
+                                        {"Metric": "Benchmark source column", "Value": wf_aaa_meta.get("source_column")},
+                                    ]
+                                )
+                                st.dataframe(audit_df, use_container_width=True, hide_index=True)
+
 
 section_anchor("spread-movement", "Spread Movement Heatmap")
 with st.expander("Methodology: spread movement heatmap", expanded=False):
