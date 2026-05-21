@@ -170,7 +170,8 @@ def section_directory():
 <a href="#dealer-proxy">11. Dealer Proxy</a> ·
 <a href="#security-screener">12. Security Screener</a> ·
 <a href="#recommendation-engine">13. Recommendation Narrative</a> ·
-<a href="#spread-movement">14. Spread Movement</a> ·
+<a href="#scenario-shock">14. Scenario Shock Analysis</a> ·
+<a href="#spread-movement">15. Spread Movement</a> ·
 <a href="#cusip-drilldown">15. CUSIP Drilldown</a> ·
 <a href="#rv-positioning">16. RV Positioning Map</a> ·
 <a href="#liquidity">17. Liquidity</a> ·
@@ -1116,7 +1117,9 @@ with st.sidebar:
 &nbsp;&nbsp;• Find top RV candidates<br>
 <a href="#recommendation-engine">13. Recommendation Narrative</a><br>
 &nbsp;&nbsp;• Rule-based market commentary<br>
-<a href="#spread-movement">14. Spread Movement</a><br>
+<a href="#scenario-shock">14. Scenario Shock Analysis</a><br>
+&nbsp;&nbsp;• Rate shock + price impact<br>
+<a href="#spread-movement">15. Spread Movement</a><br>
 &nbsp;&nbsp;• Widening / tightening heatmap<br>
 <a href="#cusip-drilldown">15. CUSIP Opportunity Drilldown</a><br>
 &nbsp;&nbsp;• Bond-level drivers<br>
@@ -4296,6 +4299,323 @@ else:
             ]
         )
         st.dataframe(rule_df, use_container_width=True, hide_index=True)
+
+
+
+section_anchor("scenario-shock", "Scenario Shock Analysis")
+with st.expander("Methodology: scenario shock analysis", expanded=False):
+    st.markdown(
+        """
+This section estimates how the selected issuer or uploaded securities may react under simple interest-rate shock scenarios.
+
+**Purpose:**
+
+- Estimate approximate price impact under rate shocks.
+- Identify which maturity buckets or CUSIPs are most exposed to parallel moves, steepening, or flattening.
+- Provide a first-pass risk lens for secondary trading and pitchbook discussion.
+
+**Version 1 approximation:**
+
+This is a **duration-proxy model**, not a full bond pricing engine.
+
+Core formula:
+
+`Approximate Price Impact ≈ -Duration × Yield Shock`
+
+Where:
+
+- Duration is proxied by maturity bucket unless a duration field is uploaded.
+- Yield shock is expressed in decimal form. Example: `+25 bp = +0.0025`.
+- Price impact is an approximate percentage price move.
+
+**Default proxy durations:**
+
+| Bucket | Proxy Duration |
+|---|---:|
+| Short | 2.0 |
+| 10Y | 8.0 |
+| 20Y | 13.0 |
+| 30Y | 18.0 |
+
+**Important limitations:**
+
+- This does not model callable optionality, convexity, OAS, amortization, tax effects, or full cash flows.
+- Callable / premium bonds may behave differently from this simple duration approximation.
+- Treat this as a screening and risk-discussion tool, not a final valuation model.
+        """
+    )
+
+DURATION_PROXY = {
+    "Short": 2.0,
+    "10Y": 8.0,
+    "20Y": 13.0,
+    "30Y": 18.0,
+}
+
+SHOCK_SCENARIOS_BPS = {
+    "+25bp Parallel": {"Short": 25, "10Y": 25, "20Y": 25, "30Y": 25},
+    "+50bp Parallel": {"Short": 50, "10Y": 50, "20Y": 50, "30Y": 50},
+    "-25bp Parallel": {"Short": -25, "10Y": -25, "20Y": -25, "30Y": -25},
+    "Bear Steepening": {"Short": 5, "10Y": 15, "20Y": 25, "30Y": 35},
+    "Bull Flattening": {"Short": -25, "10Y": -20, "20Y": -10, "30Y": -5},
+    "Front-End Selloff": {"Short": 35, "10Y": 20, "20Y": 10, "30Y": 5},
+}
+
+shock_col1, shock_col2, shock_col3 = st.columns([1, 1, 1])
+with shock_col1:
+    shock_scope = st.selectbox(
+        "Shock Scope",
+        ["Selected issuer", "All uploaded issuers"],
+        index=0,
+        key="shock_scope",
+    )
+with shock_col2:
+    shock_scenario = st.selectbox(
+        "Rate Shock Scenario",
+        list(SHOCK_SCENARIOS_BPS.keys()) + ["Custom"],
+        index=0,
+        key="shock_scenario",
+    )
+with shock_col3:
+    shock_view = st.selectbox(
+        "Shock View",
+        ["Maturity bucket summary", "CUSIP-level detail"],
+        index=0,
+        key="shock_view",
+    )
+
+if shock_scenario == "Custom":
+    custom_col1, custom_col2, custom_col3, custom_col4 = st.columns(4)
+    with custom_col1:
+        shock_short = st.number_input("Short Shock (bp)", value=25.0, step=5.0, key="shock_short")
+    with custom_col2:
+        shock_10 = st.number_input("10Y Shock (bp)", value=25.0, step=5.0, key="shock_10")
+    with custom_col3:
+        shock_20 = st.number_input("20Y Shock (bp)", value=25.0, step=5.0, key="shock_20")
+    with custom_col4:
+        shock_30 = st.number_input("30Y Shock (bp)", value=25.0, step=5.0, key="shock_30")
+    selected_shocks = {
+        "Short": float(shock_short),
+        "10Y": float(shock_10),
+        "20Y": float(shock_20),
+        "30Y": float(shock_30),
+    }
+else:
+    selected_shocks = SHOCK_SCENARIOS_BPS[shock_scenario]
+
+shock_base = market_df.copy()
+if shock_scope == "Selected issuer":
+    shock_base = shock_base[shock_base["issuer"] == selected_issuer].copy()
+
+if shock_base.empty:
+    st.warning("No trade rows are available for the selected shock scope.")
+else:
+    shock_base["trade_date"] = pd.to_datetime(shock_base["trade_date"], errors="coerce").dt.normalize()
+    shock_base["yield"] = pd.to_numeric(shock_base["yield"], errors="coerce")
+    if "price" in shock_base.columns:
+        shock_base["price"] = pd.to_numeric(shock_base["price"], errors="coerce")
+    else:
+        shock_base["price"] = pd.NA
+    if "trade_amount" in shock_base.columns:
+        shock_base["trade_amount"] = pd.to_numeric(shock_base["trade_amount"], errors="coerce").fillna(0)
+    else:
+        shock_base["trade_amount"] = 0.0
+
+    shock_base = shock_base.dropna(subset=["trade_date", "yield", "maturity_bucket"])
+    shock_base = shock_base[shock_base["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+
+    if shock_base.empty:
+        st.warning("No usable rows with maturity buckets were available for scenario shock analysis.")
+    else:
+        # Build bucket summary from latest available selected-scope data.
+        latest_shock_date = shock_base["trade_date"].max()
+        shock_recent = shock_base[shock_base["trade_date"] >= latest_shock_date - pd.Timedelta(days=90)].copy()
+        if shock_recent.empty:
+            shock_recent = shock_base.copy()
+
+        bucket_summary = (
+            shock_recent.groupby("maturity_bucket", as_index=False)
+            .agg(
+                avg_yield=("yield", "mean"),
+                avg_price=("price", "mean"),
+                trade_count=("yield", "count"),
+                total_trade_amount=("trade_amount", "sum"),
+                latest_trade=("trade_date", "max"),
+            )
+        )
+        bucket_summary["proxy_duration"] = bucket_summary["maturity_bucket"].map(DURATION_PROXY)
+        bucket_summary["shock_bps"] = bucket_summary["maturity_bucket"].map(selected_shocks)
+        bucket_summary["shock_decimal"] = bucket_summary["shock_bps"] / 10000
+        bucket_summary["approx_price_impact_pct"] = -bucket_summary["proxy_duration"] * bucket_summary["shock_decimal"] * 100
+        bucket_summary["shocked_yield"] = bucket_summary["avg_yield"] + (bucket_summary["shock_bps"] / 100)
+        bucket_summary["impact_direction"] = bucket_summary["approx_price_impact_pct"].map(
+            lambda x: "Price Down" if x < 0 else "Price Up" if x > 0 else "Flat"
+        )
+
+        shock_m1, shock_m2, shock_m3, shock_m4 = st.columns(4)
+        worst_bucket_row = bucket_summary.sort_values("approx_price_impact_pct").iloc[0]
+        best_bucket_row = bucket_summary.sort_values("approx_price_impact_pct", ascending=False).iloc[0]
+        weighted_impact = (
+            (bucket_summary["approx_price_impact_pct"] * bucket_summary["total_trade_amount"]).sum()
+            / bucket_summary["total_trade_amount"].sum()
+            if bucket_summary["total_trade_amount"].sum() > 0
+            else bucket_summary["approx_price_impact_pct"].mean()
+        )
+
+        shock_m1.metric("Scenario", shock_scenario)
+        shock_m2.metric("Worst Bucket", f"{worst_bucket_row['maturity_bucket']}")
+        shock_m3.metric("Worst Approx Impact", f"{worst_bucket_row['approx_price_impact_pct']:+.2f}%")
+        shock_m4.metric("Weighted Impact", f"{weighted_impact:+.2f}%")
+
+        st.info(
+            f"Read-through: under **{shock_scenario}**, the most rate-sensitive bucket is "
+            f"{worst_bucket_row['maturity_bucket']} with an approximate price impact of "
+            f"{worst_bucket_row['approx_price_impact_pct']:+.2f}%. "
+            f"This is based on proxy duration and should be treated as a first-pass risk estimate."
+        )
+
+        st.subheader("1. Shock Impact by Maturity Bucket")
+        shock_bar = px.bar(
+            bucket_summary,
+            x="maturity_bucket",
+            y="approx_price_impact_pct",
+            hover_data={
+                "avg_yield": ":.2f",
+                "shocked_yield": ":.2f",
+                "proxy_duration": ":.1f",
+                "shock_bps": ":.0f",
+                "trade_count": ":,.0f",
+                "total_trade_amount": ":,.0f",
+            },
+            title=f"Approximate Price Impact by Bucket — {shock_scenario}",
+            labels={
+                "maturity_bucket": "Maturity Bucket",
+                "approx_price_impact_pct": "Approximate Price Impact (%)",
+                "avg_yield": "Current Avg Yield",
+                "shocked_yield": "Shocked Yield",
+                "proxy_duration": "Proxy Duration",
+                "shock_bps": "Shock (bp)",
+            },
+        )
+        shock_bar.add_hline(y=0, line_dash="dash", opacity=0.45)
+        shock_bar.update_layout(height=440)
+        st.plotly_chart(shock_bar, use_container_width=True)
+
+        st.subheader("2. Shock Summary Table")
+        bucket_display = bucket_summary.copy()
+        for col in ["avg_yield", "avg_price", "proxy_duration", "shocked_yield", "approx_price_impact_pct"]:
+            if col in bucket_display.columns:
+                bucket_display[col] = pd.to_numeric(bucket_display[col], errors="coerce").round(2)
+        st.dataframe(
+            bucket_display[
+                [
+                    "maturity_bucket",
+                    "avg_yield",
+                    "shocked_yield",
+                    "shock_bps",
+                    "proxy_duration",
+                    "approx_price_impact_pct",
+                    "trade_count",
+                    "total_trade_amount",
+                    "latest_trade",
+                    "impact_direction",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # CUSIP-level shock detail.
+        if shock_view == "CUSIP-level detail":
+            st.subheader("3. CUSIP-Level Shock Detail")
+            cusip_shock = (
+                shock_recent.groupby("cusip", dropna=False)
+                .agg(
+                    issuer=("issuer", "first"),
+                    sector=("sector", "first") if "sector" in shock_recent.columns else ("issuer", "first"),
+                    maturity_bucket=("maturity_bucket", "first"),
+                    maturity=("maturity_bond", "first") if "maturity_bond" in shock_recent.columns else ("trade_date", "max"),
+                    coupon=("coupon_bond", "first") if "coupon_bond" in shock_recent.columns else ("yield", "count"),
+                    avg_yield=("yield", "mean"),
+                    avg_price=("price", "mean"),
+                    trade_count=("yield", "count"),
+                    total_trade_amount=("trade_amount", "sum"),
+                    latest_trade=("trade_date", "max"),
+                )
+                .reset_index()
+            )
+            cusip_shock["proxy_duration"] = cusip_shock["maturity_bucket"].map(DURATION_PROXY)
+            cusip_shock["shock_bps"] = cusip_shock["maturity_bucket"].map(selected_shocks)
+            cusip_shock["shock_decimal"] = cusip_shock["shock_bps"] / 10000
+            cusip_shock["approx_price_impact_pct"] = -cusip_shock["proxy_duration"] * cusip_shock["shock_decimal"] * 100
+            cusip_shock["shocked_yield"] = cusip_shock["avg_yield"] + (cusip_shock["shock_bps"] / 100)
+            cusip_shock = cusip_shock.sort_values("approx_price_impact_pct")
+
+            detail_cols = [
+                "cusip",
+                "issuer",
+                "sector",
+                "maturity_bucket",
+                "maturity",
+                "coupon",
+                "avg_yield",
+                "shocked_yield",
+                "shock_bps",
+                "proxy_duration",
+                "approx_price_impact_pct",
+                "trade_count",
+                "total_trade_amount",
+                "latest_trade",
+            ]
+            detail_display = cusip_shock[[c for c in detail_cols if c in cusip_shock.columns]].copy()
+            for col in ["avg_yield", "shocked_yield", "proxy_duration", "approx_price_impact_pct"]:
+                if col in detail_display.columns:
+                    detail_display[col] = pd.to_numeric(detail_display[col], errors="coerce").round(2)
+
+            st.dataframe(detail_display.head(5000), use_container_width=True, hide_index=True, height=480)
+
+            shock_scatter = px.scatter(
+                cusip_shock,
+                x="proxy_duration",
+                y="approx_price_impact_pct",
+                size="total_trade_amount",
+                color="maturity_bucket",
+                hover_name="cusip",
+                hover_data=[
+                    c for c in ["issuer", "avg_yield", "shocked_yield", "shock_bps", "trade_count", "latest_trade"]
+                    if c in cusip_shock.columns
+                ],
+                title="CUSIP Shock Exposure Map",
+                labels={
+                    "proxy_duration": "Proxy Duration",
+                    "approx_price_impact_pct": "Approx Price Impact (%)",
+                    "maturity_bucket": "Maturity Bucket",
+                },
+            )
+            shock_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
+            shock_scatter.update_layout(height=500)
+            st.plotly_chart(shock_scatter, use_container_width=True)
+
+        with st.expander("Scenario shock assumptions and audit", expanded=False):
+            shock_assumption_df = pd.DataFrame(
+                [
+                    {
+                        "Maturity Bucket": bucket,
+                        "Shock (bp)": selected_shocks.get(bucket),
+                        "Proxy Duration": DURATION_PROXY.get(bucket),
+                        "Formula": "Approx Price Impact ≈ -Duration × Shock",
+                    }
+                    for bucket in ["Short", "10Y", "20Y", "30Y"]
+                ]
+            )
+            st.dataframe(shock_assumption_df, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                label="Download Scenario Shock Results CSV",
+                data=bucket_summary.to_csv(index=False).encode("utf-8"),
+                file_name="scenario_shock_results.csv",
+                mime="text/csv",
+            )
 
 
 section_anchor("spread-movement", "Spread Movement Heatmap")
