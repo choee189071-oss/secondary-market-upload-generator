@@ -8,11 +8,77 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import streamlit as st
-from openai import OpenAI
 
-client = OpenAI(
-    api_key=st.secrets["OPENAI_API_KEY"]
-)
+# =========================
+# Optional OpenAI Support
+# =========================
+
+OPENAI_AVAILABLE = False
+client = None
+
+try:
+    from openai import OpenAI
+
+    if "OPENAI_API_KEY" in st.secrets:
+        client = OpenAI(
+            api_key=st.secrets["OPENAI_API_KEY"]
+        )
+        OPENAI_AVAILABLE = True
+
+except Exception as e:
+    OPENAI_AVAILABLE = False
+    client = None
+
+
+# =========================
+# Helper Function
+# =========================
+
+def generate_ai_commentary(prompt_text):
+    """
+    Generate institutional-style market commentary
+    using OpenAI API.
+    """
+
+    if not OPENAI_AVAILABLE or client is None:
+        return "AI commentary unavailable. OpenAI package or API key not configured."
+
+    try:
+
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+
+            messages=[
+                {
+                    "role": "system",
+                    "content": """
+You are an institutional municipal bond market strategist.
+
+Your task:
+- Write concise professional secondary-market commentary.
+- Use only the evidence provided.
+- Do NOT invent market data.
+- Do NOT hallucinate issuer-specific events.
+- Explain spread movement, liquidity behavior,
+  peer positioning, and historical context.
+- Sound like buy-side or broker-dealer strategy commentary.
+                    """
+                },
+
+                {
+                    "role": "user",
+                    "content": prompt_text
+                }
+            ],
+
+            temperature=0.3,
+            max_tokens=300
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"AI Commentary Error: {str(e)}"
 
 from data_utils import (
     build_issuer_master,
