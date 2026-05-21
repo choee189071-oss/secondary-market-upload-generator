@@ -164,13 +164,14 @@ def section_directory():
 <a href="#spread-level">5. Current Spread Level</a> ·
 <a href="#spread-attribution">6. Spread Attribution</a> ·
 <a href="#market-narrative">7. Market Narrative & Opportunity Map</a> ·
-<a href="#spread-movement">8. Spread Movement</a> ·
-<a href="#cusip-drilldown">9. CUSIP Drilldown</a> ·
-<a href="#rv-positioning">10. RV Positioning Map</a> ·
-<a href="#liquidity">11. Liquidity</a> ·
-<a href="#bond-master">12. Bond Master</a> ·
-<a href="#trade-detail">13. Trade Detail</a> ·
-<a href="#downloads">14. Downloads</a>
+<a href="#peer-rv">8. Peer RV Comparison</a> ·
+<a href="#spread-movement">9. Spread Movement</a> ·
+<a href="#cusip-drilldown">10. CUSIP Drilldown</a> ·
+<a href="#rv-positioning">11. RV Positioning Map</a> ·
+<a href="#liquidity">12. Liquidity</a> ·
+<a href="#bond-master">13. Bond Master</a> ·
+<a href="#trade-detail">14. Trade Detail</a> ·
+<a href="#downloads">15. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -2370,6 +2371,331 @@ with mn_tab2:
                     use_container_width=True,
                     hide_index=True,
                 )
+
+
+
+section_anchor("peer-rv", "Peer Relative Value Comparison")
+with st.expander("Methodology: peer relative value comparison", expanded=False):
+    st.markdown(
+        """
+This module is intentionally **optional**. It only becomes fully useful when the uploaded dataset contains multiple issuers.
+
+**Purpose:**
+
+- Compare the selected issuer against uploaded peers.
+- Prefer same-sector peers when available.
+- Allow manual cross-sector comparison when needed, with a warning that sector differences may dominate issuer-level relative value.
+
+**Core calculation:**
+
+`Issuer Spread to Benchmark = (Average Issuer Yield - Benchmark Yield) × 100`
+
+**Default framework:**
+
+- Peer universe = uploaded issuers in the same sector as the selected issuer.
+- Benchmark = user-selected AAA / AA / A / BBB curve.
+- Window = recent average, because municipal trading can be sparse.
+- If fewer than two issuers are uploaded, the module shows an information message instead of failing.
+        """
+    )
+
+if len(uploaded_issuers) < 2:
+    st.info(
+        "Peer comparison is unavailable. Upload bond/trade data for at least two issuers "
+        "to compare relative value across peers."
+    )
+elif mmd_df.empty:
+    st.info("Upload an MMD/benchmark curve file to enable peer spread comparison.")
+else:
+    peer_base = market_df.copy()
+    peer_base["issuer"] = peer_base["issuer"].astype(str)
+
+    # Determine same-sector peer universe from uploaded data.
+    selected_sector_for_peers = selected_sector if selected_sector and selected_sector != "Unknown" else None
+
+    if selected_sector_for_peers and "sector" in peer_base.columns:
+        same_sector_issuers = sorted(
+            peer_base.loc[
+                peer_base["sector"].astype(str) == str(selected_sector_for_peers),
+                "issuer",
+            ].dropna().astype(str).unique().tolist()
+        )
+    else:
+        same_sector_issuers = []
+
+    peer_col1, peer_col2, peer_col3 = st.columns([1.2, 1, 1])
+    with peer_col1:
+        peer_mode = st.radio(
+            "Peer Universe",
+            ["Same-sector uploaded peers", "Manual selection"],
+            index=0 if len(same_sector_issuers) >= 2 else 1,
+            horizontal=False,
+            help="Same-sector comparison is usually cleaner. Manual selection is useful when sector data is missing or when the team wants a custom comp set.",
+        )
+    with peer_col2:
+        peer_rating = st.selectbox(
+            "Peer Benchmark Curve",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            key="peer_benchmark_rating",
+        )
+    with peer_col3:
+        peer_window_label = st.selectbox(
+            "Peer Lookback Window",
+            ["Latest 30D", "Latest 60D", "Latest 90D", "All"],
+            index=0,
+            key="peer_lookback_window",
+        )
+
+    if peer_mode == "Same-sector uploaded peers":
+        if len(same_sector_issuers) < 2:
+            st.info(
+                "No same-sector peer set with at least two issuers was detected. "
+                "Use Manual selection to compare across uploaded issuers, but interpret cross-sector comparisons carefully."
+            )
+            peer_issuers = [selected_issuer]
+        else:
+            st.success(
+                f"Detected {len(same_sector_issuers):,} uploaded issuer(s) in sector: {selected_sector_for_peers}."
+            )
+            default_peer_issuers = same_sector_issuers
+            peer_issuers = st.multiselect(
+                "Same-sector peers",
+                same_sector_issuers,
+                default=default_peer_issuers,
+                key="same_sector_peer_issuers",
+            )
+    else:
+        st.warning(
+            "Manual peer selection can compare issuers across sectors. Cross-sector spreads may reflect sector risk, "
+            "not just issuer-level relative value."
+        )
+        default_manual = [selected_issuer]
+        # add up to 3 additional issuers by default
+        for issuer in uploaded_issuers:
+            if issuer != selected_issuer and len(default_manual) < 4:
+                default_manual.append(issuer)
+        peer_issuers = st.multiselect(
+            "Manual peers from uploaded issuers",
+            uploaded_issuers,
+            default=default_manual,
+            key="manual_peer_issuers",
+        )
+
+    peer_days = {"Latest 30D": 30, "Latest 60D": 60, "Latest 90D": 90, "All": None}[peer_window_label]
+
+    if len(peer_issuers) < 2:
+        st.info("Select at least two issuers to generate peer comparison charts.")
+    else:
+        peer_work = peer_base[peer_base["issuer"].isin(peer_issuers)].copy()
+        peer_work["trade_date"] = pd.to_datetime(peer_work["trade_date"], errors="coerce").dt.normalize()
+        peer_work["yield"] = pd.to_numeric(peer_work["yield"], errors="coerce")
+        if "trade_amount" in peer_work.columns:
+            peer_work["trade_amount"] = pd.to_numeric(peer_work["trade_amount"], errors="coerce").fillna(0)
+        else:
+            peer_work["trade_amount"] = 0.0
+
+        peer_work = peer_work.dropna(subset=["trade_date", "yield", "issuer", "maturity_bucket"])
+        peer_work = peer_work[peer_work["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+
+        if peer_work.empty:
+            st.warning("No usable peer trade rows were found after cleaning.")
+        else:
+            latest_peer_date = peer_work["trade_date"].max()
+            if peer_days is not None:
+                peer_cutoff = latest_peer_date - pd.Timedelta(days=peer_days)
+                peer_work = peer_work[peer_work["trade_date"] >= peer_cutoff].copy()
+
+            if peer_work.empty:
+                st.info("No peer observations remain inside the selected lookback window.")
+            else:
+                # Build issuer/bucket average yields over lookback.
+                peer_summary = (
+                    peer_work.groupby(["issuer", "maturity_bucket"], as_index=False)
+                    .agg(
+                        avg_yield=("yield", "mean"),
+                        trade_count=("yield", "count"),
+                        latest_trade=("trade_date", "max"),
+                        total_trade_amount=("trade_amount", "sum"),
+                    )
+                )
+
+                # Build benchmark curves and use latest benchmark observation at/before latest peer date.
+                peer_date_col = _detect_mmd_date_column(mmd_df)
+                if peer_date_col is None:
+                    st.warning("Peer comparison cannot run because benchmark curve file has no usable date column.")
+                else:
+                    peer_mmd = mmd_df.copy()
+                    peer_mmd[peer_date_col] = pd.to_datetime(peer_mmd[peer_date_col], errors="coerce")
+                    peer_mmd = peer_mmd.dropna(subset=[peer_date_col])
+                    peer_mmd = peer_mmd[peer_mmd[peer_date_col].dt.normalize() <= latest_peer_date].sort_values(peer_date_col)
+
+                    if peer_mmd.empty:
+                        st.warning("No benchmark curve observation was available on or before the latest peer trade date.")
+                    else:
+                        peer_latest_mmd = peer_mmd.iloc[[-1]].copy()
+                        peer_benchmark_date = peer_latest_mmd[peer_date_col].iloc[0]
+
+                        bench_rows = []
+                        for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                            tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
+                            y, meta = get_benchmark_curve(peer_latest_mmd, tenor, peer_rating)
+                            if y is not None and pd.notna(y.iloc[0]):
+                                bench_rows.append(
+                                    {
+                                        "maturity_bucket": bucket,
+                                        "mmd_tenor": tenor,
+                                        "benchmark_yield": float(y.iloc[0]),
+                                        "benchmark_source": meta.get("benchmark_source"),
+                                        "source_column": meta.get("source_column"),
+                                        "rating_spread_bps": meta.get("rating_spread_bps"),
+                                    }
+                                )
+                        bench_df = pd.DataFrame(bench_rows)
+
+                        if bench_df.empty:
+                            st.warning("Selected benchmark curve could not be built for any maturity bucket.")
+                        else:
+                            peer_summary = peer_summary.merge(bench_df, on="maturity_bucket", how="left")
+                            peer_summary["spread_to_benchmark_bps"] = (
+                                peer_summary["avg_yield"] - peer_summary["benchmark_yield"]
+                            ) * 100
+                            peer_summary = peer_summary.dropna(subset=["spread_to_benchmark_bps"])
+
+                            if peer_summary.empty:
+                                st.info("No overlapping peer observations and benchmark tenors were available.")
+                            else:
+                                maturity_order = ["Short", "10Y", "20Y", "30Y"]
+                                peer_summary["maturity_bucket"] = pd.Categorical(
+                                    peer_summary["maturity_bucket"],
+                                    categories=maturity_order,
+                                    ordered=True,
+                                )
+                                peer_summary = peer_summary.sort_values(["issuer", "maturity_bucket"])
+
+                                st.subheader("1. Peer Spread Curve Comparison")
+                                peer_curve_fig = px.line(
+                                    peer_summary,
+                                    x="maturity_bucket",
+                                    y="spread_to_benchmark_bps",
+                                    color="issuer",
+                                    markers=True,
+                                    hover_data=[
+                                        "avg_yield",
+                                        "benchmark_yield",
+                                        "trade_count",
+                                        "total_trade_amount",
+                                        "latest_trade",
+                                        "benchmark_source",
+                                        "source_column",
+                                    ],
+                                    title=f"Peer Spread Curve Comparison vs {peer_rating} Benchmark",
+                                    labels={
+                                        "maturity_bucket": "Maturity Bucket",
+                                        "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
+                                        "issuer": "Issuer",
+                                    },
+                                )
+                                peer_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.45)
+                                peer_curve_fig.update_layout(height=520, hovermode="x unified")
+                                st.plotly_chart(peer_curve_fig, use_container_width=True)
+
+                                st.subheader("2. Peer Spread Heatmap")
+                                peer_matrix = peer_summary.pivot_table(
+                                    index="issuer",
+                                    columns="maturity_bucket",
+                                    values="spread_to_benchmark_bps",
+                                    aggfunc="mean",
+                                    observed=False,
+                                ).reindex(columns=maturity_order)
+                                peer_text = peer_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+                                peer_heatmap_fig = px.imshow(
+                                    peer_matrix.astype(float),
+                                    x=peer_matrix.columns.astype(str),
+                                    y=peer_matrix.index.astype(str),
+                                    color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
+                                    color_continuous_midpoint=0,
+                                    aspect="auto",
+                                    title=f"Peer Spread Heatmap vs {peer_rating}",
+                                    labels={
+                                        "x": "Maturity Bucket",
+                                        "y": "Issuer",
+                                        "color": "Spread (bps)",
+                                    },
+                                )
+                                peer_heatmap_fig.update_traces(
+                                    text=peer_text.values,
+                                    texttemplate="%{text}",
+                                    hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
+                                )
+                                peer_heatmap_fig.update_layout(height=max(380, 70 * len(peer_matrix.index)))
+                                st.plotly_chart(peer_heatmap_fig, use_container_width=True)
+
+                                st.subheader("3. Peer Ranking Table")
+                                peer_rank = (
+                                    peer_summary.groupby("issuer", as_index=False)
+                                    .agg(
+                                        avg_spread_bps=("spread_to_benchmark_bps", "mean"),
+                                        max_spread_bps=("spread_to_benchmark_bps", "max"),
+                                        trade_count=("trade_count", "sum"),
+                                        total_trade_amount=("total_trade_amount", "sum"),
+                                        latest_trade=("latest_trade", "max"),
+                                    )
+                                    .sort_values("avg_spread_bps", ascending=False)
+                                )
+                                peer_rank["rank_by_avg_spread"] = range(1, len(peer_rank) + 1)
+
+                                st.dataframe(
+                                    peer_rank[
+                                        [
+                                            "rank_by_avg_spread",
+                                            "issuer",
+                                            "avg_spread_bps",
+                                            "max_spread_bps",
+                                            "trade_count",
+                                            "total_trade_amount",
+                                            "latest_trade",
+                                        ]
+                                    ],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+
+                                # Read-through
+                                if not peer_rank.empty:
+                                    widest = peer_rank.iloc[0]
+                                    tightest = peer_rank.iloc[-1]
+                                    st.info(
+                                        f"Peer read-through: {widest['issuer']} screens widest on average "
+                                        f"at {widest['avg_spread_bps']:+.1f} bp versus {peer_rating}, while "
+                                        f"{tightest['issuer']} screens tightest at {tightest['avg_spread_bps']:+.1f} bp. "
+                                        f"Use this as a screening signal and review CUSIP-level liquidity before drawing trading conclusions."
+                                    )
+
+                                with st.expander("Peer comparison audit table", expanded=False):
+                                    audit_cols = [
+                                        "issuer",
+                                        "maturity_bucket",
+                                        "avg_yield",
+                                        "benchmark_yield",
+                                        "spread_to_benchmark_bps",
+                                        "trade_count",
+                                        "total_trade_amount",
+                                        "latest_trade",
+                                        "mmd_tenor",
+                                        "benchmark_source",
+                                        "source_column",
+                                        "rating_spread_bps",
+                                    ]
+                                    audit_df = peer_summary[[c for c in audit_cols if c in peer_summary.columns]].copy()
+                                    for c in ["avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "rating_spread_bps"]:
+                                        if c in audit_df.columns:
+                                            audit_df[c] = pd.to_numeric(audit_df[c], errors="coerce").round(2)
+                                    st.caption(
+                                        f"Benchmark date used: {peer_benchmark_date.strftime('%Y-%m-%d')}. "
+                                        f"Lookback window: {peer_window_label}."
+                                    )
+                                    st.dataframe(audit_df, use_container_width=True, hide_index=True)
 
 
 section_anchor("spread-movement", "Spread Movement Heatmap")
