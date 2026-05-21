@@ -162,10 +162,11 @@ def section_directory():
 <a href="#issuer-curve">4. Issuer Curve vs Benchmark</a> ·
 <a href="#spread-level">5. Current Spread Level</a> ·
 <a href="#spread-movement">6. Spread Movement</a> ·
-<a href="#liquidity">7. Liquidity</a> ·
-<a href="#bond-master">8. Bond Master</a> ·
-<a href="#trade-detail">9. Trade Detail</a> ·
-<a href="#downloads">10. Downloads</a>
+<a href="#rv-positioning">7. RV Positioning Map</a> ·
+<a href="#liquidity">8. Liquidity</a> ·
+<a href="#bond-master">9. Bond Master</a> ·
+<a href="#trade-detail">10. Trade Detail</a> ·
+<a href="#downloads">11. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1089,10 +1090,13 @@ with st.sidebar:
 &nbsp;&nbsp;• Spread level heatmap<br>
 <a href="#spread-movement">5. Spread Movement</a><br>
 &nbsp;&nbsp;• Movement heatmap<br>
-<a href="#liquidity">6. Liquidity Analysis</a><br>
-<a href="#bond-master">7. Bond Master</a><br>
-<a href="#trade-detail">8. Trade Detail</a><br>
-<a href="#downloads">9. Downloads</a>
+<a href="#rv-positioning">6. RV Positioning Map</a><br>
+&nbsp;&nbsp;• Liquidity vs spread<br>
+&nbsp;&nbsp;• Cheap/rich quadrants<br>
+<a href="#liquidity">7. Liquidity Analysis</a><br>
+<a href="#bond-master">8. Bond Master</a><br>
+<a href="#trade-detail">9. Trade Detail</a><br>
+<a href="#downloads">10. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1836,6 +1840,262 @@ else:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
                 st.dataframe(audit_display, use_container_width=True, hide_index=True)
+
+
+section_anchor("rv-positioning", "Relative Value Positioning Map")
+with st.expander("Methodology: relative value positioning map", expanded=False):
+    st.markdown(
+        """
+This scatter plot maps individual CUSIPs by **tradability** and **relative value**.
+
+**Default interpretation:**
+
+- **X-axis = Liquidity Score**: higher means more actively traded, larger traded amount, more recent activity, and less staleness.
+- **Y-axis = Spread to Benchmark**: higher means the bond is trading cheaper versus the selected benchmark curve.
+- **Bubble size = Total Trade Amount**: larger dots indicate more secondary-market trading volume.
+- **Color = Maturity Bucket**: Short / 10Y / 20Y / 30Y.
+
+**Quadrants:**
+
+- **Upper-right:** cheap and liquid; often the first area to investigate.
+- **Upper-left:** cheap but illiquid; may require a liquidity premium.
+- **Lower-right:** liquid but rich; useful benchmark-like bonds.
+- **Lower-left:** illiquid and rich; usually less attractive from a relative-value screen.
+
+This is a **screening view**, not an investment recommendation. It helps analysts identify bonds worth deeper review.
+        """
+    )
+
+if issuer_trades.empty:
+    st.warning("No trade rows found for this issuer and filter.")
+else:
+    rv_controls = st.columns([1, 1, 1, 1])
+    with rv_controls[0]:
+        rv_benchmark_rating = st.selectbox(
+            "RV Benchmark Curve",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            key="rv_benchmark_rating",
+            help="Used only when Y-axis is spread to benchmark. Uploaded curve columns are used first; otherwise MMD + assumption spread.",
+        )
+    with rv_controls[1]:
+        rv_y_axis = st.selectbox(
+            "Y-axis",
+            ["Spread to Benchmark (bps)", "Average Yield (%)"],
+            index=0,
+            key="rv_y_axis",
+        )
+    with rv_controls[2]:
+        rv_size_by = st.selectbox(
+            "Bubble size",
+            ["Total Trade Amount", "Outstanding Amount", "Trade Count"],
+            index=0,
+            key="rv_size_by",
+        )
+    with rv_controls[3]:
+        rv_min_trades = st.number_input(
+            "Minimum Trades",
+            min_value=1,
+            max_value=100,
+            value=1,
+            step=1,
+            key="rv_min_trades",
+        )
+
+    rv_base = issuer_trades.copy()
+    rv_base["trade_date"] = pd.to_datetime(rv_base["trade_date"], errors="coerce").dt.normalize()
+    rv_base["yield"] = pd.to_numeric(rv_base["yield"], errors="coerce")
+    if "trade_amount" in rv_base.columns:
+        rv_base["trade_amount"] = pd.to_numeric(rv_base["trade_amount"], errors="coerce")
+    else:
+        rv_base["trade_amount"] = pd.NA
+    if "price" in rv_base.columns:
+        rv_base["price"] = pd.to_numeric(rv_base["price"], errors="coerce")
+    else:
+        rv_base["price"] = pd.NA
+
+    rv_base = rv_base.dropna(subset=["cusip", "trade_date", "yield"])
+
+    if rv_base.empty:
+        st.warning("No usable CUSIP-level trade rows are available for the positioning map.")
+    else:
+        today_rv = pd.Timestamp.today().normalize()
+        rv_base["trade_month"] = rv_base["trade_date"].dt.to_period("M").astype(str)
+        rv_summary = (
+            rv_base.groupby("cusip", dropna=False)
+            .agg(
+                avg_yield=("yield", "mean"),
+                latest_yield=("yield", "last"),
+                avg_price=("price", "mean"),
+                trade_count=("trade_date", "count"),
+                first_trade=("trade_date", "min"),
+                latest_trade=("trade_date", "max"),
+                active_months=("trade_month", "nunique"),
+                total_trade_amount=("trade_amount", "sum"),
+                avg_trade_amount=("trade_amount", "mean"),
+                maturity_bucket=("maturity_bucket", "first"),
+                maturity=("maturity_bond", "first"),
+                coupon=("coupon_bond", "first"),
+                outstanding_amount=("outstanding_amount", "first"),
+                description=("description", "first") if "description" in rv_base.columns else ("yield", "count"),
+            )
+            .reset_index()
+        )
+        rv_summary["days_since_last_trade"] = (today_rv - rv_summary["latest_trade"]).dt.days
+        rv_summary["trading_period_days"] = (rv_summary["latest_trade"] - rv_summary["first_trade"]).dt.days.clip(lower=1)
+        rv_summary["avg_days_between_trades"] = rv_summary["trading_period_days"] / rv_summary["trade_count"].clip(lower=1)
+        rv_summary["avg_trades_per_month"] = rv_summary["trade_count"] / rv_summary["active_months"].clip(lower=1)
+
+        recent_cutoff_rv = today_rv - pd.DateOffset(days=90)
+        rv_recent = (
+            rv_base[rv_base["trade_date"] >= recent_cutoff_rv]
+            .groupby("cusip")
+            .agg(recent_90d_trades=("trade_date", "count"))
+            .reset_index()
+        )
+        rv_summary = rv_summary.merge(rv_recent, on="cusip", how="left")
+        rv_summary["recent_90d_trades"] = rv_summary["recent_90d_trades"].fillna(0).astype(int)
+
+        for numeric_col in ["total_trade_amount", "outstanding_amount", "avg_trade_amount"]:
+            if numeric_col in rv_summary.columns:
+                rv_summary[numeric_col] = pd.to_numeric(rv_summary[numeric_col], errors="coerce")
+        rv_summary["turnover_ratio"] = rv_summary["total_trade_amount"] / rv_summary["outstanding_amount"].replace({0: pd.NA})
+        rv_summary["liquidity_score"] = (
+            rv_summary["trade_count"].rank(pct=True) * 35
+            + rv_summary["total_trade_amount"].fillna(0).rank(pct=True) * 25
+            + rv_summary["recent_90d_trades"].rank(pct=True) * 25
+            + (1 - rv_summary["days_since_last_trade"].rank(pct=True)) * 15
+        )
+        rv_summary["liquidity_tier"] = pd.cut(
+            rv_summary["liquidity_score"],
+            bins=[-1, 45, 75, 101],
+            labels=["Low Liquidity", "Medium Liquidity", "High Liquidity"],
+        ).astype(str)
+        rv_summary.loc[rv_summary["days_since_last_trade"] > 365, "liquidity_tier"] = "Stale"
+
+        rv_summary = rv_summary[rv_summary["trade_count"] >= rv_min_trades].copy()
+
+        # Add benchmark spread at each CUSIP's latest trade date and maturity bucket.
+        if rv_y_axis == "Spread to Benchmark (bps)":
+            if mmd_df.empty:
+                st.info("Upload an MMD / benchmark curve file to use Spread to Benchmark. Showing Average Yield instead.")
+                rv_y_axis_col = "avg_yield"
+                rv_y_axis_label = "Average Yield (%)"
+            else:
+                benchmark_long_rv = make_benchmark_long(mmd_df, rv_benchmark_rating)
+                if benchmark_long_rv.empty:
+                    st.info("No usable benchmark curve was found for the selected rating. Showing Average Yield instead.")
+                    rv_y_axis_col = "avg_yield"
+                    rv_y_axis_label = "Average Yield (%)"
+                else:
+                    benchmark_long_rv = benchmark_long_rv.sort_values(["maturity_bucket", "trade_date"])
+                    merge_frames = []
+                    for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                        left = rv_summary[rv_summary["maturity_bucket"] == bucket].sort_values("latest_trade")
+                        right = benchmark_long_rv[benchmark_long_rv["maturity_bucket"] == bucket].sort_values("trade_date")
+                        if left.empty or right.empty:
+                            continue
+                        merged_bucket = pd.merge_asof(
+                            left,
+                            right,
+                            left_on="latest_trade",
+                            right_on="trade_date",
+                            direction="backward",
+                            tolerance=pd.Timedelta(days=14),
+                        )
+                        merge_frames.append(merged_bucket)
+                    if merge_frames:
+                        rv_summary = pd.concat(merge_frames, ignore_index=True)
+                        rv_summary["spread_to_benchmark_bps"] = (
+                            rv_summary["avg_yield"] - rv_summary["benchmark_yield"]
+                        ) * 100
+                        rv_y_axis_col = "spread_to_benchmark_bps"
+                        rv_y_axis_label = "Spread to Benchmark (bps)"
+                    else:
+                        st.info("No overlapping CUSIP latest-trade dates and benchmark dates were found. Showing Average Yield instead.")
+                        rv_y_axis_col = "avg_yield"
+                        rv_y_axis_label = "Average Yield (%)"
+        else:
+            rv_y_axis_col = "avg_yield"
+            rv_y_axis_label = "Average Yield (%)"
+
+        rv_summary = rv_summary.dropna(subset=["liquidity_score", rv_y_axis_col])
+
+        if rv_summary.empty:
+            st.warning("No CUSIPs meet the selected filters for the positioning map.")
+        else:
+            size_map = {
+                "Total Trade Amount": "total_trade_amount",
+                "Outstanding Amount": "outstanding_amount",
+                "Trade Count": "trade_count",
+            }
+            size_col = size_map.get(rv_size_by, "total_trade_amount")
+            if size_col not in rv_summary.columns or rv_summary[size_col].fillna(0).sum() <= 0:
+                size_col = "trade_count"
+
+            hover_cols = [
+                "cusip", "maturity_bucket", "maturity", "coupon", "avg_yield", "avg_price",
+                "trade_count", "recent_90d_trades", "days_since_last_trade", "total_trade_amount",
+                "outstanding_amount", "turnover_ratio", "liquidity_tier",
+            ]
+            if "spread_to_benchmark_bps" in rv_summary.columns:
+                hover_cols.extend(["spread_to_benchmark_bps", "benchmark_yield", "benchmark_source", "source_column"])
+            hover_cols = [c for c in hover_cols if c in rv_summary.columns]
+
+            rv_fig = px.scatter(
+                rv_summary,
+                x="liquidity_score",
+                y=rv_y_axis_col,
+                size=size_col,
+                color="maturity_bucket",
+                hover_name="cusip",
+                hover_data=hover_cols,
+                title=f"{selected_issuer} Relative Value Positioning Map",
+                labels={
+                    "liquidity_score": "Liquidity Score",
+                    rv_y_axis_col: rv_y_axis_label,
+                    "maturity_bucket": "Maturity Bucket",
+                    size_col: rv_size_by,
+                },
+            )
+            median_liquidity = rv_summary["liquidity_score"].median()
+            median_y = rv_summary[rv_y_axis_col].median()
+            rv_fig.add_vline(x=median_liquidity, line_dash="dash", opacity=0.45)
+            rv_fig.add_hline(y=median_y, line_dash="dash", opacity=0.45)
+            rv_fig.update_layout(height=560, hovermode="closest")
+            st.plotly_chart(rv_fig, use_container_width=True)
+
+            if rv_y_axis_col == "spread_to_benchmark_bps":
+                candidates = rv_summary[
+                    (rv_summary["liquidity_score"] >= median_liquidity)
+                    & (rv_summary["spread_to_benchmark_bps"] >= median_y)
+                ].sort_values(["spread_to_benchmark_bps", "liquidity_score"], ascending=False)
+                if not candidates.empty:
+                    top = candidates.iloc[0]
+                    st.info(
+                        f"Positioning read-through: {top['cusip']} screens as relatively cheap and liquid "
+                        f"at {top['spread_to_benchmark_bps']:+.1f} bp versus {rv_benchmark_rating}, "
+                        f"with a liquidity score of {top['liquidity_score']:.1f}."
+                    )
+
+            with st.expander("Positioning map data table", expanded=False):
+                display_cols = [
+                    "cusip", "maturity_bucket", "liquidity_score", "liquidity_tier", rv_y_axis_col,
+                    "avg_yield", "benchmark_yield", "benchmark_source", "source_column", "trade_count",
+                    "recent_90d_trades", "days_since_last_trade", "total_trade_amount", "outstanding_amount",
+                    "turnover_ratio", "maturity", "coupon", "avg_price",
+                ]
+                display_cols = [c for c in display_cols if c in rv_summary.columns]
+                rv_display = rv_summary[display_cols].copy()
+                for c in ["liquidity_score", rv_y_axis_col, "avg_yield", "benchmark_yield", "turnover_ratio", "avg_price"]:
+                    if c in rv_display.columns:
+                        rv_display[c] = pd.to_numeric(rv_display[c], errors="coerce").round(2)
+                st.dataframe(
+                    rv_display.sort_values([rv_y_axis_col, "liquidity_score"], ascending=False),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=420,
+                )
 
 section_anchor("liquidity", "Liquidity / Trading Frequency Analysis")
 with st.expander("Methodology", expanded=False):
