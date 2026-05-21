@@ -152,36 +152,49 @@ def clean_metric_card(label: str, value: object, size: str = "large", note: str 
 
 
 def section_directory():
-    """Main-page clickable directory for users who miss the collapsed sidebar."""
-    st.markdown(
-        """
+    """Compact workflow map for the main page.
+
+    The full jump list lives in the sidebar. This main-page version is intentionally
+    concise so it does not crowd the dashboard before users upload data.
+    """
+    with st.expander("Dashboard workflow map", expanded=False):
+        st.markdown(
+            """
 <div class="nav-card">
-<b>Dashboard Directory</b><br>
-<a href="#file-readiness">1. File Readiness Check</a> ·
-<a href="#executive-snapshot">2. Executive Snapshot</a> ·
-<a href="#yield-relative-value">3. Yield & Relative Value</a> ·
-<a href="#issuer-curve">4. Issuer Curve vs Benchmark</a> ·
-<a href="#spread-level">5. Current Spread Level</a> ·
-<a href="#spread-attribution">6. Spread Attribution</a> ·
-<a href="#market-narrative">7. Market Narrative & Opportunity Map</a> ·
-<a href="#peer-rv">8. Peer RV Comparison</a> ·
-<a href="#historical-spread">9. Historical Spread Percentile</a> ·
-<a href="#curve-shape">10. Curve Shape Analytics</a> ·
-<a href="#dealer-proxy">11. Dealer Proxy</a> ·
-<a href="#security-screener">12. Security Screener</a> ·
-<a href="#recommendation-engine">13. Recommendation Narrative</a> ·
-<a href="#scenario-shock">14. Scenario Shock Analysis</a> ·
-<a href="#spread-movement">15. Spread Movement</a> ·
-<a href="#cusip-drilldown">15. CUSIP Drilldown</a> ·
-<a href="#rv-positioning">16. RV Positioning Map</a> ·
-<a href="#liquidity">17. Liquidity</a> ·
-<a href="#bond-master">18. Bond Master</a> ·
-<a href="#trade-detail">19. Trade Detail</a> ·
-<a href="#downloads">20. Downloads</a>
+<b>How to read this dashboard</b><br><br>
+
+<b>1. Data readiness</b><br>
+<a href="#file-readiness">File Readiness</a> · <a href="#executive-snapshot">Executive Snapshot</a><br><br>
+
+<b>2. Benchmark & spread framework</b><br>
+<a href="#yield-relative-value">Yield / RV Trend</a> ·
+<a href="#issuer-curve">Issuer Curve</a> ·
+<a href="#spread-level">Spread Level</a> ·
+<a href="#spread-attribution">Spread Attribution</a><br><br>
+
+<b>3. Relative value signals</b><br>
+<a href="#peer-rv">Peer RV</a> ·
+<a href="#cross-issuer-rv">Cross-Issuer RV</a> ·
+<a href="#historical-spread">Historical Percentile</a> ·
+<a href="#recommendation-engine">Recommendation Narrative</a><br><br>
+
+<b>4. Risk, flow & opportunity screening</b><br>
+<a href="#curve-shape">Curve Shape</a> ·
+<a href="#scenario-shock">Scenario Shock</a> ·
+<a href="#dealer-proxy">Dealer Proxy</a> ·
+<a href="#security-screener">Security Screener</a><br><br>
+
+<b>5. Bond-level drilldown & raw detail</b><br>
+<a href="#spread-movement">Spread Movement</a> ·
+<a href="#cusip-drilldown">CUSIP Drilldown</a> ·
+<a href="#rv-positioning">RV Positioning Map</a> ·
+<a href="#liquidity">Liquidity</a> ·
+<a href="#bond-master">Bond Master</a> ·
+<a href="#trade-detail">Trade Detail</a>
 </div>
 """,
-        unsafe_allow_html=True,
-    )
+            unsafe_allow_html=True,
+        )
 
 section_directory()
 
@@ -1091,44 +1104,43 @@ with st.sidebar:
     st.markdown(
         """
 <div class="sidebar-nav-small">
+<b>Data & Setup</b><br>
 <a href="#file-readiness">1. File Readiness Check</a><br>
-<a href="#executive-snapshot">2. Executive Snapshot</a><br>
+<a href="#executive-snapshot">2. Executive Snapshot</a><br><br>
+
+<b>Benchmark / Spread Framework</b><br>
 <a href="#yield-relative-value">3. Yield & Relative Value</a><br>
-&nbsp;&nbsp;• Yield trend<br>
-&nbsp;&nbsp;• Spread to benchmark<br>
+&nbsp;&nbsp;• Yield trend + spread to benchmark<br>
 <a href="#issuer-curve">4. Issuer Curve vs Benchmark</a><br>
-&nbsp;&nbsp;• Curve vs MMD / benchmark<br>
+&nbsp;&nbsp;• Curve vs MMD / rating curve<br>
 <a href="#spread-level">5. Current Spread Level</a><br>
-&nbsp;&nbsp;• Spread curve<br>
-&nbsp;&nbsp;• Spread level heatmap<br>
+&nbsp;&nbsp;• Spread curve + spread heatmap<br>
 <a href="#spread-attribution">6. Spread Attribution</a><br>
-&nbsp;&nbsp;• Pitchbook-style waterfall<br>
+&nbsp;&nbsp;• Pitchbook-style waterfall<br><br>
+
+<b>Relative Value Signals</b><br>
 <a href="#market-narrative">7. Market Narrative & Opportunity Map</a><br>
-&nbsp;&nbsp;• Timeline + quadrant labels<br>
 <a href="#peer-rv">8. Peer RV Comparison</a><br>
-&nbsp;&nbsp;• Issuer vs issuer spreads<br>
-<a href="#historical-spread">9. Historical Spread Percentile</a><br>
-&nbsp;&nbsp;• Current spread vs history<br>
-<a href="#curve-shape">10. Curve Shape Analytics</a><br>
-&nbsp;&nbsp;• Slope + butterfly diagnostics<br>
-<a href="#dealer-proxy">11. Dealer Behavior Proxy</a><br>
-&nbsp;&nbsp;• Buy/sell imbalance when available<br>
-<a href="#security-screener">12. Security Screener</a><br>
-&nbsp;&nbsp;• Find top RV candidates<br>
-<a href="#recommendation-engine">13. Recommendation Narrative</a><br>
-&nbsp;&nbsp;• Rule-based market commentary<br>
-<a href="#scenario-shock">14. Scenario Shock Analysis</a><br>
-&nbsp;&nbsp;• Rate shock + price impact<br>
-<a href="#spread-movement">15. Spread Movement</a><br>
-&nbsp;&nbsp;• Widening / tightening heatmap<br>
-<a href="#cusip-drilldown">15. CUSIP Opportunity Drilldown</a><br>
-&nbsp;&nbsp;• Bond-level drivers<br>
-<a href="#rv-positioning">16. RV Positioning Map</a><br>
-&nbsp;&nbsp;• Liquidity vs spread<br>
-<a href="#liquidity">17. Liquidity Analysis</a><br>
-<a href="#bond-master">18. Bond Master</a><br>
-<a href="#trade-detail">19. Trade Detail</a><br>
-<a href="#downloads">20. Downloads</a>
+<a href="#cross-issuer-rv">9. Cross-Issuer RV Analytics</a><br>
+<a href="#historical-spread">10. Historical Spread Percentile</a><br>
+<a href="#recommendation-engine">11. Recommendation Narrative</a><br><br>
+
+<b>Risk / Flow / Screening</b><br>
+<a href="#curve-shape">12. Curve Shape Analytics</a><br>
+<a href="#scenario-shock">13. Scenario Shock Analysis</a><br>
+<a href="#dealer-proxy">14. Dealer Behavior Proxy</a><br>
+<a href="#security-screener">15. Security Screener</a><br><br>
+
+<b>Bond-Level Drilldown</b><br>
+<a href="#spread-movement">16. Spread Movement</a><br>
+<a href="#cusip-drilldown">17. CUSIP Opportunity Drilldown</a><br>
+<a href="#rv-positioning">18. RV Positioning Map</a><br>
+<a href="#liquidity">19. Liquidity Analysis</a><br><br>
+
+<b>Reference / Outputs</b><br>
+<a href="#bond-master">20. Bond Master</a><br>
+<a href="#trade-detail">21. Trade Detail</a><br>
+<a href="#downloads">22. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -3100,6 +3112,388 @@ else:
                                     )
                                     st.dataframe(audit_df, use_container_width=True, hide_index=True)
 
+
+
+
+section_anchor("cross-issuer-rv", "Cross-Issuer Relative Value Analytics")
+with st.expander("Methodology: cross-issuer relative value analytics", expanded=False):
+    st.markdown(
+        """
+This section upgrades peer comparison from **visual comparison** into a systematic **issuer-bucket ranking framework**.
+
+**Core purpose:**
+
+- Identify which issuer / maturity bucket screens cheap or rich versus the uploaded peer group.
+- Convert peer spreads into **peer gaps**, **z-scores**, and **relative value scores**.
+- Keep the module optional: it only becomes meaningful when at least two issuers are uploaded.
+
+**Core calculations:**
+
+`Issuer Spread = (Average Issuer Yield - Benchmark Yield) × 100`
+
+`Peer Gap = Issuer Spread - Peer Median Spread within the same maturity bucket`
+
+`Peer Z-Score = (Issuer Spread - Bucket Mean Spread) / Bucket Spread Std`
+
+**Simplified RV Score:**
+
+`RV Score = 45% Spread Percentile + 35% Liquidity Percentile + 20% Trade Activity Percentile`
+
+**How to read it:**
+
+- Positive peer gap: issuer/bucket is wider than peers, potentially cheaper.
+- Negative peer gap: issuer/bucket is tighter than peers, potentially richer.
+- Higher RV score: screens cheaper while retaining better liquidity/trading support.
+- This is a screening tool, not a final trade recommendation.
+        """
+    )
+
+if len(uploaded_issuers) < 2:
+    st.info(
+        "Cross-issuer RV analytics is unavailable. Upload at least two issuers to compare issuer-bucket relative value."
+    )
+elif mmd_df.empty:
+    st.info("Upload an MMD/benchmark curve file to enable cross-issuer spread analytics.")
+else:
+    xrv_col1, xrv_col2, xrv_col3, xrv_col4 = st.columns([1.2, 1, 1, 1])
+    with xrv_col1:
+        xrv_mode = st.radio(
+            "Cross-Issuer Universe",
+            ["Same-sector uploaded issuers", "Manual issuer set"],
+            index=0 if "sector" in market_df.columns and selected_sector != "Unknown" else 1,
+            key="xrv_universe_mode",
+            help="Same-sector is cleaner. Manual set is useful when sector data is missing or when the desk wants a custom comp set.",
+        )
+    with xrv_col2:
+        xrv_rating = st.selectbox(
+            "X-Issuer Benchmark",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            key="xrv_benchmark",
+        )
+    with xrv_col3:
+        xrv_window = st.selectbox(
+            "X-Issuer Lookback",
+            ["Latest 30D", "Latest 60D", "Latest 90D", "All"],
+            index=1,
+            key="xrv_window",
+        )
+    with xrv_col4:
+        xrv_min_trades = st.number_input(
+            "Min Trades / Bucket",
+            min_value=1,
+            max_value=100,
+            value=1,
+            step=1,
+            key="xrv_min_trades",
+        )
+
+    if xrv_mode == "Same-sector uploaded issuers":
+        if "sector" not in market_df.columns or selected_sector == "Unknown":
+            st.info("Same-sector universe is unavailable because sector data is missing or unknown. Use Manual issuer set.")
+            xrv_issuers = [selected_issuer]
+        else:
+            xrv_issuers = sorted(
+                market_df.loc[
+                    market_df["sector"].astype(str) == str(selected_sector),
+                    "issuer",
+                ].dropna().astype(str).unique().tolist()
+            )
+            if len(xrv_issuers) < 2:
+                st.info(
+                    "Fewer than two same-sector issuers were detected. Use Manual issuer set or upload more peer data."
+                )
+    else:
+        default_xrv = [selected_issuer]
+        for issuer in uploaded_issuers:
+            if issuer != selected_issuer and len(default_xrv) < 5:
+                default_xrv.append(issuer)
+        xrv_issuers = st.multiselect(
+            "Manual cross-issuer set",
+            uploaded_issuers,
+            default=default_xrv,
+            key="xrv_manual_issuers",
+        )
+        st.warning(
+            "Manual cross-issuer comparison may include different sectors. Interpret peer gaps carefully because sector risk can dominate issuer-level RV."
+        )
+
+    if len(xrv_issuers) < 2:
+        st.info("Select or upload at least two issuers to generate cross-issuer RV analytics.")
+    else:
+        xrv_days = {"Latest 30D": 30, "Latest 60D": 60, "Latest 90D": 90, "All": None}[xrv_window]
+
+        xrv_df = market_df[market_df["issuer"].astype(str).isin([str(x) for x in xrv_issuers])].copy()
+        xrv_df["trade_date"] = pd.to_datetime(xrv_df["trade_date"], errors="coerce").dt.normalize()
+        xrv_df["yield"] = pd.to_numeric(xrv_df["yield"], errors="coerce")
+        if "trade_amount" in xrv_df.columns:
+            xrv_df["trade_amount"] = pd.to_numeric(xrv_df["trade_amount"], errors="coerce").fillna(0)
+        else:
+            xrv_df["trade_amount"] = 0.0
+
+        xrv_df = xrv_df.dropna(subset=["trade_date", "yield", "issuer", "maturity_bucket"])
+        xrv_df = xrv_df[xrv_df["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+
+        if xrv_df.empty:
+            st.warning("No usable cross-issuer observations remained after cleaning.")
+        else:
+            xrv_latest_date = xrv_df["trade_date"].max()
+            if xrv_days is not None:
+                xrv_cutoff = xrv_latest_date - pd.Timedelta(days=xrv_days)
+                xrv_df = xrv_df[xrv_df["trade_date"] >= xrv_cutoff].copy()
+
+            if xrv_df.empty:
+                st.info("No cross-issuer observations remain inside the selected lookback window.")
+            else:
+                xrv_summary = (
+                    xrv_df.groupby(["issuer", "maturity_bucket"], as_index=False)
+                    .agg(
+                        avg_yield=("yield", "mean"),
+                        trade_count=("yield", "count"),
+                        total_trade_amount=("trade_amount", "sum"),
+                        latest_trade=("trade_date", "max"),
+                        sector=("sector", "first") if "sector" in xrv_df.columns else ("issuer", "first"),
+                    )
+                )
+                xrv_summary = xrv_summary[xrv_summary["trade_count"] >= xrv_min_trades].copy()
+
+                if xrv_summary.empty:
+                    st.info("No issuer-bucket observations met the minimum trade filter.")
+                else:
+                    date_col = _detect_mmd_date_column(mmd_df)
+                    if date_col is None:
+                        st.warning("Cross-issuer RV cannot run because the benchmark file has no usable date column.")
+                    else:
+                        xrv_mmd = mmd_df.copy()
+                        xrv_mmd[date_col] = pd.to_datetime(xrv_mmd[date_col], errors="coerce")
+                        xrv_mmd = xrv_mmd.dropna(subset=[date_col])
+                        xrv_mmd = xrv_mmd[xrv_mmd[date_col].dt.normalize() <= xrv_latest_date].sort_values(date_col)
+
+                        if xrv_mmd.empty:
+                            st.warning("No benchmark curve observation was available on or before the latest cross-issuer trade date.")
+                        else:
+                            xrv_latest_mmd = xrv_mmd.iloc[[-1]].copy()
+                            xrv_benchmark_date = xrv_latest_mmd[date_col].iloc[0]
+
+                            bench_rows = []
+                            for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                                tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
+                                y, meta = get_benchmark_curve(xrv_latest_mmd, tenor, xrv_rating)
+                                if y is not None and pd.notna(y.iloc[0]):
+                                    bench_rows.append(
+                                        {
+                                            "maturity_bucket": bucket,
+                                            "mmd_tenor": tenor,
+                                            "benchmark_yield": float(y.iloc[0]),
+                                            "benchmark_source": meta.get("benchmark_source"),
+                                            "source_column": meta.get("source_column"),
+                                            "rating_spread_bps": meta.get("rating_spread_bps"),
+                                        }
+                                    )
+                            xrv_bench = pd.DataFrame(bench_rows)
+
+                            if xrv_bench.empty:
+                                st.warning("Selected benchmark curve could not be built for cross-issuer RV.")
+                            else:
+                                xrv_summary = xrv_summary.merge(xrv_bench, on="maturity_bucket", how="left")
+                                xrv_summary["spread_to_benchmark_bps"] = (
+                                    xrv_summary["avg_yield"] - xrv_summary["benchmark_yield"]
+                                ) * 100
+                                xrv_summary = xrv_summary.dropna(subset=["spread_to_benchmark_bps"])
+
+                                if xrv_summary.empty:
+                                    st.info("No issuer-bucket observations had usable benchmark spreads.")
+                                else:
+                                    # Peer-relative metrics by maturity bucket.
+                                    xrv_summary["bucket_peer_median_bps"] = (
+                                        xrv_summary.groupby("maturity_bucket")["spread_to_benchmark_bps"].transform("median")
+                                    )
+                                    xrv_summary["bucket_peer_mean_bps"] = (
+                                        xrv_summary.groupby("maturity_bucket")["spread_to_benchmark_bps"].transform("mean")
+                                    )
+                                    xrv_summary["bucket_peer_std_bps"] = (
+                                        xrv_summary.groupby("maturity_bucket")["spread_to_benchmark_bps"].transform("std")
+                                    )
+                                    xrv_summary["peer_gap_bps"] = (
+                                        xrv_summary["spread_to_benchmark_bps"] - xrv_summary["bucket_peer_median_bps"]
+                                    )
+                                    xrv_summary["peer_z_score"] = (
+                                        (xrv_summary["spread_to_benchmark_bps"] - xrv_summary["bucket_peer_mean_bps"])
+                                        / xrv_summary["bucket_peer_std_bps"].replace({0: pd.NA})
+                                    )
+
+                                    # Liquidity proxy within universe.
+                                    today_xrv = pd.Timestamp.today().normalize()
+                                    xrv_summary["days_since_last_trade"] = (today_xrv - xrv_summary["latest_trade"]).dt.days
+                                    xrv_summary["liquidity_score"] = (
+                                        xrv_summary["trade_count"].rank(pct=True) * 35
+                                        + xrv_summary["total_trade_amount"].rank(pct=True) * 35
+                                        + (1 - xrv_summary["days_since_last_trade"].rank(pct=True)) * 30
+                                    )
+
+                                    xrv_summary["spread_percentile"] = (
+                                        xrv_summary.groupby("maturity_bucket")["spread_to_benchmark_bps"]
+                                        .rank(pct=True)
+                                    )
+                                    xrv_summary["liquidity_percentile"] = xrv_summary["liquidity_score"].rank(pct=True)
+                                    xrv_summary["trade_activity_percentile"] = xrv_summary["trade_count"].rank(pct=True)
+                                    xrv_summary["x_issuer_rv_score"] = (
+                                        xrv_summary["spread_percentile"] * 45
+                                        + xrv_summary["liquidity_percentile"] * 35
+                                        + xrv_summary["trade_activity_percentile"] * 20
+                                    )
+
+                                    def classify_xrv(row):
+                                        if row["peer_gap_bps"] >= 10 and row["liquidity_score"] >= 60:
+                                            return "Cheap + Liquid"
+                                        if row["peer_gap_bps"] >= 10:
+                                            return "Cheap / Needs Liquidity Check"
+                                        if row["peer_gap_bps"] <= -10:
+                                            return "Rich vs Peers"
+                                        return "In Line"
+
+                                    xrv_summary["x_issuer_signal"] = xrv_summary.apply(classify_xrv, axis=1)
+
+                                    st.subheader("1. Peer Gap Matrix")
+                                    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+                                    gap_matrix = xrv_summary.pivot_table(
+                                        index="issuer",
+                                        columns="maturity_bucket",
+                                        values="peer_gap_bps",
+                                        aggfunc="mean",
+                                        observed=False,
+                                    ).reindex(columns=maturity_order)
+                                    gap_text = gap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+                                    gap_fig = px.imshow(
+                                        gap_matrix.astype(float),
+                                        x=gap_matrix.columns.astype(str),
+                                        y=gap_matrix.index.astype(str),
+                                        color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
+                                        color_continuous_midpoint=0,
+                                        aspect="auto",
+                                        title=f"Peer Gap Matrix vs {xrv_rating} Benchmark",
+                                        labels={
+                                            "x": "Maturity Bucket",
+                                            "y": "Issuer",
+                                            "color": "Peer Gap (bps)",
+                                        },
+                                    )
+                                    gap_fig.update_traces(
+                                        text=gap_text.values,
+                                        texttemplate="%{text}",
+                                        hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Peer Gap=%{z:.1f} bp<extra></extra>",
+                                    )
+                                    gap_fig.update_layout(height=max(390, 72 * len(gap_matrix.index)))
+                                    st.plotly_chart(gap_fig, use_container_width=True)
+
+                                    st.subheader("2. Cross-Issuer RV Ranking")
+                                    ranking = xrv_summary.sort_values("x_issuer_rv_score", ascending=False, na_position="last").copy()
+                                    rank_cols = [
+                                        "issuer",
+                                        "sector",
+                                        "maturity_bucket",
+                                        "spread_to_benchmark_bps",
+                                        "bucket_peer_median_bps",
+                                        "peer_gap_bps",
+                                        "peer_z_score",
+                                        "liquidity_score",
+                                        "trade_count",
+                                        "total_trade_amount",
+                                        "days_since_last_trade",
+                                        "x_issuer_rv_score",
+                                        "x_issuer_signal",
+                                    ]
+                                    ranking_display = ranking[[c for c in rank_cols if c in ranking.columns]].copy()
+                                    for c in [
+                                        "spread_to_benchmark_bps",
+                                        "bucket_peer_median_bps",
+                                        "peer_gap_bps",
+                                        "peer_z_score",
+                                        "liquidity_score",
+                                        "x_issuer_rv_score",
+                                    ]:
+                                        if c in ranking_display.columns:
+                                            ranking_display[c] = pd.to_numeric(ranking_display[c], errors="coerce").round(2)
+
+                                    st.dataframe(ranking_display, use_container_width=True, hide_index=True, height=430)
+
+                                    st.subheader("3. Cross-Issuer Opportunity Map")
+                                    xrv_scatter = px.scatter(
+                                        ranking,
+                                        x="liquidity_score",
+                                        y="peer_gap_bps",
+                                        size="total_trade_amount",
+                                        size_max=38,
+                                        color="maturity_bucket",
+                                        symbol="x_issuer_signal",
+                                        hover_name="issuer",
+                                        hover_data=[
+                                            "sector",
+                                            "maturity_bucket",
+                                            "spread_to_benchmark_bps",
+                                            "bucket_peer_median_bps",
+                                            "peer_z_score",
+                                            "trade_count",
+                                            "total_trade_amount",
+                                            "x_issuer_rv_score",
+                                            "x_issuer_signal",
+                                        ],
+                                        title="Cross-Issuer Relative Value Opportunity Map",
+                                        labels={
+                                            "liquidity_score": "Liquidity Score",
+                                            "peer_gap_bps": "Peer Gap (bps)",
+                                            "maturity_bucket": "Maturity Bucket",
+                                        },
+                                    )
+                                    xrv_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
+                                    xrv_scatter.add_vline(x=60, line_dash="dash", opacity=0.35)
+                                    xrv_scatter.update_layout(height=540, hovermode="closest")
+                                    st.plotly_chart(xrv_scatter, use_container_width=True)
+
+                                    if not ranking.empty:
+                                        top = ranking.iloc[0]
+                                        st.info(
+                                            f"Cross-issuer read-through: {top['issuer']} / {top['maturity_bucket']} screens highest by RV score. "
+                                            f"It is {top['peer_gap_bps']:+.1f} bp versus the bucket peer median, "
+                                            f"with liquidity score {top['liquidity_score']:.1f} and signal: {top['x_issuer_signal']}."
+                                        )
+
+                                    with st.expander("Cross-issuer RV audit table", expanded=False):
+                                        audit_cols = [
+                                            "issuer",
+                                            "sector",
+                                            "maturity_bucket",
+                                            "avg_yield",
+                                            "benchmark_yield",
+                                            "spread_to_benchmark_bps",
+                                            "bucket_peer_median_bps",
+                                            "peer_gap_bps",
+                                            "peer_z_score",
+                                            "trade_count",
+                                            "total_trade_amount",
+                                            "latest_trade",
+                                            "mmd_tenor",
+                                            "benchmark_source",
+                                            "source_column",
+                                            "rating_spread_bps",
+                                        ]
+                                        audit_xrv = xrv_summary[[c for c in audit_cols if c in xrv_summary.columns]].copy()
+                                        for c in [
+                                            "avg_yield",
+                                            "benchmark_yield",
+                                            "spread_to_benchmark_bps",
+                                            "bucket_peer_median_bps",
+                                            "peer_gap_bps",
+                                            "peer_z_score",
+                                            "rating_spread_bps",
+                                        ]:
+                                            if c in audit_xrv.columns:
+                                                audit_xrv[c] = pd.to_numeric(audit_xrv[c], errors="coerce").round(2)
+                                        st.caption(
+                                            f"Benchmark date used: {xrv_benchmark_date.strftime('%Y-%m-%d')}. "
+                                            f"Lookback window: {xrv_window}."
+                                        )
+                                        st.dataframe(audit_xrv, use_container_width=True, hide_index=True)
 
 
 section_anchor("historical-spread", "Historical Spread Range & Percentile")
