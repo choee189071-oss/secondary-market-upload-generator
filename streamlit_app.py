@@ -2282,13 +2282,147 @@ else:
     st.subheader("1. Market Activity Over Time")
     st.plotly_chart(px.line(monthly, x="trade_month", y="trade_count", markers=True, title="Monthly Trade Count"), use_container_width=True)
 
-    st.subheader("2. Most Frequently Traded CUSIPs")
+    st.subheader("2. Trade Size Distribution")
+    with st.expander("Methodology: trade size distribution", expanded=False):
+        st.markdown(
+            """
+This chart groups trades by par/trade amount to show whether activity is primarily retail-sized, institutional-sized, or block-oriented.
+
+**Default buckets:**
+
+- **< $100k**: odd-lot / retail-sized activity
+- **$100k–$250k**: small institutional or advisor-sized activity
+- **$250k–$1mm**: institutional-sized activity
+- **$1mm+**: block trade / larger institutional flow
+
+This is useful because trade count alone can overstate liquidity when most activity comes from small trades.
+            """
+        )
+
+    if "trade_amount" not in liq_base.columns:
+        st.info("Trade size distribution is unavailable because trade_amount is missing from the uploaded trade data.")
+    else:
+        trade_size_df = liq_base.copy()
+        trade_size_df["trade_amount"] = pd.to_numeric(trade_size_df["trade_amount"], errors="coerce")
+        trade_size_df = trade_size_df.dropna(subset=["trade_amount"])
+        trade_size_df = trade_size_df[trade_size_df["trade_amount"] > 0]
+
+        if trade_size_df.empty:
+            st.info("Trade size distribution is unavailable because no positive trade_amount values were found.")
+        else:
+            trade_size_bins = [0, 100_000, 250_000, 1_000_000, float("inf")]
+            trade_size_labels = ["< $100k", "$100k–$250k", "$250k–$1mm", "$1mm+"]
+            trade_size_df["trade_size_bucket"] = pd.cut(
+                trade_size_df["trade_amount"],
+                bins=trade_size_bins,
+                labels=trade_size_labels,
+                include_lowest=True,
+                right=False,
+            )
+
+            size_summary = (
+                trade_size_df.groupby("trade_size_bucket", observed=False)
+                .agg(
+                    trade_count=("trade_amount", "count"),
+                    total_trade_amount=("trade_amount", "sum"),
+                    avg_trade_amount=("trade_amount", "mean"),
+                    median_trade_amount=("trade_amount", "median"),
+                )
+                .reset_index()
+            )
+            size_summary["trade_size_bucket"] = size_summary["trade_size_bucket"].astype(str)
+            size_summary["trade_count_share"] = size_summary["trade_count"] / size_summary["trade_count"].sum()
+            size_summary["amount_share"] = size_summary["total_trade_amount"] / size_summary["total_trade_amount"].sum()
+
+            size_fig = px.bar(
+                size_summary,
+                x="trade_size_bucket",
+                y="trade_count",
+                hover_data={
+                    "total_trade_amount": ":,.0f",
+                    "avg_trade_amount": ":,.0f",
+                    "median_trade_amount": ":,.0f",
+                    "trade_count_share": ":.1%",
+                    "amount_share": ":.1%",
+                },
+                title="Trade Count by Size Bucket",
+                labels={
+                    "trade_size_bucket": "Trade Size Bucket",
+                    "trade_count": "Number of Trades",
+                    "total_trade_amount": "Total Trade Amount",
+                    "trade_count_share": "Share of Trades",
+                    "amount_share": "Share of Par Traded",
+                },
+            )
+            size_fig.update_layout(height=430)
+            st.plotly_chart(size_fig, use_container_width=True)
+
+            amount_fig = px.bar(
+                size_summary,
+                x="trade_size_bucket",
+                y="total_trade_amount",
+                hover_data={
+                    "trade_count": ":,.0f",
+                    "avg_trade_amount": ":,.0f",
+                    "median_trade_amount": ":,.0f",
+                    "trade_count_share": ":.1%",
+                    "amount_share": ":.1%",
+                },
+                title="Total Par Traded by Size Bucket",
+                labels={
+                    "trade_size_bucket": "Trade Size Bucket",
+                    "total_trade_amount": "Total Trade Amount",
+                    "trade_count": "Number of Trades",
+                    "trade_count_share": "Share of Trades",
+                    "amount_share": "Share of Par Traded",
+                },
+            )
+            amount_fig.update_layout(height=430)
+            st.plotly_chart(amount_fig, use_container_width=True)
+
+            retail_trade_share = size_summary.loc[
+                size_summary["trade_size_bucket"] == "< $100k", "trade_count_share"
+            ]
+            block_amount_share = size_summary.loc[
+                size_summary["trade_size_bucket"] == "$1mm+", "amount_share"
+            ]
+
+            retail_trade_share_val = float(retail_trade_share.iloc[0]) if not retail_trade_share.empty else 0.0
+            block_amount_share_val = float(block_amount_share.iloc[0]) if not block_amount_share.empty else 0.0
+
+            if retail_trade_share_val >= 0.60 and block_amount_share_val < 0.25:
+                st.info(
+                    f"Read-through: trading activity appears retail / odd-lot heavy. "
+                    f"< $100k trades account for {retail_trade_share_val:.1%} of trades, "
+                    f"while $1mm+ blocks account for {block_amount_share_val:.1%} of par traded."
+                )
+            elif block_amount_share_val >= 0.50:
+                st.info(
+                    f"Read-through: activity appears institutionally active. "
+                    f"$1mm+ blocks account for {block_amount_share_val:.1%} of par traded."
+                )
+            else:
+                st.info(
+                    f"Read-through: trade activity is mixed across retail-sized and institutional-sized buckets. "
+                    f"< $100k trades account for {retail_trade_share_val:.1%} of trades; "
+                    f"$1mm+ blocks account for {block_amount_share_val:.1%} of par traded."
+                )
+
+            with st.expander("Trade size distribution table", expanded=False):
+                table_display = size_summary.copy()
+                for pct_col in ["trade_count_share", "amount_share"]:
+                    table_display[pct_col] = table_display[pct_col].map(lambda x: f"{x:.1%}" if pd.notna(x) else "")
+                for amt_col in ["total_trade_amount", "avg_trade_amount", "median_trade_amount"]:
+                    table_display[amt_col] = pd.to_numeric(table_display[amt_col], errors="coerce").round(0)
+                st.dataframe(table_display, use_container_width=True, hide_index=True)
+
+    st.subheader("3. Most Frequently Traded CUSIPs")
     st.plotly_chart(px.bar(liq.head(25), x="cusip", y="trade_count", color="liquidity_tier", title="Top 25 Most Frequently Traded CUSIPs"), use_container_width=True)
 
-    st.subheader("3. Trade Recency / Staleness")
+    st.subheader("4. Trade Recency / Staleness")
     st.plotly_chart(px.histogram(liq, x="days_since_last_trade", nbins=30, color="liquidity_tier", title="Distribution of Days Since Last Trade"), use_container_width=True)
 
-    st.subheader("4. Liquidity Ranking Table")
+    st.subheader("5. Liquidity Ranking Table")
     display_cols = [
         "cusip", "liquidity_tier", "liquidity_score", "trade_count", "recent_90d_trades", "active_months",
         "avg_trades_per_month", "avg_days_between_trades", "days_since_last_trade", "first_trade", "latest_trade",
