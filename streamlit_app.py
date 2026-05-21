@@ -165,11 +165,12 @@ def section_directory():
 <a href="#spread-attribution">6. Spread Attribution</a> ·
 <a href="#market-narrative">7. Market Narrative & Opportunity Map</a> ·
 <a href="#spread-movement">8. Spread Movement</a> ·
-<a href="#rv-positioning">9. RV Positioning Map</a> ·
-<a href="#liquidity">10. Liquidity</a> ·
-<a href="#bond-master">11. Bond Master</a> ·
-<a href="#trade-detail">12. Trade Detail</a> ·
-<a href="#downloads">13. Downloads</a>
+<a href="#cusip-drilldown">9. CUSIP Drilldown</a> ·
+<a href="#rv-positioning">10. RV Positioning Map</a> ·
+<a href="#liquidity">11. Liquidity</a> ·
+<a href="#bond-master">12. Bond Master</a> ·
+<a href="#trade-detail">13. Trade Detail</a> ·
+<a href="#downloads">14. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -2456,6 +2457,366 @@ else:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
                 st.dataframe(audit_display, use_container_width=True, hide_index=True)
+
+
+
+section_anchor("cusip-drilldown", "CUSIP Opportunity Drilldown")
+with st.expander("Methodology: CUSIP opportunity drilldown", expanded=False):
+    st.markdown(
+        """
+This section moves from issuer-level signals into **specific bond-level candidates**.
+
+**Purpose:**
+
+- Identify which CUSIPs are driving a maturity bucket's relative-value signal.
+- Compare current CUSIP-level spread, recent movement, trade count, and liquidity.
+- Help the team move from: *"30Y widened"* to *"which 30Y bonds should we look at?"*
+
+**Calculation overview:**
+
+- Current CUSIP yield is calculated over the selected lookback window.
+- Current spread is calculated as:
+
+`CUSIP Spread = (Average CUSIP Yield - Benchmark Yield) × 100`
+
+- Historical spread uses the most recent observation at or before the lookback target date.
+- Spread change is:
+
+`Spread Change = Current Spread - Historical Spread`
+
+Positive spread change means widening; negative spread change means tightening.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD curve file to enable CUSIP-level spread drilldown.")
+elif issuer_trades.empty:
+    st.warning("No trade rows found for the selected issuer and filters.")
+else:
+    dd_col1, dd_col2, dd_col3, dd_col4 = st.columns([1, 1, 1, 1])
+    with dd_col1:
+        dd_bucket = st.selectbox(
+            "Drilldown Maturity Bucket",
+            ["Short", "10Y", "20Y", "30Y"],
+            index=3,
+            help="Focus the drilldown on one maturity bucket.",
+        )
+    with dd_col2:
+        dd_rating = st.selectbox(
+            "Drilldown Benchmark",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            help="Priority: uploaded benchmark curve first; otherwise modeled from MMD + spread assumptions.",
+        )
+    with dd_col3:
+        dd_lookback_label = st.selectbox(
+            "Movement Lookback",
+            ["1W", "1M", "3M", "6M", "1Y"],
+            index=1,
+        )
+    with dd_col4:
+        dd_min_trades = st.number_input(
+            "Minimum Trades",
+            min_value=1,
+            max_value=50,
+            value=1,
+            step=1,
+            help="Filter out CUSIPs with fewer trades in the current lookback window.",
+        )
+
+    dd_window_days = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}[dd_lookback_label]
+    dd_tenor = MMD_BUCKET_MAP.get(dd_bucket, "10Y")
+    dd_date_col = _detect_mmd_date_column(mmd_df)
+
+    if dd_date_col is None:
+        st.warning("CUSIP drilldown cannot run because the benchmark file does not contain a usable date column.")
+    else:
+        dd_base = market_df[
+            (market_df["issuer"] == selected_issuer)
+            & (market_df["maturity_bucket"] == dd_bucket)
+        ].copy()
+
+        if dd_base.empty:
+            st.warning(f"No {dd_bucket} CUSIP-level trade rows were found for {selected_issuer}.")
+        else:
+            dd_base["trade_date"] = pd.to_datetime(dd_base["trade_date"], errors="coerce").dt.normalize()
+            dd_base["yield"] = pd.to_numeric(dd_base["yield"], errors="coerce")
+            if "trade_amount" in dd_base.columns:
+                dd_base["trade_amount"] = pd.to_numeric(dd_base["trade_amount"], errors="coerce").fillna(0)
+            else:
+                dd_base["trade_amount"] = 0.0
+            if "price" in dd_base.columns:
+                dd_base["price"] = pd.to_numeric(dd_base["price"], errors="coerce")
+            else:
+                dd_base["price"] = pd.NA
+
+            dd_base = dd_base.dropna(subset=["trade_date", "yield", "cusip"])
+
+            if dd_base.empty:
+                st.warning("CUSIP drilldown cannot run because no valid CUSIP/date/yield rows remain after cleaning.")
+            else:
+                dd_latest_date = dd_base["trade_date"].max()
+                dd_current_start = dd_latest_date - pd.Timedelta(days=dd_window_days)
+                dd_hist_target = dd_current_start
+
+                dd_current = dd_base[dd_base["trade_date"] >= dd_current_start].copy()
+                if dd_current.empty:
+                    st.warning("No CUSIP trades were found inside the selected current lookback window.")
+                else:
+                    # Benchmark curve on or before latest issuer trade date.
+                    dd_mmd = mmd_df.copy()
+                    dd_mmd[dd_date_col] = pd.to_datetime(dd_mmd[dd_date_col], errors="coerce")
+                    dd_mmd = dd_mmd.dropna(subset=[dd_date_col])
+                    dd_mmd = dd_mmd[dd_mmd[dd_date_col].dt.normalize() <= dd_latest_date].sort_values(dd_date_col)
+
+                    if dd_mmd.empty:
+                        st.warning("No benchmark curve observation was available on or before the latest issuer trade date.")
+                    else:
+                        dd_latest_mmd = dd_mmd.iloc[[-1]].copy()
+                        dd_benchmark_date = dd_latest_mmd[dd_date_col].iloc[0]
+                        dd_benchmark_yield_series, dd_meta = get_benchmark_curve(dd_latest_mmd, dd_tenor, dd_rating)
+
+                        if dd_benchmark_yield_series is None or pd.isna(dd_benchmark_yield_series.iloc[0]):
+                            st.warning(f"{dd_rating} {dd_tenor} benchmark could not be built for this drilldown.")
+                        else:
+                            dd_benchmark_yield = float(dd_benchmark_yield_series.iloc[0])
+
+                            current_summary = (
+                                dd_current.groupby("cusip", dropna=False)
+                                .agg(
+                                    current_avg_yield=("yield", "mean"),
+                                    latest_yield=("yield", "last"),
+                                    avg_price=("price", "mean"),
+                                    trade_count=("trade_date", "count"),
+                                    latest_trade=("trade_date", "max"),
+                                    first_trade=("trade_date", "min"),
+                                    total_trade_amount=("trade_amount", "sum"),
+                                    avg_trade_amount=("trade_amount", "mean"),
+                                    maturity=("maturity_bond", "first") if "maturity_bond" in dd_current.columns else ("trade_date", "max"),
+                                    coupon=("coupon_bond", "first") if "coupon_bond" in dd_current.columns else ("yield", "count"),
+                                    call_date=("call_date", "first") if "call_date" in dd_current.columns else ("trade_date", "max"),
+                                    call_price=("call_price", "first") if "call_price" in dd_current.columns else ("yield", "count"),
+                                    outstanding_amount=("outstanding_amount", "first") if "outstanding_amount" in dd_current.columns else ("trade_amount", "sum"),
+                                )
+                                .reset_index()
+                            )
+
+                            current_summary["current_spread_bps"] = (
+                                current_summary["current_avg_yield"] - dd_benchmark_yield
+                            ) * 100
+
+                            # Historical CUSIP spread at or before the lookback target date.
+                            hist_candidates = dd_base[dd_base["trade_date"] <= dd_hist_target].copy()
+                            if not hist_candidates.empty:
+                                hist_rows = (
+                                    hist_candidates.sort_values("trade_date")
+                                    .groupby("cusip", as_index=False)
+                                    .tail(1)[["cusip", "trade_date", "yield", "price", "trade_amount"]]
+                                    .rename(
+                                        columns={
+                                            "trade_date": "historical_trade_date",
+                                            "yield": "historical_yield",
+                                            "price": "historical_price",
+                                            "trade_amount": "historical_trade_amount",
+                                        }
+                                    )
+                                )
+
+                                dd_hist_mmd = mmd_df.copy()
+                                dd_hist_mmd[dd_date_col] = pd.to_datetime(dd_hist_mmd[dd_date_col], errors="coerce")
+                                dd_hist_mmd = dd_hist_mmd.dropna(subset=[dd_date_col])
+                                dd_hist_mmd = dd_hist_mmd[dd_hist_mmd[dd_date_col].dt.normalize() <= dd_hist_target].sort_values(dd_date_col)
+
+                                if not dd_hist_mmd.empty:
+                                    dd_hist_latest_mmd = dd_hist_mmd.iloc[[-1]].copy()
+                                    dd_hist_benchmark_yield_series, dd_hist_meta = get_benchmark_curve(
+                                        dd_hist_latest_mmd, dd_tenor, dd_rating
+                                    )
+                                    if dd_hist_benchmark_yield_series is not None and pd.notna(dd_hist_benchmark_yield_series.iloc[0]):
+                                        dd_hist_benchmark_yield = float(dd_hist_benchmark_yield_series.iloc[0])
+                                        hist_rows["historical_spread_bps"] = (
+                                            hist_rows["historical_yield"] - dd_hist_benchmark_yield
+                                        ) * 100
+                                    else:
+                                        hist_rows["historical_spread_bps"] = pd.NA
+                                else:
+                                    hist_rows["historical_spread_bps"] = pd.NA
+                            else:
+                                hist_rows = pd.DataFrame(columns=["cusip", "historical_trade_date", "historical_yield", "historical_price", "historical_trade_amount", "historical_spread_bps"])
+
+                            dd_opps = current_summary.merge(hist_rows, on="cusip", how="left")
+                            dd_opps["spread_change_bps"] = dd_opps["current_spread_bps"] - dd_opps["historical_spread_bps"]
+                            dd_opps["yield_change_bps"] = (dd_opps["current_avg_yield"] - dd_opps["historical_yield"]) * 100
+
+                            # Liquidity score proxy for current window.
+                            dd_today = pd.Timestamp.today().normalize()
+                            dd_opps["days_since_last_trade"] = (dd_today - dd_opps["latest_trade"]).dt.days
+                            dd_opps["liquidity_score"] = (
+                                dd_opps["trade_count"].rank(pct=True) * 40
+                                + dd_opps["total_trade_amount"].rank(pct=True) * 35
+                                + (1 - dd_opps["days_since_last_trade"].rank(pct=True)) * 25
+                            )
+                            dd_opps["liquidity_tier"] = pd.cut(
+                                dd_opps["liquidity_score"],
+                                bins=[-1, 45, 75, 101],
+                                labels=["Low", "Medium", "High"],
+                            ).astype(str)
+
+                            dd_opps = dd_opps[dd_opps["trade_count"] >= dd_min_trades].copy()
+
+                            if dd_opps.empty:
+                                st.info("No CUSIPs met the selected minimum trade filter.")
+                            else:
+                                dd_sort_options = {
+                                    "Current Spread": "current_spread_bps",
+                                    "Spread Change": "spread_change_bps",
+                                    "Liquidity Score": "liquidity_score",
+                                    "Trade Count": "trade_count",
+                                    "Total Trade Amount": "total_trade_amount",
+                                }
+                                dd_sort_label = st.selectbox(
+                                    "Sort Opportunities By",
+                                    list(dd_sort_options.keys()),
+                                    index=0,
+                                    key="dd_sort_opportunities",
+                                )
+                                dd_sort_col = dd_sort_options[dd_sort_label]
+                                dd_opps = dd_opps.sort_values(dd_sort_col, ascending=False, na_position="last")
+
+                                summary_c1, summary_c2, summary_c3, summary_c4 = st.columns(4)
+                                summary_c1.metric("CUSIPs Found", f"{len(dd_opps):,}")
+                                summary_c2.metric("Bucket", dd_bucket)
+                                summary_c3.metric("Total Par Traded", f"{dd_opps['total_trade_amount'].sum():,.0f}")
+                                summary_c4.metric("Benchmark", f"{dd_rating} {dd_tenor}")
+
+                                top_row = dd_opps.iloc[0]
+                                spread_change_text = ""
+                                if pd.notna(top_row.get("spread_change_bps")):
+                                    spread_change_text = f"{top_row.get('spread_change_bps'):+.1f} bp spread change, "
+
+                                st.info(
+                                    f"Top read-through by {dd_sort_label}: CUSIP {top_row['cusip']} shows "
+                                    f"{top_row['current_spread_bps']:+.1f} bp current spread to {dd_rating}, "
+                                    f"{spread_change_text}"
+                                    f"{int(top_row['trade_count'])} trades, and {top_row['liquidity_tier']} liquidity in the selected window."
+                                )
+
+                                display_cols = [
+                                    "cusip", "coupon", "maturity", "call_date", "call_price",
+                                    "current_avg_yield", "current_spread_bps", "spread_change_bps",
+                                    "yield_change_bps", "trade_count", "total_trade_amount", "avg_trade_amount",
+                                    "latest_trade", "historical_trade_date", "historical_spread_bps",
+                                    "avg_price", "historical_price", "liquidity_score", "liquidity_tier",
+                                    "outstanding_amount",
+                                ]
+                                dd_display = dd_opps[[c for c in display_cols if c in dd_opps.columns]].copy()
+                                for col in ["current_avg_yield", "current_spread_bps", "spread_change_bps", "yield_change_bps", "avg_price", "historical_price", "liquidity_score"]:
+                                    if col in dd_display.columns:
+                                        dd_display[col] = pd.to_numeric(dd_display[col], errors="coerce").round(2)
+
+                                st.subheader("CUSIP Opportunity Table")
+                                st.dataframe(dd_display, use_container_width=True, hide_index=True, height=420)
+
+                                st.subheader("Security Detail")
+                                selected_cusip = st.selectbox(
+                                    "Select CUSIP for detail",
+                                    dd_opps["cusip"].astype(str).tolist(),
+                                    index=0,
+                                    key="selected_cusip_drilldown",
+                                )
+
+                                sec_trades = dd_base[dd_base["cusip"].astype(str) == str(selected_cusip)].copy()
+                                sec_trades = sec_trades.sort_values("trade_date")
+                                if sec_trades.empty:
+                                    st.warning("No trade rows found for the selected CUSIP.")
+                                else:
+                                    sec_daily = (
+                                        sec_trades.groupby("trade_date", as_index=False)
+                                        .agg(
+                                            avg_yield=("yield", "mean"),
+                                            trade_count=("yield", "count"),
+                                            total_trade_amount=("trade_amount", "sum"),
+                                            avg_price=("price", "mean"),
+                                        )
+                                    )
+
+                                    # Build benchmark series for selected security dates.
+                                    bench_long = make_benchmark_long(mmd_df, dd_rating)
+                                    if not bench_long.empty:
+                                        sec_daily = sec_daily.merge(
+                                            bench_long[bench_long["maturity_bucket"] == dd_bucket][["trade_date", "benchmark_yield", "benchmark_source", "source_column"]],
+                                            on="trade_date",
+                                            how="left",
+                                        )
+                                        sec_daily["spread_to_benchmark_bps"] = (
+                                            sec_daily["avg_yield"] - sec_daily["benchmark_yield"]
+                                        ) * 100
+
+                                    detail_col1, detail_col2 = st.columns(2)
+                                    with detail_col1:
+                                        sec_yield_fig = px.line(
+                                            sec_daily,
+                                            x="trade_date",
+                                            y="avg_yield",
+                                            markers=True,
+                                            hover_data=["trade_count", "total_trade_amount", "avg_price"],
+                                            title=f"{selected_cusip} Yield History",
+                                            labels={"trade_date": "Trade Date", "avg_yield": "Average Yield (%)"},
+                                        )
+                                        sec_yield_fig.update_layout(height=380)
+                                        st.plotly_chart(sec_yield_fig, use_container_width=True)
+
+                                    with detail_col2:
+                                        if "spread_to_benchmark_bps" in sec_daily.columns and sec_daily["spread_to_benchmark_bps"].notna().any():
+                                            sec_spread_fig = px.line(
+                                                sec_daily,
+                                                x="trade_date",
+                                                y="spread_to_benchmark_bps",
+                                                markers=True,
+                                                hover_data=["trade_count", "total_trade_amount", "benchmark_source", "source_column"],
+                                                title=f"{selected_cusip} Spread to {dd_rating} Benchmark",
+                                                labels={"trade_date": "Trade Date", "spread_to_benchmark_bps": "Spread (bps)"},
+                                            )
+                                            sec_spread_fig.update_layout(height=380)
+                                            st.plotly_chart(sec_spread_fig, use_container_width=True)
+                                        else:
+                                            sec_amt_fig = px.bar(
+                                                sec_daily,
+                                                x="trade_date",
+                                                y="total_trade_amount",
+                                                hover_data=["trade_count", "avg_yield", "avg_price"],
+                                                title=f"{selected_cusip} Trade Amount History",
+                                                labels={"trade_date": "Trade Date", "total_trade_amount": "Total Trade Amount"},
+                                            )
+                                            sec_amt_fig.update_layout(height=380)
+                                            st.plotly_chart(sec_amt_fig, use_container_width=True)
+
+                                    with st.expander("Latest trades for selected CUSIP", expanded=False):
+                                        latest_trade_cols = [
+                                            "trade_datetime", "trade_date", "cusip", "description", "maturity_trade",
+                                            "maturity_bond", "coupon_trade", "coupon_bond", "yield", "price",
+                                            "trade_amount", "spread", "trade_type", "ratings_m_s_f",
+                                        ]
+                                        st.dataframe(
+                                            sec_trades[[c for c in latest_trade_cols if c in sec_trades.columns]]
+                                            .sort_values("trade_date", ascending=False)
+                                            .head(500),
+                                            use_container_width=True,
+                                            hide_index=True,
+                                        )
+
+                            with st.expander("Drilldown benchmark/audit details", expanded=False):
+                                st.markdown(
+                                    f"""
+- Latest CUSIP trade date used: **{dd_latest_date.strftime('%Y-%m-%d')}**
+- Current window start: **{dd_current_start.strftime('%Y-%m-%d')}**
+- Historical target date: **{dd_hist_target.strftime('%Y-%m-%d')}**
+- Benchmark date: **{dd_benchmark_date.strftime('%Y-%m-%d')}**
+- Benchmark source: **{dd_meta.get('benchmark_source')}**
+- Source column: **{dd_meta.get('source_column')}**
+- Benchmark yield: **{dd_benchmark_yield:.4f}%**
+                                    """
+                                )
 
 
 section_anchor("rv-positioning", "Relative Value Positioning Map")
