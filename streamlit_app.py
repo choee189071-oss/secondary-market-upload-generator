@@ -166,9 +166,10 @@ def section_directory():
 <a href="#market-narrative">7. Market Narrative & Opportunity Map</a> ·
 <a href="#peer-rv">8. Peer RV Comparison</a> ·
 <a href="#historical-spread">9. Historical Spread Percentile</a> ·
-<a href="#dealer-proxy">10. Dealer Proxy</a> ·
-<a href="#security-screener">11. Security Screener</a> ·
-<a href="#spread-movement">12. Spread Movement</a> ·
+<a href="#curve-shape">10. Curve Shape Analytics</a> ·
+<a href="#dealer-proxy">11. Dealer Proxy</a> ·
+<a href="#security-screener">12. Security Screener</a> ·
+<a href="#spread-movement">13. Spread Movement</a> ·
 <a href="#cusip-drilldown">13. CUSIP Drilldown</a> ·
 <a href="#rv-positioning">14. RV Positioning Map</a> ·
 <a href="#liquidity">15. Liquidity</a> ·
@@ -1627,6 +1628,253 @@ else:
                         f"{cheap_row['maturity_bucket']} is the widest bucket at {cheap_row['spread_to_benchmark_bps']:+.1f} bp, "
                         f"while {rich_row['maturity_bucket']} is the tightest bucket at {rich_row['spread_to_benchmark_bps']:+.1f} bp."
                     )
+
+
+
+section_anchor("curve-shape", "Curve Shape Analytics")
+with st.expander("Methodology: curve shape analytics", expanded=False):
+    st.markdown(
+        """
+This section turns the issuer curve into **curve mathematics**, similar to what rates / muni desks monitor.
+
+**Metrics:**
+
+- **5s10s Slope** = 10Y yield − Short/5Y yield
+- **10s30s Slope** = 30Y yield − 10Y yield
+- **5s30s Slope** = 30Y yield − Short/5Y yield
+- **5s10s30s Butterfly** = 10Y yield − average(Short/5Y yield, 30Y yield)
+
+**How to read it:**
+
+- Higher positive slope = steeper curve.
+- Lower or negative slope = flatter / inverted curve shape.
+- Positive butterfly = 10Y “belly” is high/cheap versus wings.
+- Negative butterfly = 10Y “belly” is low/rich versus wings.
+
+The issuer curve uses uploaded trade data over the selected lookback window. The benchmark curve uses uploaded rating curves when available; otherwise it falls back to MMD/AAA plus transparent rating-spread assumptions.
+        """
+    )
+
+if mmd_df.empty:
+    st.info("Upload an MMD/benchmark curve file to enable curve shape analytics.")
+else:
+    cs_col1, cs_col2, cs_col3 = st.columns([1, 1, 1])
+    with cs_col1:
+        cs_rating = st.selectbox(
+            "Curve Shape Benchmark",
+            BENCHMARK_RATINGS,
+            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
+            key="curve_shape_benchmark",
+        )
+    with cs_col2:
+        cs_lookback = st.selectbox(
+            "Issuer Curve Lookback",
+            [7, 30, 60, 90, 180],
+            index=1,
+            format_func=lambda x: f"Latest {x} days",
+            key="curve_shape_lookback",
+        )
+    with cs_col3:
+        cs_curve_basis = st.selectbox(
+            "Curve Basis",
+            ["Yield Curve", "Spread Curve"],
+            index=0,
+            key="curve_shape_basis",
+            help="Yield Curve uses issuer yields. Spread Curve uses issuer spread to selected benchmark.",
+        )
+
+    cs_base = market_df[market_df["issuer"] == selected_issuer].copy()
+    cs_base["trade_date"] = pd.to_datetime(cs_base["trade_date"], errors="coerce").dt.normalize()
+    cs_base["yield"] = pd.to_numeric(cs_base["yield"], errors="coerce")
+    cs_base = cs_base.dropna(subset=["trade_date", "yield", "maturity_bucket"])
+    cs_base = cs_base[cs_base["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+
+    if cs_base.empty:
+        st.warning("No usable issuer trade rows were available for curve shape analytics.")
+    else:
+        cs_latest_date = cs_base["trade_date"].max()
+        cs_start_date = cs_latest_date - pd.Timedelta(days=int(cs_lookback))
+        cs_window = cs_base[cs_base["trade_date"] >= cs_start_date].copy()
+
+        if cs_window.empty:
+            st.warning("No issuer trades were found inside the selected lookback window.")
+        else:
+            issuer_curve = (
+                cs_window.groupby("maturity_bucket", as_index=False)
+                .agg(
+                    issuer_yield=("yield", "mean"),
+                    trade_count=("yield", "count"),
+                    total_trade_amount=("trade_amount", "sum") if "trade_amount" in cs_window.columns else ("yield", "count"),
+                    latest_trade=("trade_date", "max"),
+                )
+            )
+
+            date_col = _detect_mmd_date_column(mmd_df)
+            if date_col is None:
+                st.warning("Curve shape analytics cannot build benchmark curve because the curve file has no usable date column.")
+            else:
+                cs_mmd = mmd_df.copy()
+                cs_mmd[date_col] = pd.to_datetime(cs_mmd[date_col], errors="coerce")
+                cs_mmd = cs_mmd.dropna(subset=[date_col])
+                cs_mmd = cs_mmd[cs_mmd[date_col].dt.normalize() <= cs_latest_date].sort_values(date_col)
+
+                if cs_mmd.empty:
+                    st.warning("No benchmark curve observation was available on or before the latest issuer trade date.")
+                else:
+                    cs_latest_mmd = cs_mmd.iloc[[-1]].copy()
+                    cs_benchmark_date = cs_latest_mmd[date_col].iloc[0]
+
+                    bench_rows = []
+                    for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                        tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
+                        y, meta = get_benchmark_curve(cs_latest_mmd, tenor, cs_rating)
+                        if y is not None and pd.notna(y.iloc[0]):
+                            bench_rows.append(
+                                {
+                                    "maturity_bucket": bucket,
+                                    "mmd_tenor": tenor,
+                                    "benchmark_yield": float(y.iloc[0]),
+                                    "benchmark_source": meta.get("benchmark_source"),
+                                    "source_column": meta.get("source_column"),
+                                    "rating_spread_bps": meta.get("rating_spread_bps"),
+                                }
+                            )
+                    bench_curve = pd.DataFrame(bench_rows)
+
+                    if bench_curve.empty:
+                        st.warning("Selected benchmark curve could not be built for curve shape analytics.")
+                    else:
+                        curve_shape_df = issuer_curve.merge(bench_curve, on="maturity_bucket", how="outer")
+                        curve_shape_df["spread_to_benchmark_bps"] = (
+                            curve_shape_df["issuer_yield"] - curve_shape_df["benchmark_yield"]
+                        ) * 100
+
+                        maturity_order = ["Short", "10Y", "20Y", "30Y"]
+                        curve_shape_df["maturity_bucket"] = pd.Categorical(
+                            curve_shape_df["maturity_bucket"],
+                            categories=maturity_order,
+                            ordered=True,
+                        )
+                        curve_shape_df = curve_shape_df.sort_values("maturity_bucket")
+
+                        metric_col = "issuer_yield" if cs_curve_basis == "Yield Curve" else "spread_to_benchmark_bps"
+                        metric_label = "Issuer Yield (%)" if cs_curve_basis == "Yield Curve" else f"Spread to {cs_rating} (bps)"
+
+                        curve_plot = curve_shape_df.dropna(subset=[metric_col]).copy()
+                        if curve_plot.empty:
+                            st.warning("Not enough curve points were available to calculate curve shape metrics.")
+                        else:
+                            fig_curve_shape = px.line(
+                                curve_plot,
+                                x="maturity_bucket",
+                                y=metric_col,
+                                markers=True,
+                                hover_data=[
+                                    c for c in [
+                                        "issuer_yield", "benchmark_yield", "spread_to_benchmark_bps",
+                                        "trade_count", "total_trade_amount", "latest_trade",
+                                        "benchmark_source", "source_column"
+                                    ] if c in curve_plot.columns
+                                ],
+                                title=f"{selected_issuer} {cs_curve_basis} Shape",
+                                labels={
+                                    "maturity_bucket": "Maturity Bucket",
+                                    metric_col: metric_label,
+                                },
+                            )
+                            fig_curve_shape.update_layout(height=450, hovermode="x unified")
+                            st.plotly_chart(fig_curve_shape, use_container_width=True)
+
+                            curve_values = (
+                                curve_shape_df.set_index("maturity_bucket")[metric_col]
+                                .astype(float)
+                                .to_dict()
+                            )
+
+                            def get_curve_value(bucket: str):
+                                value = curve_values.get(bucket)
+                                return value if pd.notna(value) else pd.NA
+
+                            v_short = get_curve_value("Short")
+                            v_10 = get_curve_value("10Y")
+                            v_20 = get_curve_value("20Y")
+                            v_30 = get_curve_value("30Y")
+
+                            metrics_rows = []
+                            if pd.notna(v_short) and pd.notna(v_10):
+                                metrics_rows.append({"Metric": "5s10s Slope", "Value": v_10 - v_short})
+                            if pd.notna(v_10) and pd.notna(v_30):
+                                metrics_rows.append({"Metric": "10s30s Slope", "Value": v_30 - v_10})
+                            if pd.notna(v_short) and pd.notna(v_30):
+                                metrics_rows.append({"Metric": "5s30s Slope", "Value": v_30 - v_short})
+                            if pd.notna(v_short) and pd.notna(v_10) and pd.notna(v_30):
+                                metrics_rows.append({"Metric": "5s10s30s Butterfly", "Value": v_10 - ((v_short + v_30) / 2)})
+                            if pd.notna(v_short) and pd.notna(v_10) and pd.notna(v_20) and pd.notna(v_30):
+                                # Simple composite steepness score: average of normalized slopes available.
+                                metrics_rows.append({"Metric": "Steepness Score", "Value": ((v_10 - v_short) + (v_30 - v_10) + (v_30 - v_short)) / 3})
+
+                            if not metrics_rows:
+                                st.info("At least two curve points are needed to calculate curve shape metrics.")
+                            else:
+                                metrics_df = pd.DataFrame(metrics_rows)
+                                unit = "bp" if cs_curve_basis == "Spread Curve" else "%"
+                                metrics_df["Display"] = metrics_df["Value"].map(
+                                    lambda x: f"{x:+.1f} {unit}" if cs_curve_basis == "Spread Curve" else f"{x:+.2f}%"
+                                )
+
+                                mcols = st.columns(min(4, len(metrics_df)))
+                                for idx, (_, row) in enumerate(metrics_df.head(4).iterrows()):
+                                    mcols[idx % len(mcols)].metric(row["Metric"], row["Display"])
+
+                                st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+                                # Read-through
+                                slope_1030 = metrics_df.loc[metrics_df["Metric"] == "10s30s Slope", "Value"]
+                                butterfly = metrics_df.loc[metrics_df["Metric"] == "5s10s30s Butterfly", "Value"]
+
+                                notes = []
+                                if not slope_1030.empty:
+                                    s_val = float(slope_1030.iloc[0])
+                                    if s_val > (20 if cs_curve_basis == "Spread Curve" else 0.20):
+                                        notes.append("long end screens steep versus the 10Y point")
+                                    elif s_val < (-10 if cs_curve_basis == "Spread Curve" else -0.10):
+                                        notes.append("long end screens flat/inverted versus the 10Y point")
+                                    else:
+                                        notes.append("10s30s slope appears relatively contained")
+
+                                if not butterfly.empty:
+                                    b_val = float(butterfly.iloc[0])
+                                    if b_val > (10 if cs_curve_basis == "Spread Curve" else 0.10):
+                                        notes.append("10Y belly appears cheap/high versus wings")
+                                    elif b_val < (-10 if cs_curve_basis == "Spread Curve" else -0.10):
+                                        notes.append("10Y belly appears rich/low versus wings")
+
+                                if notes:
+                                    st.info("Curve read-through: " + "; ".join(notes) + ".")
+
+                                with st.expander("Curve shape audit table", expanded=False):
+                                    audit_cols = [
+                                        "maturity_bucket",
+                                        "issuer_yield",
+                                        "benchmark_yield",
+                                        "spread_to_benchmark_bps",
+                                        "trade_count",
+                                        "total_trade_amount",
+                                        "latest_trade",
+                                        "mmd_tenor",
+                                        "benchmark_source",
+                                        "source_column",
+                                        "rating_spread_bps",
+                                    ]
+                                    audit_curve = curve_shape_df[[c for c in audit_cols if c in curve_shape_df.columns]].copy()
+                                    for c in ["issuer_yield", "benchmark_yield", "spread_to_benchmark_bps", "rating_spread_bps"]:
+                                        if c in audit_curve.columns:
+                                            audit_curve[c] = pd.to_numeric(audit_curve[c], errors="coerce").round(2)
+                                    st.caption(
+                                        f"Issuer lookback: latest {cs_lookback} days. "
+                                        f"Benchmark date: {cs_benchmark_date.strftime('%Y-%m-%d')}."
+                                    )
+                                    st.dataframe(audit_curve, use_container_width=True, hide_index=True)
 
 
 section_anchor("spread-level", "Current Spread Level Framework")
