@@ -164,7 +164,9 @@ def section_directory():
 <b>How to read this dashboard</b><br><br>
 
 <b>1. Data readiness</b><br>
-<a href="#file-readiness">File Readiness</a> · <a href="#executive-snapshot">Executive Snapshot</a><br><br>
+<a href="#file-readiness">File Readiness</a> ·
+<a href="#data-quality-scorecard">Data Quality Scorecard</a> ·
+<a href="#executive-snapshot">Executive Snapshot</a><br><br>
 
 <b>2. Benchmark & spread framework</b><br>
 <a href="#yield-relative-value">Yield / RV Trend</a> ·
@@ -182,15 +184,16 @@ def section_directory():
 <a href="#curve-shape">Curve Shape</a> ·
 <a href="#scenario-shock">Scenario Shock</a> ·
 <a href="#dealer-proxy">Dealer Proxy</a> ·
-<a href="#security-screener">Security Screener</a><br><br>
+<a href="#security-screener">Security Screener</a> ·
+<a href="#watchlist">Watchlist</a><br><br>
 
-<b>5. Bond-level drilldown & raw detail</b><br>
+<b>5. Outputs, methodology & raw detail</b><br>
 <a href="#spread-movement">Spread Movement</a> ·
 <a href="#cusip-drilldown">CUSIP Drilldown</a> ·
-<a href="#rv-positioning">RV Positioning Map</a> ·
-<a href="#liquidity">Liquidity</a> ·
-<a href="#bond-master">Bond Master</a> ·
-<a href="#trade-detail">Trade Detail</a>
+<a href="#export-summary">Export Summary</a> ·
+<a href="#admin-methodology">Admin Methodology</a> ·
+<a href="#version-changelog">Version / Change Log</a> ·
+<a href="#downloads">Downloads</a>
 </div>
 """,
             unsafe_allow_html=True,
@@ -1106,45 +1109,62 @@ with st.sidebar:
 <div class="sidebar-nav-small">
 <b>Data & Setup</b><br>
 <a href="#file-readiness">1. File Readiness Check</a><br>
-<a href="#executive-snapshot">2. Executive Snapshot</a><br><br>
+<a href="#data-quality-scorecard">2. Data Quality Scorecard</a><br>
+<a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
 
 <b>Benchmark / Spread Framework</b><br>
-<a href="#yield-relative-value">3. Yield & Relative Value</a><br>
-&nbsp;&nbsp;• Yield trend + spread to benchmark<br>
-<a href="#issuer-curve">4. Issuer Curve vs Benchmark</a><br>
-&nbsp;&nbsp;• Curve vs MMD / rating curve<br>
-<a href="#spread-level">5. Current Spread Level</a><br>
-&nbsp;&nbsp;• Spread curve + spread heatmap<br>
-<a href="#spread-attribution">6. Spread Attribution</a><br>
-&nbsp;&nbsp;• Pitchbook-style waterfall<br><br>
+<a href="#yield-relative-value">4. Yield & Relative Value</a><br>
+<a href="#issuer-curve">5. Issuer Curve vs Benchmark</a><br>
+<a href="#spread-level">6. Current Spread Level</a><br>
+<a href="#spread-attribution">7. Spread Attribution</a><br><br>
 
 <b>Relative Value Signals</b><br>
-<a href="#market-narrative">7. Market Narrative & Opportunity Map</a><br>
-<a href="#peer-rv">8. Peer RV Comparison</a><br>
-<a href="#cross-issuer-rv">9. Cross-Issuer RV Analytics</a><br>
-<a href="#historical-spread">10. Historical Spread Percentile</a><br>
-<a href="#recommendation-engine">11. Recommendation Narrative</a><br><br>
+<a href="#market-narrative">8. Market Narrative & Opportunity Map</a><br>
+<a href="#peer-rv">9. Peer RV Comparison</a><br>
+<a href="#cross-issuer-rv">10. Cross-Issuer RV Analytics</a><br>
+<a href="#historical-spread">11. Historical Spread Percentile</a><br>
+<a href="#recommendation-engine">12. Recommendation Narrative</a><br><br>
 
 <b>Risk / Flow / Screening</b><br>
-<a href="#curve-shape">12. Curve Shape Analytics</a><br>
-<a href="#scenario-shock">13. Scenario Shock Analysis</a><br>
-<a href="#dealer-proxy">14. Dealer Behavior Proxy</a><br>
-<a href="#security-screener">15. Security Screener</a><br><br>
+<a href="#curve-shape">13. Curve Shape Analytics</a><br>
+<a href="#scenario-shock">14. Scenario Shock Analysis</a><br>
+<a href="#dealer-proxy">15. Dealer Behavior Proxy</a><br>
+<a href="#security-screener">16. Security Screener</a><br>
+<a href="#watchlist">17. Watchlist / Saved Candidates</a><br><br>
 
 <b>Bond-Level Drilldown</b><br>
-<a href="#spread-movement">16. Spread Movement</a><br>
-<a href="#cusip-drilldown">17. CUSIP Opportunity Drilldown</a><br>
-<a href="#rv-positioning">18. RV Positioning Map</a><br>
-<a href="#liquidity">19. Liquidity Analysis</a><br><br>
+<a href="#spread-movement">18. Spread Movement</a><br>
+<a href="#cusip-drilldown">19. CUSIP Opportunity Drilldown</a><br>
+<a href="#rv-positioning">20. RV Positioning Map</a><br>
+<a href="#liquidity">21. Liquidity Analysis</a><br><br>
 
-<b>Reference / Outputs</b><br>
-<a href="#bond-master">20. Bond Master</a><br>
-<a href="#trade-detail">21. Trade Detail</a><br>
-<a href="#downloads">22. Downloads</a>
+<b>Reference / Admin / Outputs</b><br>
+<a href="#bond-master">22. Bond Master</a><br>
+<a href="#trade-detail">23. Trade Detail</a><br>
+<a href="#export-summary">24. Export Summary</a><br>
+<a href="#admin-methodology">25. Admin Methodology</a><br>
+<a href="#version-changelog">26. Version / Change Log</a><br>
+<a href="#downloads">27. Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
     )
+
+    with st.expander("Version / Change Log", expanded=False):
+        st.markdown(
+            """
+**Current Version:** `v1.0-team-ready`
+
+Recent additions:
+- Cross-Issuer RV Analytics
+- Scenario Shock Analysis
+- Recommendation Narrative Engine
+- Data Quality Scorecard
+- Export Summary Package
+- Watchlist / Saved Candidates
+- Admin Methodology Page
+            """
+        )
 
 if bond_file is None or not trade_files:
     st.info("Upload a bond master file and at least one trade-history file to generate the dashboard.")
@@ -1345,6 +1365,108 @@ if not issuer_trades.empty and time_window != "All":
     latest_date = issuer_trades["trade_date"].max()
     years = {"1Y": 1, "3Y": 3, "5Y": 5}[time_window]
     issuer_trades = issuer_trades[issuer_trades["trade_date"] >= latest_date - pd.DateOffset(years=years)].copy()
+
+
+section_anchor("data-quality-scorecard", "Data Quality Scorecard")
+with st.expander("Methodology: data quality scorecard", expanded=False):
+    st.markdown(
+        """
+This section evaluates whether the uploaded data is reliable enough for secondary-market analytics.
+
+**Scorecard components:**
+
+- **CUSIP match rate**: share of merged trade rows whose CUSIP appears in the uploaded bond master.
+- **Valid trade date rate**: share of rows with parseable trade dates.
+- **Known maturity bucket rate**: share of rows assigned to Short / 10Y / 20Y / 30Y.
+- **Positive trade amount rate**: share of rows with positive par/trade amount.
+- **Issuer coverage rate**: share of rows with an issuer after merge / mapping.
+- **Duplicate rows removed**: exact duplicate standardized trade rows removed before analytics.
+
+The score is a practical reliability indicator, not a guarantee of correctness.
+        """
+    )
+
+dq_rows = []
+dq_total = len(market_df)
+
+def dq_pct(numer, denom):
+    return (numer / denom * 100) if denom and denom > 0 else 0
+
+if dq_total > 0:
+    bond_cusips = set(bonds_df["cusip"].dropna().astype(str).str.upper()) if "cusip" in bonds_df.columns else set()
+    trade_cusips = market_df["cusip"].dropna().astype(str).str.upper() if "cusip" in market_df.columns else pd.Series(dtype=str)
+    cusip_match_rate = dq_pct(trade_cusips.isin(bond_cusips).sum(), dq_total) if bond_cusips else 0
+
+    valid_trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").notna().sum() if "trade_date" in market_df.columns else 0
+    valid_trade_date_rate = dq_pct(valid_trade_dates, dq_total)
+
+    valid_buckets = ["Short", "10Y", "20Y", "30Y"]
+    known_bucket_rate = dq_pct(market_df["maturity_bucket"].isin(valid_buckets).sum(), dq_total) if "maturity_bucket" in market_df.columns else 0
+
+    positive_amount_rate = (
+        dq_pct((pd.to_numeric(market_df["trade_amount"], errors="coerce") > 0).sum(), dq_total)
+        if "trade_amount" in market_df.columns else 0
+    )
+
+    issuer_coverage_rate = dq_pct(market_df["issuer"].notna().sum(), dq_total) if "issuer" in market_df.columns else 0
+
+    data_quality_score = (
+        0.30 * cusip_match_rate
+        + 0.20 * valid_trade_date_rate
+        + 0.20 * known_bucket_rate
+        + 0.15 * issuer_coverage_rate
+        + 0.15 * positive_amount_rate
+    )
+
+    dq_rows = [
+        {"Metric": "CUSIP Match Rate", "Value": cusip_match_rate, "Weight": "30%", "Interpretation": "Trade CUSIPs found in bond master"},
+        {"Metric": "Valid Trade Date Rate", "Value": valid_trade_date_rate, "Weight": "20%", "Interpretation": "Rows with parseable trade dates"},
+        {"Metric": "Known Maturity Bucket Rate", "Value": known_bucket_rate, "Weight": "20%", "Interpretation": "Rows mapped to Short / 10Y / 20Y / 30Y"},
+        {"Metric": "Issuer Coverage Rate", "Value": issuer_coverage_rate, "Weight": "15%", "Interpretation": "Rows with issuer after merge/mapping"},
+        {"Metric": "Positive Trade Amount Rate", "Value": positive_amount_rate, "Weight": "15%", "Interpretation": "Rows with positive trade amount"},
+    ]
+
+    dq1, dq2, dq3, dq4 = st.columns(4)
+    dq1.metric("Data Quality Score", f"{data_quality_score:.1f}/100")
+    dq2.metric("CUSIP Match Rate", f"{cusip_match_rate:.1f}%")
+    dq3.metric("Known Bucket Rate", f"{known_bucket_rate:.1f}%")
+    dq4.metric("Duplicates Removed", f"{duplicates_removed:,}")
+
+    if data_quality_score >= 90:
+        st.success("Data quality looks strong for dashboard-level analytics.")
+    elif data_quality_score >= 75:
+        st.warning("Data quality is usable, but some analytics may be affected by missing fields.")
+    else:
+        st.error("Data quality is weak. Review missing CUSIPs, maturity dates, issuer mapping, and trade amount fields before relying on analytics.")
+
+    dq_display = pd.DataFrame(dq_rows)
+    dq_display["Value"] = dq_display["Value"].map(lambda x: f"{x:.1f}%")
+    st.dataframe(dq_display, use_container_width=True, hide_index=True)
+
+    with st.expander("Data quality issue drilldown", expanded=False):
+        issue_cols = []
+        issue_df = market_df.copy()
+        if "cusip" in issue_df.columns:
+            issue_df["cusip_matches_bond_master"] = issue_df["cusip"].astype(str).str.upper().isin(bond_cusips)
+            issue_cols.append("cusip_matches_bond_master")
+        if "maturity_bucket" in issue_df.columns:
+            issue_df["known_maturity_bucket"] = issue_df["maturity_bucket"].isin(valid_buckets)
+            issue_cols.append("known_maturity_bucket")
+        if "trade_amount" in issue_df.columns:
+            issue_df["positive_trade_amount"] = pd.to_numeric(issue_df["trade_amount"], errors="coerce") > 0
+            issue_cols.append("positive_trade_amount")
+        if "issuer" in issue_df.columns:
+            issue_df["issuer_present"] = issue_df["issuer"].notna()
+            issue_cols.append("issuer_present")
+
+        display_issue_cols = [
+            c for c in ["issuer", "cusip", "trade_date", "maturity_bucket", "yield", "trade_amount"] + issue_cols
+            if c in issue_df.columns
+        ]
+        st.dataframe(issue_df[display_issue_cols].head(5000), use_container_width=True, hide_index=True)
+else:
+    st.info("Data quality scorecard will appear after market data is processed.")
+
 
 section_anchor("executive-snapshot", "Executive Snapshot")
 
@@ -4276,6 +4398,101 @@ else:
 
 
 
+
+section_anchor("watchlist", "Watchlist / Saved Candidates")
+with st.expander("Methodology: watchlist / saved candidates", expanded=False):
+    st.markdown(
+        """
+This section lets users save CUSIPs for later review during the current session.
+
+**Why it matters:**
+
+A trading workflow often moves from screening → shortlist → detailed review. The watchlist keeps promising CUSIPs visible without forcing users to re-filter every time.
+
+**Current implementation:**
+
+- Uses Streamlit session state, so it persists while the app session is active.
+- Users can add CUSIPs from the selected issuer or all uploaded data.
+- Users can download the watchlist as CSV.
+- This is not a database-backed permanent watchlist yet; that would be a future production feature.
+        """
+    )
+
+if "watchlist_cusips" not in st.session_state:
+    st.session_state["watchlist_cusips"] = []
+
+watch_col1, watch_col2 = st.columns([1, 1])
+with watch_col1:
+    watch_scope = st.selectbox(
+        "Watchlist Add Scope",
+        ["Selected issuer", "All uploaded issuers"],
+        index=0,
+        key="watchlist_scope",
+    )
+with watch_col2:
+    watch_universe = market_df.copy()
+    if watch_scope == "Selected issuer":
+        watch_universe = watch_universe[watch_universe["issuer"] == selected_issuer].copy()
+    watch_options = sorted(watch_universe["cusip"].dropna().astype(str).unique().tolist()) if "cusip" in watch_universe.columns else []
+    cusips_to_add = st.multiselect(
+        "Add CUSIPs to Watchlist",
+        watch_options,
+        default=[],
+        key="watchlist_add_cusips",
+    )
+
+add_col, clear_col = st.columns([1, 1])
+with add_col:
+    if st.button("Add selected CUSIPs", key="add_watchlist_cusips"):
+        current = set(st.session_state.get("watchlist_cusips", []))
+        current.update(cusips_to_add)
+        st.session_state["watchlist_cusips"] = sorted(current)
+        st.success(f"Added {len(cusips_to_add):,} CUSIP(s) to watchlist.")
+with clear_col:
+    if st.button("Clear watchlist", key="clear_watchlist_cusips"):
+        st.session_state["watchlist_cusips"] = []
+        st.info("Watchlist cleared.")
+
+watchlist_cusips = st.session_state.get("watchlist_cusips", [])
+if not watchlist_cusips:
+    st.info("No CUSIPs saved yet. Add candidates from the selector above.")
+else:
+    watchlist_df = market_df[market_df["cusip"].astype(str).isin(watchlist_cusips)].copy()
+    if watchlist_df.empty:
+        st.warning("Saved CUSIPs were not found in the current uploaded dataset.")
+    else:
+        watchlist_df["trade_date"] = pd.to_datetime(watchlist_df["trade_date"], errors="coerce")
+        if "trade_amount" in watchlist_df.columns:
+            watchlist_df["trade_amount"] = pd.to_numeric(watchlist_df["trade_amount"], errors="coerce").fillna(0)
+        else:
+            watchlist_df["trade_amount"] = 0.0
+        watchlist_summary = (
+            watchlist_df.groupby("cusip", dropna=False)
+            .agg(
+                issuer=("issuer", "first"),
+                sector=("sector", "first") if "sector" in watchlist_df.columns else ("issuer", "first"),
+                maturity_bucket=("maturity_bucket", "first") if "maturity_bucket" in watchlist_df.columns else ("issuer", "first"),
+                maturity=("maturity_bond", "first") if "maturity_bond" in watchlist_df.columns else ("trade_date", "max"),
+                coupon=("coupon_bond", "first") if "coupon_bond" in watchlist_df.columns else ("trade_date", "count"),
+                avg_yield=("yield", "mean"),
+                avg_price=("price", "mean") if "price" in watchlist_df.columns else ("yield", "mean"),
+                trade_count=("trade_date", "count"),
+                total_trade_amount=("trade_amount", "sum"),
+                latest_trade=("trade_date", "max"),
+            )
+            .reset_index()
+        )
+        st.metric("Saved CUSIPs", f"{len(watchlist_summary):,}")
+        st.dataframe(watchlist_summary, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            label="Download Watchlist CSV",
+            data=watchlist_summary.to_csv(index=False).encode("utf-8"),
+            file_name="watchlist_saved_candidates.csv",
+            mime="text/csv",
+        )
+
+
 section_anchor("recommendation-engine", "Trade Recommendation Narrative Engine")
 with st.expander("Methodology: rule-based recommendation narrative", expanded=False):
     st.markdown(
@@ -6055,6 +6272,135 @@ st.dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].s
 section_anchor("trade-detail", "Underlying Trade Detail")
 trade_cols = ["trade_datetime", "cusip", "description", "maturity_trade", "maturity_bond", "maturity_bucket", "coupon_trade", "yield", "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"]
 st.dataframe(issuer_trades[[c for c in trade_cols if c in issuer_trades.columns]].sort_values("trade_datetime", ascending=False).head(20000), use_container_width=True)
+
+
+section_anchor("export-summary", "Export Summary Package")
+with st.expander("Methodology: export summary package", expanded=False):
+    st.markdown(
+        """
+This section generates a lightweight export package that can be copied into internal updates, pitchbook drafts, or meeting notes.
+
+**Current implementation:**
+
+- Generates a Markdown summary and an HTML summary.
+- Uses the selected issuer, selected sector, counts, latest trade date, and available dashboard outputs.
+- For PDF export, open the HTML file in a browser and print/save as PDF.
+- For PowerPoint, copy the HTML/Markdown summary into your deck and insert key charts from the dashboard.
+
+This avoids adding fragile report-generation dependencies while keeping the workflow practical for internal use.
+        """
+    )
+
+latest_trade_text = issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades"
+summary_timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+summary_lines = [
+    f"# Municipal Secondary Market Dashboard Summary",
+    "",
+    f"**Generated:** {summary_timestamp}",
+    f"**Selected Issuer:** {selected_issuer}",
+    f"**Sector:** {selected_sector}",
+    f"**Bonds:** {len(issuer_bonds):,}",
+    f"**Trades in Current Filter:** {len(issuer_trades):,}",
+    f"**Latest Trade:** {latest_trade_text}",
+    "",
+    "## Key Dashboard Modules",
+    "- Yield Trend / Relative Value Comparison",
+    "- Issuer Curve vs Benchmark Curve",
+    "- Current Spread Level Framework",
+    "- Peer and Cross-Issuer Relative Value",
+    "- Historical Spread Percentile",
+    "- Security Screener",
+    "- Recommendation Narrative",
+    "- Scenario Shock Analysis",
+    "- CUSIP Opportunity Drilldown",
+    "",
+    "## Notes",
+    "- Benchmark curves use uploaded rating curves when available; otherwise the dashboard falls back to MMD/AAA plus visible spread assumptions.",
+    "- Liquidity, RV score, dealer proxy, and scenario shock outputs are screening tools, not final trade recommendations.",
+]
+
+if "data_quality_score" in locals():
+    summary_lines.extend([
+        "",
+        "## Data Quality",
+        f"- Data Quality Score: {data_quality_score:.1f}/100",
+        f"- CUSIP Match Rate: {cusip_match_rate:.1f}%",
+        f"- Known Maturity Bucket Rate: {known_bucket_rate:.1f}%",
+        f"- Duplicates Removed: {duplicates_removed:,}",
+    ])
+
+summary_md = "\n".join(summary_lines)
+summary_html = summary_md.replace("\n", "<br>")
+
+export_c1, export_c2 = st.columns(2)
+with export_c1:
+    st.download_button(
+        label="Download Markdown Summary",
+        data=summary_md.encode("utf-8"),
+        file_name=f"{selected_issuer}_dashboard_summary.md".replace(" ", "_"),
+        mime="text/markdown",
+    )
+with export_c2:
+    st.download_button(
+        label="Download HTML Summary",
+        data=f"<html><body>{summary_html}</body></html>".encode("utf-8"),
+        file_name=f"{selected_issuer}_dashboard_summary.html".replace(" ", "_"),
+        mime="text/html",
+    )
+
+with st.expander("Preview export summary", expanded=True):
+    st.markdown(summary_md)
+
+section_anchor("admin-methodology", "Admin Methodology Page")
+st.markdown(
+    """
+This page centralizes the assumptions used throughout the dashboard so the tool is easier to hand off and maintain.
+
+### Benchmark Curves
+- AAA = uploaded MMD / AAA curve.
+- Non-AAA curves use uploaded rating-specific columns when available.
+- If not available, non-AAA curves are modeled as MMD/AAA + visible rating-spread assumptions.
+
+### Liquidity Score
+Uses trade count, total trade amount, recent activity, and recency. It is a screening score, not a credit rating.
+
+### Relative Value Score
+Combines spread percentile, liquidity percentile, and trade activity percentile to identify cheap + tradable candidates.
+
+### Dealer Behavior Proxy
+Only enabled when trade side/type data exists. It estimates buy/sell imbalance but does not represent true dealer inventory.
+
+### Scenario Shock
+Uses duration proxies by maturity bucket. It does not model full cash flows, convexity, OAS, tax status, or callable optionality.
+
+### Recommendation Narrative
+Rule-based and explainable. Each phrase is triggered by spread movement, historical percentile, liquidity, peer gap, or flow proxy thresholds.
+"""
+)
+
+with st.expander("Rating spread assumptions", expanded=False):
+    st.dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
+
+with st.expander("Duration proxy assumptions", expanded=False):
+    duration_proxy_df = pd.DataFrame(
+        [
+            {"Maturity Bucket": "Short", "Proxy Duration": 2.0},
+            {"Maturity Bucket": "10Y", "Proxy Duration": 8.0},
+            {"Maturity Bucket": "20Y", "Proxy Duration": 13.0},
+            {"Maturity Bucket": "30Y", "Proxy Duration": 18.0},
+        ]
+    )
+    st.dataframe(duration_proxy_df, use_container_width=True, hide_index=True)
+
+section_anchor("version-changelog", "Version / Change Log")
+version_rows = [
+    {"Version": "v1.0-team-ready", "Change": "Stabilized data validation, benchmark framework, relative value analytics, and team-readiness modules."},
+    {"Version": "v1.1", "Change": "Added Cross-Issuer RV Analytics, Scenario Shock, Recommendation Narrative, and CUSIP Drilldown."},
+    {"Version": "v1.2", "Change": "Added Data Quality Scorecard, Export Summary Package, Admin Methodology Page, and Watchlist."},
+]
+st.dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
+st.caption("Update this changelog whenever the team changes methodology, assumptions, or major modules.")
+
 
 section_anchor("downloads", "Download Outputs")
 d1, d2, d3 = st.columns(3)
