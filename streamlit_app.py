@@ -2030,40 +2030,96 @@ else:
                 "Trade Count": "trade_count",
             }
             size_col = size_map.get(rv_size_by, "total_trade_amount")
-            if size_col not in rv_summary.columns or rv_summary[size_col].fillna(0).sum() <= 0:
-                size_col = "trade_count"
+
+            # Defensive plotting layer -------------------------------------------------
+            # Plotly scatter is sensitive to missing/non-numeric/negative values in
+            # size, x, and y columns. Muni exports often have blank outstanding amount,
+            # missing trade amount, or unmatched benchmark values, so we clean the data
+            # before plotting instead of letting the whole app crash.
+            rv_plot = rv_summary.copy()
+
+            for numeric_col in ["liquidity_score", rv_y_axis_col, size_col]:
+                if numeric_col in rv_plot.columns:
+                    rv_plot[numeric_col] = pd.to_numeric(rv_plot[numeric_col], errors="coerce")
+                    rv_plot[numeric_col] = rv_plot[numeric_col].replace([float("inf"), -float("inf")], pd.NA)
+
+            required_plot_cols = ["liquidity_score", rv_y_axis_col]
+            rv_plot = rv_plot.dropna(subset=[c for c in required_plot_cols if c in rv_plot.columns])
+
+            if "maturity_bucket" not in rv_plot.columns:
+                rv_plot["maturity_bucket"] = "Unknown"
+            else:
+                rv_plot["maturity_bucket"] = rv_plot["maturity_bucket"].fillna("Unknown").astype(str)
+
+            if "cusip" not in rv_plot.columns:
+                rv_plot["cusip"] = rv_plot.index.astype(str)
+            else:
+                rv_plot["cusip"] = rv_plot["cusip"].fillna("Unknown").astype(str)
+
+            if size_col not in rv_plot.columns:
+                rv_plot["point_size"] = 10
+                size_col = "point_size"
+            else:
+                rv_plot[size_col] = pd.to_numeric(rv_plot[size_col], errors="coerce")
+                rv_plot[size_col] = rv_plot[size_col].replace([float("inf"), -float("inf")], pd.NA)
+                rv_plot[size_col] = rv_plot[size_col].fillna(0).clip(lower=0)
+
+                if rv_plot[size_col].sum() <= 0:
+                    rv_plot["point_size"] = 10
+                    size_col = "point_size"
 
             hover_cols = [
                 "cusip", "maturity_bucket", "maturity", "coupon", "avg_yield", "avg_price",
                 "trade_count", "recent_90d_trades", "days_since_last_trade", "total_trade_amount",
                 "outstanding_amount", "turnover_ratio", "liquidity_tier",
             ]
-            if "spread_to_benchmark_bps" in rv_summary.columns:
+            if "spread_to_benchmark_bps" in rv_plot.columns:
                 hover_cols.extend(["spread_to_benchmark_bps", "benchmark_yield", "benchmark_source", "source_column"])
-            hover_cols = [c for c in hover_cols if c in rv_summary.columns]
+            hover_cols = [c for c in hover_cols if c in rv_plot.columns]
 
-            rv_fig = px.scatter(
-                rv_summary,
-                x="liquidity_score",
-                y=rv_y_axis_col,
-                size=size_col,
-                color="maturity_bucket",
-                hover_name="cusip",
-                hover_data=hover_cols,
-                title=f"{selected_issuer} Relative Value Positioning Map",
-                labels={
-                    "liquidity_score": "Liquidity Score",
-                    rv_y_axis_col: rv_y_axis_label,
-                    "maturity_bucket": "Maturity Bucket",
-                    size_col: rv_size_by,
-                },
-            )
-            median_liquidity = rv_summary["liquidity_score"].median()
-            median_y = rv_summary[rv_y_axis_col].median()
-            rv_fig.add_vline(x=median_liquidity, line_dash="dash", opacity=0.45)
-            rv_fig.add_hline(y=median_y, line_dash="dash", opacity=0.45)
-            rv_fig.update_layout(height=560, hovermode="closest")
-            st.plotly_chart(rv_fig, use_container_width=True)
+            if rv_plot.empty:
+                st.warning(
+                    "No valid observations remain after cleaning the positioning-map inputs. "
+                    "Try lowering the minimum trade filter or using Average Yield instead of Spread to Benchmark."
+                )
+            else:
+                try:
+                    rv_fig = px.scatter(
+                        rv_plot,
+                        x="liquidity_score",
+                        y=rv_y_axis_col,
+                        size=size_col,
+                        size_max=38,
+                        color="maturity_bucket",
+                        hover_name="cusip",
+                        hover_data=hover_cols,
+                        title=f"{selected_issuer} Relative Value Positioning Map",
+                        labels={
+                            "liquidity_score": "Liquidity Score",
+                            rv_y_axis_col: rv_y_axis_label,
+                            "maturity_bucket": "Maturity Bucket",
+                            size_col: rv_size_by if size_col != "point_size" else "Fixed Point Size",
+                        },
+                    )
+                    median_liquidity = rv_plot["liquidity_score"].median()
+                    median_y = rv_plot[rv_y_axis_col].median()
+                    if pd.notna(median_liquidity):
+                        rv_fig.add_vline(x=median_liquidity, line_dash="dash", opacity=0.45)
+                    if pd.notna(median_y):
+                        rv_fig.add_hline(y=median_y, line_dash="dash", opacity=0.45)
+                    rv_fig.update_layout(height=560, hovermode="closest")
+                    st.plotly_chart(rv_fig, use_container_width=True)
+                except Exception as exc:
+                    st.warning(
+                        "The positioning map could not be plotted because the scatter inputs were not usable. "
+                        f"The cleaned data table is shown below for review. Error: {exc}"
+                    )
+                    st.dataframe(rv_plot.head(1000), use_container_width=True, hide_index=True)
+
+                # Use the cleaned plotting data for quadrant/read-through logic.
+                rv_summary = rv_plot
+                median_liquidity = rv_summary["liquidity_score"].median()
+                median_y = rv_summary[rv_y_axis_col].median()
 
             if rv_y_axis_col == "spread_to_benchmark_bps":
                 candidates = rv_summary[
