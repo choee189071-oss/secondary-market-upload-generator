@@ -21,6 +21,158 @@ st.set_page_config(page_title="Municipal Secondary Market Dashboard Generator", 
 st.title("Municipal Secondary Market Dashboard Generator")
 st.caption("Bring your own bond master and trade-history exports. Generate issuer-level relative value and liquidity analytics.")
 
+st.markdown(
+    """
+<style>
+/* Overall page polish */
+.block-container {
+    padding-top: 2.2rem;
+    padding-bottom: 3rem;
+    max-width: 1500px;
+}
+
+h1, h2, h3 {
+    letter-spacing: -0.02em;
+}
+
+section[data-testid="stSidebar"] {
+    min-width: 330px !important;
+}
+
+div[data-testid="stMetric"] {
+    background: #ffffff;
+    border: 1px solid #e6e8ef;
+    border-radius: 16px;
+    padding: 18px 18px 14px 18px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+
+.clean-card {
+    background: #ffffff;
+    border: 1px solid #e6e8ef;
+    border-radius: 18px;
+    padding: 18px 20px;
+    min-height: 124px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+
+.clean-card-label {
+    font-size: 0.86rem;
+    font-weight: 700;
+    color: #64748b;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.clean-card-value-large {
+    font-size: 1.65rem;
+    font-weight: 720;
+    line-height: 1.15;
+    color: #111827;
+    overflow-wrap: anywhere;
+}
+
+.clean-card-value-small {
+    font-size: 1.32rem;
+    font-weight: 720;
+    line-height: 1.2;
+    color: #111827;
+    overflow-wrap: anywhere;
+}
+
+.clean-card-note {
+    font-size: 0.82rem;
+    color: #94a3b8;
+    margin-top: 8px;
+}
+
+.nav-card {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 14px 16px;
+    margin: 10px 0 18px 0;
+}
+
+.nav-card a {
+    text-decoration: none;
+    color: #334155;
+    font-size: 0.92rem;
+}
+
+.nav-card a:hover {
+    color: #0f172a;
+    text-decoration: underline;
+}
+
+.sidebar-nav-small {
+    font-size: 0.88rem;
+    line-height: 1.55;
+}
+
+/* Keep dataframes/charts visually lighter */
+div[data-testid="stDataFrame"] {
+    border-radius: 14px;
+    overflow: hidden;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+def section_anchor(anchor_id: str, title: str, level: int = 2):
+    """Create a stable HTML anchor plus a Streamlit header/subheader."""
+    st.markdown(f"<a id='{anchor_id}'></a>", unsafe_allow_html=True)
+    if level == 1:
+        st.title(title)
+    elif level == 2:
+        st.header(title)
+    else:
+        st.subheader(title)
+
+
+def clean_metric_card(label: str, value: object, size: str = "large", note: str | None = None):
+    """Compact custom metric card that gives long text more room than st.metric."""
+    value_class = "clean-card-value-large" if size == "large" else "clean-card-value-small"
+    safe_value = "—" if value is None else str(value)
+    note_html = f"<div class='clean-card-note'>{note}</div>" if note else ""
+    st.markdown(
+        f"""
+<div class="clean-card">
+  <div class="clean-card-label">{label}</div>
+  <div class="{value_class}">{safe_value}</div>
+  {note_html}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def section_directory():
+    """Main-page clickable directory for users who miss the collapsed sidebar."""
+    st.markdown(
+        """
+<div class="nav-card">
+<b>Dashboard Directory</b><br>
+<a href="#file-readiness">1. File Readiness Check</a> ·
+<a href="#executive-snapshot">2. Executive Snapshot</a> ·
+<a href="#yield-relative-value">3. Yield & Relative Value</a> ·
+<a href="#spread-level">4. Current Spread Level</a> ·
+<a href="#spread-movement">5. Spread Movement</a> ·
+<a href="#liquidity">6. Liquidity</a> ·
+<a href="#bond-master">7. Bond Master</a> ·
+<a href="#trade-detail">8. Trade Detail</a> ·
+<a href="#downloads">9. Downloads</a>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+section_directory()
+
+
 with st.expander("Instructions", expanded=False):
     st.markdown(
         """
@@ -765,6 +917,30 @@ with st.sidebar:
         template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
         template_download_button(CURVE_TEMPLATE_COLUMNS, "Benchmark curve template CSV", "benchmark_curve_template.csv")
 
+    st.markdown("---")
+    st.subheader("Contents")
+    st.markdown(
+        """
+<div class="sidebar-nav-small">
+<a href="#file-readiness">1. File Readiness Check</a><br>
+<a href="#executive-snapshot">2. Executive Snapshot</a><br>
+<a href="#yield-relative-value">3. Yield & Relative Value</a><br>
+&nbsp;&nbsp;• Yield trend<br>
+&nbsp;&nbsp;• Spread to benchmark<br>
+<a href="#spread-level">4. Current Spread Level</a><br>
+&nbsp;&nbsp;• Spread curve<br>
+&nbsp;&nbsp;• Spread level heatmap<br>
+<a href="#spread-movement">5. Spread Movement</a><br>
+&nbsp;&nbsp;• Movement heatmap<br>
+<a href="#liquidity">6. Liquidity Analysis</a><br>
+<a href="#bond-master">7. Bond Master</a><br>
+<a href="#trade-detail">8. Trade Detail</a><br>
+<a href="#downloads">9. Downloads</a>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
 if bond_file is None or not trade_files:
     st.info("Upload a bond master file and at least one trade-history file to generate the dashboard.")
     with st.expander("Expected file logic"):
@@ -782,7 +958,7 @@ mmd_payload = (mmd_file.name, mmd_file.getvalue()) if mmd_file else None
 # -----------------------------------------------------------------------------
 # File-readiness gate: inspect the uploaded files before running full analytics.
 # -----------------------------------------------------------------------------
-st.header("File Readiness Check")
+section_anchor("file-readiness", "File Readiness Check")
 raw_bonds_preview = read_uploaded_file(io.BytesIO(bond_bytes), bond_file.name)
 bond_report = validate_dataset(raw_bonds_preview, bond_file.name, BOND_REQUIRED, BOND_RECOMMENDED, BOND_OPTIONAL)
 bond_warnings = validate_basic_values(raw_bonds_preview, bond_report["mapping"], dataset_type="bond")
@@ -965,15 +1141,28 @@ if not issuer_trades.empty and time_window != "All":
     years = {"1Y": 1, "3Y": 3, "5Y": 5}[time_window]
     issuer_trades = issuer_trades[issuer_trades["trade_date"] >= latest_date - pd.DateOffset(years=years)].copy()
 
-st.header("Executive Snapshot")
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Sector", selected_sector)
-col2.metric("Issuer", selected_issuer)
-col3.metric("Bonds", f"{len(issuer_bonds):,}")
-col4.metric("Trades", f"{len(issuer_trades):,}")
-col5.metric("Latest Trade", issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades")
+section_anchor("executive-snapshot", "Executive Snapshot")
 
-st.header("Yield Trend / Relative Value Comparison")
+latest_trade_display = (
+    issuer_trades["trade_date"].max().strftime("%Y-%m-%d")
+    if not issuer_trades.empty
+    else "No trades"
+)
+
+# Custom cards give long sector/issuer names enough horizontal room, while keeping numeric fields quieter.
+snap_col1, snap_col2, snap_col3, snap_col4, snap_col5 = st.columns([1.55, 2.15, 0.75, 0.9, 1.1])
+with snap_col1:
+    clean_metric_card("Sector", selected_sector, size="large")
+with snap_col2:
+    clean_metric_card("Issuer", selected_issuer, size="large")
+with snap_col3:
+    clean_metric_card("Bonds", f"{len(issuer_bonds):,}", size="small")
+with snap_col4:
+    clean_metric_card("Trades", f"{len(issuer_trades):,}", size="small")
+with snap_col5:
+    clean_metric_card("Latest Trade", latest_trade_display, size="small")
+
+section_anchor("yield-relative-value", "Yield Trend / Relative Value Comparison")
 with st.expander("Methodology: benchmark curve framework", expanded=False):
     st.markdown(
         """
@@ -1131,7 +1320,7 @@ Where:
     elif show_spread_to_benchmark and mmd_df.empty:
         st.info("Upload an MMD curve file to enable AAA/AA/A/BBB benchmark curves and spread-to-benchmark analytics.")
 
-st.header("Current Spread Level Framework")
+section_anchor("spread-level", "Current Spread Level Framework")
 with st.expander("Methodology: current spread level", expanded=False):
     st.markdown(
         """
@@ -1265,7 +1454,7 @@ else:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
                 st.dataframe(audit_display, use_container_width=True, hide_index=True)
 
-st.header("Spread Movement Heatmap")
+section_anchor("spread-movement", "Spread Movement Heatmap")
 with st.expander("Methodology: spread movement heatmap", expanded=False):
     st.markdown(
         """
@@ -1351,7 +1540,7 @@ else:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
                 st.dataframe(audit_display, use_container_width=True, hide_index=True)
 
-st.header("Liquidity / Trading Frequency Analysis")
+section_anchor("liquidity", "Liquidity / Trading Frequency Analysis")
 with st.expander("Methodology", expanded=False):
     st.write("Liquidity score is a transparent ranking measure: 35% trade count, 25% total trade amount, 25% recent 90-day trades, and 15% recency. It is a screening metric, not a credit rating or valuation recommendation.")
 if issuer_trades.empty:
@@ -1421,15 +1610,15 @@ else:
     ]
     st.dataframe(liq[[c for c in display_cols if c in liq.columns]], use_container_width=True, height=500)
 
-st.header("Bond Master / Security Reference")
+section_anchor("bond-master", "Bond Master / Security Reference")
 bond_cols = ["issuer", "sector", "primary_type", "election", "series", "cusip", "secondary_credit", "term", "maturity", "par_amount", "outstanding_amount", "coupon", "call_date", "call_price", "fed_tax", "amt"]
 st.dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].sort_values(["maturity", "cusip"]), use_container_width=True)
 
-st.header("Underlying Trade Detail")
+section_anchor("trade-detail", "Underlying Trade Detail")
 trade_cols = ["trade_datetime", "cusip", "description", "maturity_trade", "maturity_bond", "maturity_bucket", "coupon_trade", "yield", "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"]
 st.dataframe(issuer_trades[[c for c in trade_cols if c in issuer_trades.columns]].sort_values("trade_datetime", ascending=False).head(20000), use_container_width=True)
 
-st.header("Download Outputs")
+section_anchor("downloads", "Download Outputs")
 d1, d2, d3 = st.columns(3)
 with d1:
     dataframe_download_button(market_df, "Download Merged Market Data CSV", "merged_market_data.csv")
