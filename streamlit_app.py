@@ -913,7 +913,7 @@ else:
         if heatmap_matrix.isna().all().all():
             st.info("Not enough historical spread observations to calculate movement across the selected windows yet.")
         else:
-            heatmap_text = heatmap_matrix.applymap(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+            heatmap_text = heatmap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
             heatmap_fig = px.imshow(
                 heatmap_matrix.astype(float),
                 x=heatmap_matrix.columns,
