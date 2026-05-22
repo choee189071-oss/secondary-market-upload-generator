@@ -1523,9 +1523,117 @@ with st.sidebar:
         uploaded_issuers,
         help="This list is generated only from the files you uploaded in Section 1."
     )
-    maturity_bucket = st.selectbox("Maturity Bucket", ["All", "Short", "10Y", "20Y", "30Y"])
-    time_window = st.selectbox("Time Window", ["All", "1Y", "3Y", "5Y"])
-    show_raw_tables = st.checkbox("Show raw tables", value=False)
+    # -----------------------------------------------------------------------------
+    # Maturity Bucket Methodology
+    # -----------------------------------------------------------------------------
+    # Institutional-style maturity segmentation used for:
+    # - Relative Value Analysis
+    # - Yield Curve Positioning
+    # - Spread Analysis
+    # - Liquidity & Secondary Market Trend Review
+    #
+    # IMPORTANT:
+    # Bucket labels are approximate maturity sectors,
+    # NOT exact maturity tenors.
+    #
+    # Definitions:
+    # Short = <= 7 Years
+    # 10Y   = 7–15 Years
+    # 20Y   = 15–25 Years
+    # 30Y   = 25+ Years
+    # -----------------------------------------------------------------------------
+
+    with st.expander("Maturity Bucket Methodology", expanded=False):
+        st.markdown("""
+### Bucket Definitions
+
+| Bucket | Years to Maturity | Interpretation |
+|---|---|---|
+| All | All available maturities | Uses the full uploaded issuer trade universe |
+| Short | ≤ 7 Years | Front-end / lower-duration municipal bonds |
+| 10Y | 7–15 Years | Intermediate curve sector / benchmark-heavy trading area |
+| 20Y | 15–25 Years | Long-duration municipal sector |
+| 30Y | 25+ Years | Long-end institutional duration / insurance-sensitive sector |
+
+### Why This Matters
+
+These maturity buckets are used to:
+
+- Compare issuer spreads across the municipal curve
+- Analyze relative value positioning
+- Evaluate duration sensitivity
+- Review liquidity and trading activity by curve sector
+- Standardize secondary-market analytics
+
+### Important Notes
+
+- Bucket labels are approximate market sectors.
+- They are NOT exact maturity points.
+- Methodology is designed to align with common institutional municipal market curve segmentation practices.
+""")
+
+    # -----------------------------------------------------------------------------
+    # Maturity Bucket Selector
+    # -----------------------------------------------------------------------------
+    maturity_bucket = st.selectbox(
+        "Maturity Bucket",
+        ["All", "Short", "10Y", "20Y", "30Y"],
+        help="""
+Bucket Definitions
+
+• All = All available maturities
+• Short = ≤ 7 Years
+• 10Y = 7–15 Years
+• 20Y = 15–25 Years
+• 30Y = 25+ Years
+
+Used for:
+- Relative Value Analysis
+- Yield Curve Positioning
+- Secondary Market Trend Analysis
+
+Buckets represent maturity ranges,
+NOT exact maturity tenors.
+"""
+    )
+
+    # -----------------------------------------------------------------------------
+    # Time Window Selector
+    # -----------------------------------------------------------------------------
+    time_window = st.selectbox(
+        "Time Window",
+        ["All", "1Y", "3Y", "5Y"],
+        help="""
+Historical time range used for trend analysis.
+
+• 1Y = Last 1 Year
+• 3Y = Last 3 Years
+• 5Y = Last 5 Years
+• All = Entire uploaded dataset
+
+Used for:
+- Yield trend analysis
+- Spread movement review
+- Historical relative value comparison
+"""
+    )
+
+    # -----------------------------------------------------------------------------
+    # Raw Table Toggle
+    # -----------------------------------------------------------------------------
+    show_raw_tables = st.checkbox(
+        "Show Raw Tables",
+        value=False,
+        help="""
+Display underlying trade-level and bond-level data tables.
+
+Useful for:
+- Audit review
+- Data validation
+- Trade-level investigation
+- CUSIP drilldowns
+"""
+    )
 
 issuer_bonds = bonds_df[bonds_df["issuer"] == selected_issuer].copy()
 issuer_trades = market_df[market_df["issuer"] == selected_issuer].copy()
