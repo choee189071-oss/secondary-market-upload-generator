@@ -1645,6 +1645,71 @@ def build_issuer_reference_table(issuer_mapping_df: pd.DataFrame) -> pd.DataFram
     return out.reset_index(drop=True)
 
 
+def apply_manual_issuer_override_columns(
+    df: pd.DataFrame,
+    issuer_reference: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Apply persistent manual issuer overrides from issuers.csv.
+
+    This is intentionally stronger than ordinary fuzzy normalization. If
+    issuers.csv contains a row like:
+        raw_issuer / issuer_key -> standard_issuer
+    then every matching row is forced to that standard issuer for dropdowns,
+    analytics, and sector grouping. This is the human-in-the-loop reference
+    data override layer.
+    """
+    if df is None or df.empty or issuer_reference is None or issuer_reference.empty:
+        return df
+
+    out = df.copy()
+    ref = issuer_reference.copy()
+    if "issuer_key" not in ref.columns or "standard_issuer" not in ref.columns:
+        return out
+
+    ref = ref.dropna(subset=["issuer_key", "standard_issuer"]).copy()
+    if ref.empty:
+        return out
+
+    # Normalize keys one more time to avoid stale/manual typo variants.
+    ref["issuer_key"] = ref["issuer_key"].apply(normalize_issuer_key)
+    key_to_standard = dict(zip(ref["issuer_key"], ref["standard_issuer"]))
+    key_to_sector = dict(zip(ref["issuer_key"], ref["sector"])) if "sector" in ref.columns else {}
+    key_to_primary = dict(zip(ref["issuer_key"], ref["primary_type"])) if "primary_type" in ref.columns else {}
+
+    if "issuer_key" not in out.columns:
+        if "raw_issuer" in out.columns:
+            out["issuer_key"] = out["raw_issuer"].apply(normalize_issuer_key)
+        elif "issuer" in out.columns:
+            out["issuer_key"] = out["issuer"].apply(normalize_issuer_key)
+        elif "description" in out.columns:
+            out["issuer_key"] = out["description"].apply(_derive_issuer_from_description).apply(normalize_issuer_key)
+
+    if "issuer_key" not in out.columns:
+        return out
+
+    mapped_standard = out["issuer_key"].map(key_to_standard)
+    if "issuer" not in out.columns:
+        out["issuer"] = out["issuer_key"].apply(display_issuer_from_key)
+    out["issuer"] = mapped_standard.combine_first(out["issuer"])
+    out["issuer_mapped"] = mapped_standard.notna() | out.get("issuer_mapped", False)
+
+    if key_to_sector:
+        mapped_sector = out["issuer_key"].map(key_to_sector)
+        if "sector" not in out.columns:
+            out["sector"] = mapped_sector
+        else:
+            out["sector"] = mapped_sector.combine_first(out["sector"])
+
+    if key_to_primary:
+        mapped_primary = out["issuer_key"].map(key_to_primary)
+        if "primary_type" not in out.columns:
+            out["primary_type"] = mapped_primary
+        else:
+            out["primary_type"] = mapped_primary.combine_first(out["primary_type"])
+
+    return out
+
+
 def apply_issuer_normalization_layer(
     df: pd.DataFrame,
     issuer_reference: pd.DataFrame | None = None,
@@ -2183,8 +2248,12 @@ def process_local_desktop_data(
     )
     if issuer_mapping_path is not None:
         try:
-            raw_mapping = _safe_read_local_file(issuer_mapping_path)
-            issuer_mapping_df = standardize_issuer_mapping(raw_mapping)
+            # Keep the raw issuer mapping schema instead of forcing the old
+            # two-file uploader schema. This supports manual override columns
+            # such as raw_issuer, issuer_key, standard_issuer, sector, and
+            # primary_type. The flexible reference builder below handles all
+            # common column variants.
+            issuer_mapping_df = _safe_read_local_file(issuer_mapping_path)
         except Exception as exc:
             failed_files.append((issuer_mapping_path.name, str(exc)))
 
@@ -2210,6 +2279,13 @@ def process_local_desktop_data(
     # Normalize again after merge so the final displayed issuer is always the
     # standard_issuer from issuers.csv when available, otherwise a cleaned fallback.
     market_df = apply_issuer_normalization_layer(market_df, issuer_reference)
+
+    # Strong human-in-the-loop override layer. This makes manually saved merge
+    # decisions apply to every downstream dataframe, including the issuer
+    # dropdown, peer ranking, and sector analytics.
+    bonds_df = apply_manual_issuer_override_columns(bonds_df, issuer_reference)
+    trades_df = apply_manual_issuer_override_columns(trades_df, issuer_reference)
+    market_df = apply_manual_issuer_override_columns(market_df, issuer_reference)
 
     bonds_df = _add_required_optional_columns(bonds_df)
     trades_df = _add_required_optional_columns(trades_df)
