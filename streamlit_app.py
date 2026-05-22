@@ -550,7 +550,38 @@ RATING_SPREADS: dict[str, dict[str, float]] = {
     "BBB": {"5Y": 0.60, "10Y": 0.80, "20Y": 1.00, "30Y": 1.20},
 }
 
-MMD_BUCKET_MAP = {"Short": "5Y", "10Y": "10Y", "20Y": "20Y", "30Y": "30Y", "All": "10Y"}
+# ----------------------------------------------------------------------------‑
+# Professional maturity bucket labels
+# ----------------------------------------------------------------------------‑
+# The original prototype used tenor-style labels (10Y / 20Y / 30Y) for broad
+# maturity ranges. For presentation clarity, the app now uses descriptive curve
+# sector labels instead.
+#
+# Short          = <= 7Y
+# Intermediate  = 7Y to 15Y
+# Long          = 15Y to 25Y
+# Extended Long = 25Y+
+#
+# The benchmark tenor mapping still uses the closest MMD tenor for each bucket.
+
+MATURITY_BUCKET_ORDER = ["Short", "Intermediate", "Long", "Extended Long"]
+MATURITY_BUCKET_OPTIONS = ["All"] + MATURITY_BUCKET_ORDER
+
+# Backward compatibility: data_utils or older uploaded processed data may still
+# create legacy labels. Normalize them immediately after processing.
+MATURITY_BUCKET_RENAME = {
+    "10Y": "Intermediate",
+    "20Y": "Long",
+    "30Y": "Extended Long",
+}
+
+MMD_BUCKET_MAP = {
+    "Short": "5Y",
+    "Intermediate": "10Y",
+    "Long": "20Y",
+    "Extended Long": "30Y",
+    "All": "10Y",
+}
 BENCHMARK_RATINGS = list(RATING_SPREADS.keys())
 
 
@@ -678,7 +709,7 @@ def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
 
     Output columns:
     - trade_date: normalized MMD date
-    - maturity_bucket: Short / 10Y / 20Y / 30Y
+    - maturity_bucket: Short / Intermediate / Long / Extended Long
     - benchmark_rating
     - mmd_tenor
     - benchmark_yield
@@ -736,7 +767,7 @@ def build_spread_observations(
         return pd.DataFrame()
 
     issuer_df = market_df[market_df["issuer"] == issuer].copy()
-    issuer_df = issuer_df[issuer_df["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])]
+    issuer_df = issuer_df[issuer_df["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)]
     if issuer_df.empty:
         return pd.DataFrame()
 
@@ -785,7 +816,7 @@ def build_spread_movement_heatmap_data(
     if windows is None:
         windows = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
 
-    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+    maturity_order = MATURITY_BUCKET_ORDER
     matrix = pd.DataFrame(index=maturity_order, columns=list(windows.keys()), dtype="float")
     audit_rows = []
 
@@ -861,7 +892,7 @@ def build_spread_level_data(
     This is different from spread movement. Spread level answers "where is
     the issuer trading now?" Movement answers "how much did it change?"
     """
-    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+    maturity_order = MATURITY_BUCKET_ORDER
     clean_ratings = [r for r in ratings if r in BENCHMARK_RATINGS]
     matrix = pd.DataFrame(index=maturity_order, columns=clean_ratings, dtype="float")
     audit_rows: list[dict] = []
@@ -954,7 +985,7 @@ def build_issuer_curve_snapshot(
     - For each bucket/rating, use the latest benchmark observation at or before
       the selected as-of date.
     """
-    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+    maturity_order = MATURITY_BUCKET_ORDER
     clean_ratings = [r for r in ratings if r in BENCHMARK_RATINGS]
 
     if market_df.empty or mmd_df.empty or not clean_ratings:
@@ -1430,6 +1461,13 @@ with st.expander("Methodology: how the app decides whether a file is usable", ex
     mmd_payload=mmd_payload,
 )
 
+# Normalize legacy tenor-style bucket labels into presentation-friendly curve sectors.
+# This keeps the dashboard compatible with existing data_utils output while making
+# the user-facing terminology clearer.
+for _df in [bonds_df, trades_df, market_df]:
+    if isinstance(_df, pd.DataFrame) and "maturity_bucket" in _df.columns:
+        _df["maturity_bucket"] = _df["maturity_bucket"].replace(MATURITY_BUCKET_RENAME)
+
 if failed_files:
     with st.warning("Some trade files failed to process."):
         st.write(failed_files)
@@ -1537,23 +1575,87 @@ with st.sidebar:
     # NOT exact maturity tenors.
     #
     # Definitions:
-    # Short = <= 7 Years
-    # 10Y   = 7–15 Years
-    # 20Y   = 15–25 Years
-    # 30Y   = 25+ Years
+    # Short          = <= 7 Years
+    # Intermediate  = 7–15 Years
+    # Long          = 15–25 Years
+    # Extended Long = 25+ Years
     # -----------------------------------------------------------------------------
 
     with st.expander("Maturity Bucket Methodology", expanded=False):
-        st.markdown("""
+        st.markdown(
+            """
+<style>
+.bucket-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.86rem;
+}
+
+.bucket-table th,
+.bucket-table td {
+    border: 1px solid #d9dce3;
+    padding: 8px 10px;
+    vertical-align: middle;
+    text-align: left;
+}
+
+.bucket-table th {
+    font-weight: 700;
+    background-color: #f6f7fb;
+}
+
+.bucket-col {
+    width: 26%;
+    white-space: nowrap;
+    font-weight: 600;
+}
+
+.years-col {
+    width: 24%;
+    white-space: nowrap;
+}
+
+.interp-col {
+    width: 50%;
+}
+</style>
+
 ### Bucket Definitions
 
-| Bucket | Years to Maturity | Interpretation |
-|---|---|---|
-| All | All available maturities | Uses the full uploaded issuer trade universe |
-| Short | ≤ 7 Years | Front-end / lower-duration municipal bonds |
-| 10Y | 7–15 Years | Intermediate curve sector / benchmark-heavy trading area |
-| 20Y | 15–25 Years | Long-duration municipal sector |
-| 30Y | 25+ Years | Long-end institutional duration / insurance-sensitive sector |
+<table class="bucket-table">
+  <tr>
+    <th>Bucket</th>
+    <th>Years to Maturity</th>
+    <th>Interpretation</th>
+  </tr>
+  <tr>
+    <td class="bucket-col">All</td>
+    <td class="years-col">All maturities</td>
+    <td class="interp-col">Full uploaded trade universe</td>
+  </tr>
+  <tr>
+    <td class="bucket-col">Short</td>
+    <td class="years-col">≤ 7Y</td>
+    <td class="interp-col">Front-end / lower-duration bonds</td>
+  </tr>
+  <tr>
+    <td class="bucket-col">Intermediate</td>
+    <td class="years-col">7–15Y</td>
+    <td class="interp-col">Intermediate curve sector</td>
+  </tr>
+  <tr>
+    <td class="bucket-col">Long</td>
+    <td class="years-col">15–25Y</td>
+    <td class="interp-col">Long-duration municipal sector</td>
+  </tr>
+  <tr>
+    <td class="bucket-col">Extended Long</td>
+    <td class="years-col">25Y+</td>
+    <td class="interp-col">Long-end institutional duration sector</td>
+  </tr>
+</table>
+
+<br>
 
 ### Why This Matters
 
@@ -1567,25 +1669,27 @@ These maturity buckets are used to:
 
 ### Important Notes
 
-- Bucket labels are approximate market sectors.
-- They are NOT exact maturity points.
-- Methodology is designed to align with common institutional municipal market curve segmentation practices.
-""")
+- Bucket labels represent practical curve sectors, not exact maturity points.
+- The benchmark mapping uses the closest MMD tenor: Short → 5Y, Intermediate → 10Y, Long → 20Y, Extended Long → 30Y.
+- The framework supports relative-value, curve, and liquidity analysis.
+            """,
+            unsafe_allow_html=True,
+        )
 
     # -----------------------------------------------------------------------------
     # Maturity Bucket Selector
     # -----------------------------------------------------------------------------
     maturity_bucket = st.selectbox(
         "Maturity Bucket",
-        ["All", "Short", "10Y", "20Y", "30Y"],
+        MATURITY_BUCKET_OPTIONS,
         help="""
 Bucket Definitions
 
 • All = All available maturities
 • Short = ≤ 7 Years
-• 10Y = 7–15 Years
-• 20Y = 15–25 Years
-• 30Y = 25+ Years
+• Intermediate = 7–15 Years
+• Long = 15–25 Years
+• Extended Long = 25+ Years
 
 Used for:
 - Relative Value Analysis
@@ -1690,7 +1794,7 @@ if dq_total > 0:
     valid_trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").notna().sum() if "trade_date" in market_df.columns else 0
     valid_trade_date_rate = dq_pct(valid_trade_dates, dq_total)
 
-    valid_buckets = ["Short", "10Y", "20Y", "30Y"]
+    valid_buckets = MATURITY_BUCKET_ORDER
     known_bucket_rate = dq_pct(market_df["maturity_bucket"].isin(valid_buckets).sum(), dq_total) if "maturity_bucket" in market_df.columns else 0
 
     positive_amount_rate = (
@@ -1711,7 +1815,7 @@ if dq_total > 0:
     dq_rows = [
         {"Metric": "CUSIP Match Rate", "Value": cusip_match_rate, "Weight": "30%", "Interpretation": "Trade CUSIPs found in bond master"},
         {"Metric": "Valid Trade Date Rate", "Value": valid_trade_date_rate, "Weight": "20%", "Interpretation": "Rows with parseable trade dates"},
-        {"Metric": "Known Maturity Bucket Rate", "Value": known_bucket_rate, "Weight": "20%", "Interpretation": "Rows mapped to Short / 10Y / 20Y / 30Y"},
+        {"Metric": "Known Maturity Bucket Rate", "Value": known_bucket_rate, "Weight": "20%", "Interpretation": "Rows mapped to Short / Intermediate / Long / Extended Long"},
         {"Metric": "Issuer Coverage Rate", "Value": issuer_coverage_rate, "Weight": "15%", "Interpretation": "Rows with issuer after merge/mapping"},
         {"Metric": "Positive Trade Amount Rate", "Value": positive_amount_rate, "Weight": "15%", "Interpretation": "Rows with positive trade amount"},
     ]
@@ -1800,7 +1904,7 @@ This section groups uploaded trade rows by **trade date** and **issuer**, then p
 issuer_choices = uploaded_issuers
 default_compare = [selected_issuer] if selected_issuer in issuer_choices else issuer_choices[:1]
 compare_issuers = st.multiselect("Compare Issuers", issuer_choices, default=default_compare)
-compare_bucket = st.selectbox("Comparison Maturity Bucket", ["All", "Short", "10Y", "20Y", "30Y"], key="compare_bucket")
+compare_bucket = st.selectbox("Comparison Maturity Bucket", MATURITY_BUCKET_OPTIONS, key="compare_bucket")
 benchmark_ratings = st.multiselect(
     "Benchmark Curve(s)",
     BENCHMARK_RATINGS,
@@ -2134,7 +2238,7 @@ else:
     cs_base["trade_date"] = pd.to_datetime(cs_base["trade_date"], errors="coerce").dt.normalize()
     cs_base["yield"] = pd.to_numeric(cs_base["yield"], errors="coerce")
     cs_base = cs_base.dropna(subset=["trade_date", "yield", "maturity_bucket"])
-    cs_base = cs_base[cs_base["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+    cs_base = cs_base[cs_base["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
 
     if cs_base.empty:
         st.warning("No usable issuer trade rows were available for curve shape analytics.")
@@ -2172,7 +2276,7 @@ else:
                     cs_benchmark_date = cs_latest_mmd[date_col].iloc[0]
 
                     bench_rows = []
-                    for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                    for bucket in MATURITY_BUCKET_ORDER:
                         tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
                         y, meta = get_benchmark_curve(cs_latest_mmd, tenor, cs_rating)
                         if y is not None and pd.notna(y.iloc[0]):
@@ -2196,7 +2300,7 @@ else:
                             curve_shape_df["issuer_yield"] - curve_shape_df["benchmark_yield"]
                         ) * 100
 
-                        maturity_order = ["Short", "10Y", "20Y", "30Y"]
+                        maturity_order = MATURITY_BUCKET_ORDER
                         curve_shape_df["maturity_bucket"] = pd.Categorical(
                             curve_shape_df["maturity_bucket"],
                             categories=maturity_order,
@@ -2519,7 +2623,7 @@ else:
             ).dropna(subset=["spread_to_benchmark_bps"])
             curve_long["maturity_bucket"] = pd.Categorical(
                 curve_long["maturity_bucket"],
-                categories=["Short", "10Y", "20Y", "30Y"],
+                categories=MATURITY_BUCKET_ORDER,
                 ordered=True,
             )
             curve_long = curve_long.sort_values(["benchmark_rating", "maturity_bucket"])
@@ -2616,7 +2720,7 @@ else:
     with wf_col1:
         wf_bucket = st.selectbox(
             "Waterfall Maturity Bucket",
-            ["Short", "10Y", "20Y", "30Y"],
+            MATURITY_BUCKET_ORDER,
             index=1,
             help="The issuer spread will be attributed for this maturity bucket.",
         )
@@ -3063,7 +3167,7 @@ with mn_tab2:
                         quadrant_df["maturity_bucket"] = pd.cut(
                             years_tmp,
                             bins=[-float("inf"), 7, 15, 25, float("inf")],
-                            labels=["Short", "10Y", "20Y", "30Y"],
+                            labels=MATURITY_BUCKET_ORDER,
                         ).astype("string")
                     if "maturity_bucket" in quadrant_df.columns:
                         quadrant_df = quadrant_df.merge(latest_bucket_spread, on="maturity_bucket", how="left")
@@ -3086,7 +3190,7 @@ with mn_tab2:
         if quadrant_df.empty:
             st.warning("No usable observations were available for the rich/cheap quadrant.")
         else:
-            valid_buckets = ["Short", "10Y", "20Y", "30Y"]
+            valid_buckets = MATURITY_BUCKET_ORDER
             if "maturity_bucket" not in quadrant_df.columns:
                 quadrant_df["maturity_bucket"] = "Unknown"
             quadrant_df["maturity_bucket"] = quadrant_df["maturity_bucket"].astype(str)
@@ -3323,7 +3427,7 @@ else:
             peer_work["trade_amount"] = 0.0
 
         peer_work = peer_work.dropna(subset=["trade_date", "yield", "issuer", "maturity_bucket"])
-        peer_work = peer_work[peer_work["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+        peer_work = peer_work[peer_work["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
 
         if peer_work.empty:
             st.warning("No usable peer trade rows were found after cleaning.")
@@ -3364,7 +3468,7 @@ else:
                         peer_benchmark_date = peer_latest_mmd[peer_date_col].iloc[0]
 
                         bench_rows = []
-                        for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                        for bucket in MATURITY_BUCKET_ORDER:
                             tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
                             y, meta = get_benchmark_curve(peer_latest_mmd, tenor, peer_rating)
                             if y is not None and pd.notna(y.iloc[0]):
@@ -3392,7 +3496,7 @@ else:
                             if peer_summary.empty:
                                 st.info("No overlapping peer observations and benchmark tenors were available.")
                             else:
-                                maturity_order = ["Short", "10Y", "20Y", "30Y"]
+                                maturity_order = MATURITY_BUCKET_ORDER
                                 peer_summary["maturity_bucket"] = pd.Categorical(
                                     peer_summary["maturity_bucket"],
                                     categories=maturity_order,
@@ -3740,7 +3844,7 @@ else:
             xrv_df["trade_amount"] = 0.0
 
         xrv_df = xrv_df.dropna(subset=["trade_date", "yield", "issuer", "maturity_bucket"])
-        xrv_df = xrv_df[xrv_df["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+        xrv_df = xrv_df[xrv_df["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
 
         if xrv_df.empty:
             st.warning("No usable cross-issuer observations remained after cleaning.")
@@ -3784,7 +3888,7 @@ else:
                             xrv_benchmark_date = xrv_latest_mmd[date_col].iloc[0]
 
                             bench_rows = []
-                            for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                            for bucket in MATURITY_BUCKET_ORDER:
                                 tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
                                 y, meta = get_benchmark_curve(xrv_latest_mmd, tenor, xrv_rating)
                                 if y is not None and pd.notna(y.iloc[0]):
@@ -3863,7 +3967,7 @@ else:
                                     xrv_summary["x_issuer_signal"] = xrv_summary.apply(classify_xrv, axis=1)
 
                                     st.subheader("1. Peer Gap Matrix")
-                                    maturity_order = ["Short", "10Y", "20Y", "30Y"]
+                                    maturity_order = MATURITY_BUCKET_ORDER
                                     gap_matrix = xrv_summary.pivot_table(
                                         index="issuer",
                                         columns="maturity_bucket",
@@ -4044,7 +4148,7 @@ else:
     with hist_col1:
         hist_bucket = st.selectbox(
             "Historical Maturity Bucket",
-            ["Short", "10Y", "20Y", "30Y"],
+            MATURITY_BUCKET_ORDER,
             index=1,
             key="hist_spread_bucket",
         )
@@ -4307,7 +4411,7 @@ else:
     with dealer_col2:
         dealer_bucket = st.selectbox(
             "Dealer Proxy Maturity Bucket",
-            ["All", "Short", "10Y", "20Y", "30Y"],
+            MATURITY_BUCKET_OPTIONS,
             index=0,
             key="dealer_proxy_bucket",
         )
@@ -4517,7 +4621,7 @@ else:
     with screen_col2:
         screen_bucket = st.selectbox(
             "Screener Maturity Bucket",
-            ["All", "Short", "10Y", "20Y", "30Y"],
+            MATURITY_BUCKET_OPTIONS,
             index=0,
             key="screen_bucket",
         )
@@ -4612,7 +4716,7 @@ else:
                 screen_benchmark_date = screen_latest_mmd[screen_date_col].iloc[0]
 
                 bench_rows = []
-                for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                for bucket in MATURITY_BUCKET_ORDER:
                     tenor = MMD_BUCKET_MAP.get(bucket, "10Y")
                     y, meta = get_benchmark_curve(screen_latest_mmd, tenor, screen_rating)
                     if y is not None and pd.notna(y.iloc[0]):
@@ -4918,7 +5022,7 @@ else:
     with rec_col1:
         rec_bucket = st.selectbox(
             "Narrative Maturity Bucket",
-            ["Short", "10Y", "20Y", "30Y"],
+            MATURITY_BUCKET_ORDER,
             index=3,
             key="rec_bucket",
         )
@@ -5326,7 +5430,7 @@ ai_col1, ai_col2, ai_col3, ai_col4 = st.columns([1, 1, 1, 1])
 with ai_col1:
     ai_bucket = st.selectbox(
         "AI Commentary Bucket",
-        ["Short", "10Y", "20Y", "30Y"],
+        MATURITY_BUCKET_ORDER,
         index=3,
         key="ai_commentary_bucket",
     )
@@ -5573,7 +5677,7 @@ try:
     ai_curve["trade_date"] = pd.to_datetime(ai_curve["trade_date"], errors="coerce").dt.normalize()
     ai_curve["yield"] = pd.to_numeric(ai_curve["yield"], errors="coerce")
     ai_curve = ai_curve.dropna(subset=["trade_date", "yield", "maturity_bucket"])
-    ai_curve = ai_curve[ai_curve["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])]
+    ai_curve = ai_curve[ai_curve["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)]
     if not ai_curve.empty:
         ai_curve_latest = ai_curve["trade_date"].max()
         ai_curve_window = ai_curve[ai_curve["trade_date"] >= ai_curve_latest - pd.Timedelta(days=30)]
@@ -5822,7 +5926,7 @@ else:
         shock_base["trade_amount"] = 0.0
 
     shock_base = shock_base.dropna(subset=["trade_date", "yield", "maturity_bucket"])
-    shock_base = shock_base[shock_base["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+    shock_base = shock_base[shock_base["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
 
     if shock_base.empty:
         st.warning("No usable rows with maturity buckets were available for scenario shock analysis.")
@@ -6005,7 +6109,7 @@ else:
                         "Proxy Duration": DURATION_PROXY.get(bucket),
                         "Formula": "Approx Price Impact ≈ -Duration × Shock",
                     }
-                    for bucket in ["Short", "10Y", "20Y", "30Y"]
+                    for bucket in MATURITY_BUCKET_ORDER
                 ]
             )
             st.dataframe(shock_assumption_df, use_container_width=True, hide_index=True)
@@ -6143,7 +6247,7 @@ else:
     with dd_col1:
         dd_bucket = st.selectbox(
             "Drilldown Maturity Bucket",
-            ["Short", "10Y", "20Y", "30Y"],
+            MATURITY_BUCKET_ORDER,
             index=3,
             help="Focus the drilldown on one maturity bucket.",
         )
@@ -6476,7 +6580,7 @@ This scatter plot maps individual CUSIPs by **tradability** and **relative value
 - **X-axis = Liquidity Score**: higher means more actively traded, larger traded amount, more recent activity, and less staleness.
 - **Y-axis = Spread to Benchmark**: higher means the bond is trading cheaper versus the selected benchmark curve.
 - **Bubble size = Total Trade Amount**: larger dots indicate more secondary-market trading volume.
-- **Color = Maturity Bucket**: Short / 10Y / 20Y / 30Y.
+- **Color = Maturity Bucket**: Short / Intermediate / Long / Extended Long.
 
 **Quadrants:**
 
@@ -6613,7 +6717,7 @@ else:
                 else:
                     benchmark_long_rv = benchmark_long_rv.sort_values(["maturity_bucket", "trade_date"])
                     merge_frames = []
-                    for bucket in ["Short", "10Y", "20Y", "30Y"]:
+                    for bucket in MATURITY_BUCKET_ORDER:
                         left = rv_summary[rv_summary["maturity_bucket"] == bucket].sort_values("latest_trade")
                         right = benchmark_long_rv[benchmark_long_rv["maturity_bucket"] == bucket].sort_values("trade_date")
                         if left.empty or right.empty:
@@ -6676,7 +6780,7 @@ else:
             # Resolve maturity bucket from common merge variants. If the bucket still
             # cannot be determined, keep the row for audit but exclude it from the
             # main scatter chart.
-            valid_buckets = ["Short", "10Y", "20Y", "30Y"]
+            valid_buckets = MATURITY_BUCKET_ORDER
 
             if "maturity_bucket" not in rv_plot.columns:
                 possible_bucket_cols = [
@@ -7129,7 +7233,7 @@ try:
     export_curve_df["trade_date"] = pd.to_datetime(export_curve_df["trade_date"], errors="coerce").dt.normalize()
     export_curve_df["yield"] = pd.to_numeric(export_curve_df["yield"], errors="coerce")
     export_curve_df = export_curve_df.dropna(subset=["trade_date", "yield", "maturity_bucket"])
-    export_curve_df = export_curve_df[export_curve_df["maturity_bucket"].isin(["Short", "10Y", "20Y", "30Y"])].copy()
+    export_curve_df = export_curve_df[export_curve_df["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
     if not export_curve_df.empty:
         latest_curve_date = export_curve_df["trade_date"].max()
         export_curve_df = export_curve_df[export_curve_df["trade_date"] >= latest_curve_date - pd.Timedelta(days=30)]
@@ -7139,7 +7243,7 @@ try:
         )
         export_curve_summary["maturity_bucket"] = pd.Categorical(
             export_curve_summary["maturity_bucket"],
-            categories=["Short", "10Y", "20Y", "30Y"],
+            categories=MATURITY_BUCKET_ORDER,
             ordered=True,
         )
         export_curve_summary = export_curve_summary.sort_values("maturity_bucket")
@@ -7528,9 +7632,9 @@ with st.expander("Duration proxy assumptions", expanded=False):
     duration_proxy_df = pd.DataFrame(
         [
             {"Maturity Bucket": "Short", "Proxy Duration": 2.0},
-            {"Maturity Bucket": "10Y", "Proxy Duration": 8.0},
-            {"Maturity Bucket": "20Y", "Proxy Duration": 13.0},
-            {"Maturity Bucket": "30Y", "Proxy Duration": 18.0},
+            {"Maturity Bucket": "Intermediate", "Proxy Duration": 8.0},
+            {"Maturity Bucket": "Long", "Proxy Duration": 13.0},
+            {"Maturity Bucket": "Extended Long", "Proxy Duration": 18.0},
         ]
     )
     st.dataframe(duration_proxy_df, use_container_width=True, hide_index=True)
