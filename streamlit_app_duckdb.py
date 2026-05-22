@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import re
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -481,30 +483,30 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     "series": ["series"],
     "secondary_credit": ["secondary credit", "secondary_credit", "credit", "credit enhancement"],
     "term": ["term"],
-    "maturity": ["maturity", "maturity date", "maturity_date"],
+    "maturity": ["maturity", "maturity date", "maturity_date", "mty"],
     "par_amount": ["par amount", "par_amount", "par", "amount issued"],
     "outstanding_amount": ["outstanding amount", "outstanding_amount", "amount outstanding", "current amount outstanding"],
-    "coupon": ["coupon", "coupon rate", "coupon_rate"],
+    "coupon": ["coupon", "coupon rate", "coupon_rate", "cpn"],
     "call_date": ["call date", "call_date", "first call date", "first_call_date"],
     "call_price": ["call price", "call_price"],
     "fed_tax": ["fed tax", "fed_tax", "tax status", "tax_status"],
     "amt": ["amt", "alternative minimum tax"],
     "rating": ["rating", "ratings", "ratings m/s/f", "ratings_m_s_f", "moody/s&p/fitch"],
     # Trade fields
-    "trade_datetime": ["trade date/time", "trade datetime", "trade_datetime", "datetime"],
-    "trade_date": ["trade date", "trade_date", "date", "transaction date"],
+    "trade_datetime": ["trade date/time", "td & time", "td time", "trade datetime", "trade_datetime", "datetime"],
+    "trade_date": ["trade date", "td & time", "td time", "trade_date", "date", "transaction date"],
     "settlement_date": ["settlement date", "settlement_date", "settle date"],
     "description": ["description", "security description", "bond description"],
-    "maturity_trade": ["maturity date", "maturity_date", "maturity"],
+    "maturity_trade": ["maturity date", "maturity_date", "maturity", "mty"],
     "yield": ["yield", "yield to worst", "ytw", "yield_to_worst", "yield to maturity", "ytm"],
     "price": ["price", "trade price", "execution price"],
-    "trade_amount": ["trade amount", "trade_amount", "par traded", "par amount", "amount", "quantity"],
+    "trade_amount": ["trade amount", "trade_amount", "par traded", "par amount", "amount", "quantity", "qty", "qty (m)"],
     "calculation_date": ["calculation date", "calculation_date"],
     "calculation_price": ["calculation price", "calculation_price"],
     "index": ["index", "benchmark"],
     "index_rate": ["index rate", "index_rate", "benchmark rate"],
     "spread": ["spread", "g spread", "z spread", "spread to benchmark"],
-    "trade_type": ["trade type", "trade_type", "side", "buy/sell"],
+    "trade_type": ["trade type", "tde type", "trade_type", "side", "buy/sell"],
 }
 
 BOND_REQUIRED = ["cusip", "issuer", "maturity"]
@@ -1234,6 +1236,75 @@ def display_validation_report(title: str, report: dict, warnings: list[str] | No
         st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
 
 
+
+def display_trade_centric_metadata_review(
+    title: str,
+    report: dict,
+    warnings: list[str] | None = None,
+    issuer_can_be_derived: bool = False,
+    maturity_can_be_derived: bool = False,
+):
+    """Render bond/security metadata as an informational review, not a blocker.
+
+    In the flexible combined-trade architecture, the trade file is the required
+    source. Bond-master fields such as issuer, sector, coupon, and outstanding
+    amount are useful metadata, but they are not required for the dashboard to
+    run. This avoids showing a scary red readiness failure when the app can
+    infer issuer/maturity from Security Description, Mty, or reference files.
+    """
+    warnings = warnings or []
+    missing_required = list(report.get("missing_required", []))
+    adjusted_missing = []
+    for field in missing_required:
+        if field == "issuer" and issuer_can_be_derived:
+            continue
+        if field == "maturity" and maturity_can_be_derived:
+            continue
+        adjusted_missing.append(field)
+
+    metadata_status = "✅" if not adjusted_missing else "🟡"
+    with st.expander(f"{metadata_status} {title}", expanded=False):
+        st.caption(f"Rows: {report['row_count']:,} · Columns: {report['column_count']:,}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "Bond fields detected",
+            f"{len(report['detected_required'])}/{len(report['detected_required']) + len(report['missing_required'])}",
+        )
+        c2.metric(
+            "Recommended metadata detected",
+            f"{len(report['detected_recommended'])}/{len(report['detected_recommended']) + len(report['missing_recommended'])}",
+        )
+        c3.metric("Dashboard mode", "Trade-centric")
+
+        st.info(
+            "Running in flexible trade-centric mode. Issuer and bond metadata are "
+            "inferred from Security Description, maturity fields, and reference files when available."
+        )
+
+        if issuer_can_be_derived and "issuer" in missing_required:
+            st.success("Issuer column is missing, but issuer names can be inferred from Security Description / reference mapping.")
+        if maturity_can_be_derived and "maturity" in missing_required:
+            st.success("Maturity column is missing, but maturity can be inferred from available maturity-style columns.")
+        if adjusted_missing:
+            st.warning(
+                "Some bond/security metadata is still unavailable: " + ", ".join(adjusted_missing) +
+                ". Related sections will show N/A or use fallback logic."
+            )
+        if report.get("missing_recommended"):
+            st.caption("Optional metadata not found: " + ", ".join(report["missing_recommended"]))
+        if warnings:
+            with st.expander("Metadata warnings", expanded=False):
+                for warning in warnings:
+                    st.warning(warning)
+
+        mapping_rows = [
+            {"Internal Field": key, "Uploaded Column Detected": value or "—"}
+            for key, value in report["mapping"].items()
+        ]
+        st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+
+
 def template_download_button(columns: list[str], label: str, filename: str):
     template = pd.DataFrame(columns=columns)
     st.download_button(
@@ -1298,20 +1369,668 @@ def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
     st.download_button(label=label, data=csv, file_name=filename, mime="text/csv")
 
 
+# -----------------------------------------------------------------------------
+# Local / Desktop Data Source Mode
+# -----------------------------------------------------------------------------
+# This DuckDB-oriented version no longer uses Streamlit file uploaders.
+# Data stays outside GitHub by default.
+#
+# Expected local files:
+#   data/processed/Trade_Output_Sample.csv
+#   data/processed/issuers.csv        optional but recommended
+#   data/processed/mmd.csv            optional but recommended
+#
+# Trade_Output_Sample.csv is treated as the combined source file containing both
+# bond/security metadata and trade-history fields. It is standardized once as a
+# bond master and once as a trade file, then merged by CUSIP through the existing
+# analytics pipeline.
+# -----------------------------------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_REFERENCE_DATA_DIR = BASE_DIR / "data" / "processed"
+DEFAULT_TRADE_OUTPUT_PATH = DEFAULT_REFERENCE_DATA_DIR / "Trade_Output_Sample.csv"
+DEFAULT_DUCKDB_PATH = BASE_DIR / "data" / "muni_market.duckdb"
+
+
+def _first_existing_file(folder: Path, candidates: list[str]) -> Path | None:
+    """Return the first existing file from a list of candidate filenames."""
+    for name in candidates:
+        candidate = folder / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _safe_read_local_file(path: Path) -> pd.DataFrame:
+    """Read a local CSV/XLSX/XLS file with the existing file reader."""
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    with path.open("rb") as f:
+        return read_uploaded_file(io.BytesIO(f.read()), path.name)
+
+
+def _pick_col(df: pd.DataFrame, canonical_name: str) -> str | None:
+    """Find a column in a flexible Munipro / trade-output file."""
+    return _find_column(df, canonical_name)
+
+
+def _series_or_na(df: pd.DataFrame, col: str | None, default=pd.NA) -> pd.Series:
+    """Return a column series if available; otherwise return an NA series."""
+    if col is not None and col in df.columns:
+        return df[col]
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def _derive_issuer_from_description(desc: object) -> str:
+    """Best-effort issuer extraction from Munipro-style Security Description.
+
+    This is intentionally conservative: if no clear delimiter is found, it keeps
+    the full description. An optional issuers.csv can later overwrite/clean the
+    issuer and sector mapping.
+    """
+    text = "" if pd.isna(desc) else str(desc).strip()
+    if not text:
+        return "Unknown"
+    upper = text.upper()
+    cut_words = [
+        " ELECTION", " REV", " REF", " SER", " SERIES", " BOND", " GO ",
+        " TAXABLE", " UNLTD", " LTD", " 20", " 19",
+    ]
+    cut_positions = [upper.find(w) for w in cut_words if upper.find(w) > 8]
+    if cut_positions:
+        text = text[:min(cut_positions)].strip(" ,-–—")
+    return text or "Unknown"
+
+
+# -----------------------------------------------------------------------------
+# Issuer normalization / reference-data layer
+# -----------------------------------------------------------------------------
+# Combined trade exports often include issuer-like text inside Security Description.
+# Without normalization, the same issuer can appear as multiple dropdown options
+# because one bond description says "CAP APPN", another says "SER A", etc.
+# This layer creates:
+#   raw_issuer       = the original extracted issuer text
+#   issuer_key       = a cleaned matching key
+#   issuer           = standardized display name, using issuers.csv when available
+#   issuer_mapped    = whether issuers.csv supplied a standard name
+# It makes the dashboard behave more like a real reference-data system.
+
+ISSUER_NOISE_PATTERNS = [
+    r"\bCAP(?:ITAL)?\s+APP(?:N|RECIATION)?\b.*$",
+    r"\bCAP\s+APPN\b.*$",
+    r"\bCAP\s+APP\b.*$",
+    r"\bREF(?:UNDING)?\b.*$",
+    r"\bREV(?:ENUE)?\b.*$",
+    r"\bGO\b.*$",
+    r"\bBDS?\b.*$",
+    r"\bBONDS?\b.*$",
+    r"\bSER(?:IES)?\s+[A-Z0-9\-]+\b.*$",
+    r"\bSER(?:IES)?\b.*$",
+    r"\bELECTION\b.*$",
+    r"\bMEASURE\b.*$",
+    r"\bTAXABLE\b.*$",
+    r"\bUNLTD\s+TAX\b.*$",
+    r"\bLTD\s+TAX\b.*$",
+    r"\bDATED\b.*$",
+    r"\bDUE\b.*$",
+    r"\b\d{1,2}/\d{1,2}/\d{2,4}\b.*$",
+    r"\b(?:19|20)\d{2}\b.*$",
+]
+
+COMMON_ISSUER_ABBREVIATIONS = {
+    "CALIF": "CA",
+    "CALIFORNIA": "CA",
+    "CNTY": "COUNTY",
+    "CTY": "CITY",
+    "SCH": "SCHOOL",
+    "DIST": "DISTRICT",
+    "CMNTY": "COMMUNITY",
+    "COMM": "COMMUNITY",
+    "COLL": "COLLEGE",
+    "JUNIOR": "JR",
+    "UN": "UNION",
+    "UNI": "UNIFIED",
+    "UNIF": "UNIFIED",
+    "AUTH": "AUTHORITY",
+    "DEV": "DEVELOPMENT",
+    "PUB": "PUBLIC",
+    "FIN": "FINANCE",
+    "CORP": "CORPORATION",
+}
+
+
+def normalize_issuer_key(value: object) -> str:
+    """Create a stable issuer matching key from messy trade descriptions."""
+    if pd.isna(value):
+        return "UNKNOWN"
+
+    text = str(value).upper().strip()
+    if not text:
+        return "UNKNOWN"
+
+    # Remove punctuation and normalize separators before pattern stripping.
+    text = re.sub(r"[\u2010-\u2015]", "-", text)
+    text = re.sub(r"[,;:\(\)\[\]\{\}\.]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # Remove bond-structure suffixes that should not define issuer identity.
+    for pattern in ISSUER_NOISE_PATTERNS:
+        text = re.sub(pattern, "", text).strip()
+
+    # Remove obvious coupon/date fragments if they slipped into the extracted text.
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*%?\b", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_/,")
+
+    if not text:
+        return "UNKNOWN"
+
+    tokens = [COMMON_ISSUER_ABBREVIATIONS.get(tok, tok) for tok in text.split()]
+    text = " ".join(tokens)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "UNKNOWN"
+
+
+def display_issuer_from_key(key: object) -> str:
+    """Readable fallback when issuers.csv does not map an issuer_key."""
+    if pd.isna(key):
+        return "Unknown"
+    key = str(key).strip()
+    if not key or key == "UNKNOWN":
+        return "Unknown"
+    return key.title().replace(" Ca ", " CA ").replace(" Usd", " USD")
+
+
+def build_issuer_reference_table(issuer_mapping_df: pd.DataFrame) -> pd.DataFrame:
+    """Build a flexible issuer reference table from issuers.csv / issuer_mapping.csv.
+
+    Supported columns, case-insensitive:
+    - issuer_key: optional cleaned key
+    - raw_issuer: optional raw matching text
+    - standard_issuer / issuer / issuer_name: display name
+    - sector
+    - primary_type
+    """
+    if issuer_mapping_df is None or issuer_mapping_df.empty:
+        return pd.DataFrame(columns=["issuer_key", "standard_issuer", "sector", "primary_type"])
+
+    ref = issuer_mapping_df.copy()
+
+    key_col = _find_column(ref, "issuer_key")
+    raw_col = _find_column(ref, "raw_issuer")
+    standard_col = (
+        _find_column(ref, "standard_issuer")
+        or _find_column(ref, "issuer")
+        or _find_column(ref, "issuer_name")
+    )
+    sector_col = _find_column(ref, "sector")
+    primary_col = _find_column(ref, "primary_type")
+
+    if key_col:
+        issuer_key = ref[key_col].apply(normalize_issuer_key)
+    elif raw_col:
+        issuer_key = ref[raw_col].apply(normalize_issuer_key)
+    elif standard_col:
+        issuer_key = ref[standard_col].apply(normalize_issuer_key)
+    else:
+        return pd.DataFrame(columns=["issuer_key", "standard_issuer", "sector", "primary_type"])
+
+    out = pd.DataFrame({"issuer_key": issuer_key})
+    out["standard_issuer"] = (
+        ref[standard_col].astype(str).str.strip() if standard_col else out["issuer_key"].apply(display_issuer_from_key)
+    )
+    out["sector"] = ref[sector_col].astype(str).str.strip() if sector_col else pd.NA
+    out["primary_type"] = ref[primary_col].astype(str).str.strip() if primary_col else pd.NA
+
+    out = out.replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+    out = out.dropna(subset=["issuer_key"])
+    out = out[out["issuer_key"] != "UNKNOWN"]
+    out = out.drop_duplicates("issuer_key", keep="first")
+    return out.reset_index(drop=True)
+
+
+def apply_issuer_normalization_layer(
+    df: pd.DataFrame,
+    issuer_reference: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Normalize issuer names and optionally map them to standard reference data."""
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+
+    if "issuer" in out.columns:
+        raw = out["issuer"].astype(str).replace({"nan": "", "None": ""}).str.strip()
+    elif "description" in out.columns:
+        raw = out["description"].apply(_derive_issuer_from_description)
+    else:
+        raw = pd.Series(["Unknown"] * len(out), index=out.index)
+
+    # Preserve original extracted name for audit/review.
+    if "raw_issuer" not in out.columns:
+        out["raw_issuer"] = raw
+
+    out["issuer_key"] = raw.apply(normalize_issuer_key)
+    out["issuer_clean_fallback"] = out["issuer_key"].apply(display_issuer_from_key)
+
+    if issuer_reference is not None and not issuer_reference.empty:
+        ref = issuer_reference.copy()
+        ref = ref.loc[:, ~ref.columns.duplicated()].copy()
+        out = out.merge(ref, on="issuer_key", how="left", suffixes=("", "_ref"))
+        out["issuer_mapped"] = out["standard_issuer"].notna()
+        out["issuer"] = out["standard_issuer"].combine_first(out["issuer_clean_fallback"])
+
+        if "sector_ref" in out.columns:
+            if "sector" not in out.columns:
+                out["sector"] = out["sector_ref"]
+            else:
+                out["sector"] = out["sector_ref"].combine_first(out["sector"])
+            out = out.drop(columns=["sector_ref"])
+
+        if "primary_type_ref" in out.columns:
+            if "primary_type" not in out.columns:
+                out["primary_type"] = out["primary_type_ref"]
+            else:
+                out["primary_type"] = out["primary_type_ref"].combine_first(out["primary_type"])
+            out = out.drop(columns=["primary_type_ref"])
+    else:
+        out["issuer_mapped"] = False
+        out["issuer"] = out["issuer_clean_fallback"]
+
+    if "sector" not in out.columns:
+        out["sector"] = "Unknown"
+    out["sector"] = out["sector"].fillna("Unknown").replace({"nan": "Unknown", "": "Unknown"})
+
+    if "primary_type" not in out.columns:
+        out["primary_type"] = "Unknown"
+    out["primary_type"] = out["primary_type"].fillna("Unknown").replace({"nan": "Unknown", "": "Unknown"})
+
+    return out
+
+
+def build_unmapped_issuer_review_table(market_df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize normalized but unmapped issuers for reference-data cleanup."""
+    if market_df is None or market_df.empty or "issuer_key" not in market_df.columns:
+        return pd.DataFrame()
+
+    review = market_df.copy()
+    if "issuer_mapped" in review.columns:
+        review = review[~review["issuer_mapped"].fillna(False)]
+
+    agg_map = {
+        "trade_count": ("cusip", "count") if "cusip" in review.columns else ("issuer_key", "count"),
+    }
+    if "trade_amount" in review.columns:
+        agg_map["total_trade_amount"] = ("trade_amount", "sum")
+    if "raw_issuer" in review.columns:
+        agg_map["sample_raw_issuer"] = ("raw_issuer", "first")
+    if "issuer" in review.columns:
+        agg_map["suggested_issuer"] = ("issuer", "first")
+    if "sector" in review.columns:
+        agg_map["current_sector"] = ("sector", "first")
+
+    out = review.groupby("issuer_key", as_index=False).agg(**agg_map)
+    if "total_trade_amount" in out.columns:
+        out = out.sort_values(["trade_count", "total_trade_amount"], ascending=False)
+    else:
+        out = out.sort_values("trade_count", ascending=False)
+    return out.reset_index(drop=True)
+
+
+def _assign_maturity_bucket_from_years(years: float | int | None) -> str:
+    if pd.isna(years):
+        return "Unknown"
+    if years <= 7:
+        return "Short"
+    if years <= 15:
+        return "Intermediate"
+    if years <= 25:
+        return "Long"
+    return "Extended Long"
+
+
+def _add_required_optional_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Make downstream analytics schema-flexible.
+
+    Older dashboard sections expect bond-master fields such as coupon_bond,
+    maturity_bond, and outstanding_amount. A combined trade-output file may not
+    have them. This function creates safe placeholder / fallback columns so those
+    sections degrade gracefully instead of crashing.
+    """
+    df = df.copy()
+
+    if "coupon_bond" not in df.columns:
+        if "coupon" in df.columns:
+            df["coupon_bond"] = df["coupon"]
+        elif "coupon_trade" in df.columns:
+            df["coupon_bond"] = df["coupon_trade"]
+        else:
+            df["coupon_bond"] = pd.NA
+
+    if "coupon_trade" not in df.columns:
+        if "coupon" in df.columns:
+            df["coupon_trade"] = df["coupon"]
+        elif "coupon_bond" in df.columns:
+            df["coupon_trade"] = df["coupon_bond"]
+        else:
+            df["coupon_trade"] = pd.NA
+
+    if "maturity_bond" not in df.columns:
+        if "maturity" in df.columns:
+            df["maturity_bond"] = df["maturity"]
+        elif "maturity_trade" in df.columns:
+            df["maturity_bond"] = df["maturity_trade"]
+        else:
+            df["maturity_bond"] = pd.NaT
+
+    if "maturity_trade" not in df.columns:
+        if "maturity" in df.columns:
+            df["maturity_trade"] = df["maturity"]
+        elif "maturity_bond" in df.columns:
+            df["maturity_trade"] = df["maturity_bond"]
+        else:
+            df["maturity_trade"] = pd.NaT
+
+    if "outstanding_amount" not in df.columns:
+        # Do not pretend trade amount is true outstanding. Use NA so turnover
+        # calculations show as unavailable instead of being misleading.
+        df["outstanding_amount"] = pd.NA
+
+    if "par_amount" not in df.columns:
+        df["par_amount"] = pd.NA
+
+    if "trade_amount" not in df.columns:
+        df["trade_amount"] = pd.NA
+
+    if "sector" not in df.columns:
+        df["sector"] = "Unknown"
+
+    if "primary_type" not in df.columns:
+        df["primary_type"] = "Unknown"
+
+    if "maturity_bucket" not in df.columns:
+        mat = pd.to_datetime(df.get("maturity_bond", pd.NaT), errors="coerce")
+        ref_date = pd.to_datetime(df.get("trade_date", pd.Timestamp.today()), errors="coerce")
+        if isinstance(ref_date, pd.Series):
+            years = (mat - ref_date).dt.days / 365.25
+        else:
+            years = (mat - pd.Timestamp.today()).dt.days / 365.25
+        df["maturity_bucket"] = years.apply(_assign_maturity_bucket_from_years)
+
+    df["maturity_bucket"] = df["maturity_bucket"].replace(MATURITY_BUCKET_RENAME)
+    return df
+
+
+def build_combined_trade_output_frames(raw_df: pd.DataFrame, source_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build flexible bonds_df and trades_df from one combined trade-output file.
+
+    This replaces the older assumption that users always have separate bond and
+    trade files. Missing bond-master fields are allowed and handled as optional.
+    """
+    df = raw_df.copy()
+
+    cusip_col = _pick_col(df, "cusip")
+    trade_dt_col = _pick_col(df, "trade_datetime") or _pick_col(df, "trade_date")
+    maturity_col = _pick_col(df, "maturity") or _pick_col(df, "maturity_trade")
+    ytw_col = _pick_col(df, "yield")
+    qty_col = _pick_col(df, "trade_amount")
+    desc_col = _pick_col(df, "description")
+    coupon_col = _pick_col(df, "coupon")
+    price_col = _pick_col(df, "price")
+    trade_type_col = _pick_col(df, "trade_type")
+    issuer_col = _pick_col(df, "issuer")
+    sector_col = _pick_col(df, "sector")
+
+    if cusip_col is None:
+        raise ValueError("Combined trade output must include a CUSIP/Cusip column.")
+    if trade_dt_col is None:
+        raise ValueError("Combined trade output must include TD & Time or Trade Date.")
+    if ytw_col is None:
+        raise ValueError("Combined trade output must include YTW/Yield.")
+
+    trade_dt = pd.to_datetime(_series_or_na(df, trade_dt_col), errors="coerce")
+    maturity = pd.to_datetime(_series_or_na(df, maturity_col), errors="coerce") if maturity_col else pd.Series(pd.NaT, index=df.index)
+    desc = _series_or_na(df, desc_col, "")
+    issuer = _series_or_na(df, issuer_col) if issuer_col else desc.apply(_derive_issuer_from_description)
+    sector = _series_or_na(df, sector_col, "Unknown") if sector_col else pd.Series(["Unknown"] * len(df), index=df.index)
+    coupon = pd.to_numeric(_series_or_na(df, coupon_col), errors="coerce") if coupon_col else pd.Series(pd.NA, index=df.index)
+    ytw = pd.to_numeric(_series_or_na(df, ytw_col), errors="coerce")
+    qty = pd.to_numeric(_series_or_na(df, qty_col), errors="coerce") if qty_col else pd.Series(pd.NA, index=df.index)
+    price = pd.to_numeric(_series_or_na(df, price_col), errors="coerce") if price_col else pd.Series(pd.NA, index=df.index)
+
+    rating_parts = []
+    for rating_col in ["M", "S", "F", "Rating", "Ratings"]:
+        if rating_col in df.columns:
+            rating_parts.append(df[rating_col].astype(str).replace("nan", ""))
+    ratings = rating_parts[0] if rating_parts else pd.Series(pd.NA, index=df.index)
+    if len(rating_parts) > 1:
+        ratings = rating_parts[0]
+        for part in rating_parts[1:]:
+            ratings = ratings.str.cat(part, sep="/")
+
+    years = (maturity - trade_dt).dt.days / 365.25
+    maturity_bucket = years.apply(_assign_maturity_bucket_from_years)
+
+    trades_df = pd.DataFrame({
+        "trade_datetime": trade_dt,
+        "trade_date": trade_dt.dt.normalize(),
+        "cusip": _series_or_na(df, cusip_col).astype(str).str.strip().str.upper(),
+        "description": desc.astype(str),
+        "maturity_trade": maturity,
+        "coupon_trade": coupon,
+        "yield": ytw,
+        "price": price,
+        "trade_amount": qty,
+        "trade_type": _series_or_na(df, trade_type_col, pd.NA),
+        "ratings_m_s_f": ratings,
+        "source_file": source_file,
+        "issuer": issuer.astype(str).str.strip(),
+        "sector": sector.astype(str).str.strip(),
+        "maturity_bucket": maturity_bucket,
+    })
+
+    bonds_df = pd.DataFrame({
+        "issuer": issuer.astype(str).str.strip(),
+        "sector": sector.astype(str).str.strip(),
+        "primary_type": "Unknown",
+        "cusip": _series_or_na(df, cusip_col).astype(str).str.strip().str.upper(),
+        "maturity": maturity,
+        "coupon": coupon,
+        "outstanding_amount": pd.NA,
+        "par_amount": pd.NA,
+        "call_date": pd.NaT,
+        "call_price": pd.NA,
+        "fed_tax": pd.NA,
+        "amt": pd.NA,
+        "rating": ratings,
+        "maturity_bucket": maturity_bucket,
+    }).drop_duplicates(subset=["cusip"], keep="first")
+
+    trades_df = _add_required_optional_columns(trades_df)
+    bonds_df = _add_required_optional_columns(bonds_df)
+    return bonds_df.reset_index(drop=True), trades_df.reset_index(drop=True)
+
+
+@st.cache_data(show_spinner="Loading project data...")
+def process_local_desktop_data(
+    trade_output_path_str: str,
+    reference_data_dir_str: str,
+    duckdb_path_str: str,
+):
+    """Load project data and build dashboard-ready DataFrames.
+
+    This keeps user data outside GitHub while preserving the existing analytics
+    logic downstream.
+    """
+    trade_output_path = Path(trade_output_path_str).expanduser()
+    reference_data_dir = Path(reference_data_dir_str).expanduser()
+    duckdb_path = Path(duckdb_path_str).expanduser()
+
+    failed_files: list[tuple[str, str]] = []
+
+    # Optional: create / refresh a local DuckDB table from the combined CSV.
+    # The dashboard still uses pandas DataFrames after standardization because
+    # the existing analytics code expects DataFrames.
+    try:
+        import duckdb
+
+        duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+        con = duckdb.connect(str(duckdb_path))
+        con.execute(
+            "CREATE OR REPLACE TABLE trade_output AS "
+            "SELECT * FROM read_csv_auto(?)",
+            [str(trade_output_path)],
+        )
+        con.close()
+    except Exception as exc:
+        # Do not block the dashboard if DuckDB refresh fails; the file can still
+        # be loaded directly through the existing reader.
+        failed_files.append(("DuckDB refresh", str(exc)))
+
+    # Main combined source file.
+    # Flexible combined-trade architecture: one Munipro-style trade output can
+    # contain both trade fields and security metadata. Missing bond-master
+    # columns are treated as optional and filled with safe placeholders.
+    raw_trade_output = _safe_read_local_file(trade_output_path)
+    bonds_df, trades_df = build_combined_trade_output_frames(
+        raw_trade_output,
+        source_file=trade_output_path.name,
+    )
+
+    before_dedup = len(trades_df)
+    trades_df = trades_df.drop_duplicates().reset_index(drop=True)
+    duplicates_removed = before_dedup - len(trades_df)
+
+    # Optional issuer / sector reference file.
+    issuer_mapping_df = pd.DataFrame()
+    issuer_mapping_path = _first_existing_file(
+        reference_data_dir,
+        [
+            "issuers.csv",
+            "issuer.csv",
+            "issuer_mapping.csv",
+            "Issuer_Mapping.csv",
+            "issuers.xlsx",
+            "issuer_mapping.xlsx",
+        ],
+    )
+    if issuer_mapping_path is not None:
+        try:
+            raw_mapping = _safe_read_local_file(issuer_mapping_path)
+            issuer_mapping_df = standardize_issuer_mapping(raw_mapping)
+        except Exception as exc:
+            failed_files.append((issuer_mapping_path.name, str(exc)))
+
+    # Build a reference-data normalization layer from issuers.csv / issuer_mapping.csv.
+    # This prevents small Security Description differences from splitting the same
+    # issuer into many dropdown entries.
+    issuer_reference = build_issuer_reference_table(issuer_mapping_df)
+
+    # First normalize the raw bond/trade issuer labels before merge.
+    bonds_df = apply_issuer_normalization_layer(bonds_df, issuer_reference)
+    trades_df = apply_issuer_normalization_layer(trades_df, issuer_reference)
+
+    issuer_master = build_issuer_master(bonds_df, issuer_mapping_df)
+    try:
+        market_df = merge_market_data(bonds_df, trades_df, issuer_master)
+    except Exception:
+        # Fallback for trade-centric files where the old two-file merge schema
+        # is too strict. Preserve all trade rows and attach security metadata by CUSIP.
+        bond_merge_cols = [c for c in bonds_df.columns if c not in {"issuer", "sector", "maturity_bucket"}]
+        bond_merge = bonds_df[["cusip"] + [c for c in bond_merge_cols if c != "cusip"]].drop_duplicates("cusip")
+        market_df = trades_df.merge(bond_merge, on="cusip", how="left", suffixes=("_trade", "_bond"))
+
+    # Normalize again after merge so the final displayed issuer is always the
+    # standard_issuer from issuers.csv when available, otherwise a cleaned fallback.
+    market_df = apply_issuer_normalization_layer(market_df, issuer_reference)
+
+    bonds_df = _add_required_optional_columns(bonds_df)
+    trades_df = _add_required_optional_columns(trades_df)
+    market_df = _add_required_optional_columns(market_df)
+
+    # Rebuild issuer_master from the normalized output used by the dashboard.
+    issuer_master_cols = [c for c in ["issuer", "sector", "primary_type", "issuer_key", "raw_issuer", "issuer_mapped"] if c in market_df.columns]
+    issuer_master = (
+        market_df[issuer_master_cols]
+        .drop_duplicates(subset=["issuer"])
+        .sort_values("issuer")
+        .reset_index(drop=True)
+        if issuer_master_cols and "issuer" in issuer_master_cols
+        else issuer_master
+    )
+
+    # Optional MMD / benchmark curve file.
+    mmd_df = pd.DataFrame()
+    mmd_path = _first_existing_file(
+        reference_data_dir,
+        [
+            "mmd.csv",
+            "MMD.csv",
+            "mmd_curve.csv",
+            "MMD_Curve.csv",
+            "benchmark_curve.csv",
+            "mmd.xlsx",
+            "mmd_curve.xlsx",
+        ],
+    )
+    if mmd_path is not None:
+        try:
+            raw_mmd = _safe_read_local_file(mmd_path)
+            mmd_df = standardize_mmd(raw_mmd)
+        except Exception as exc:
+            failed_files.append((mmd_path.name, str(exc)))
+
+    data_source_summary = {
+        "trade_output_path": str(trade_output_path),
+        "reference_data_dir": str(reference_data_dir),
+        "duckdb_path": str(duckdb_path),
+        "issuer_mapping_path": str(issuer_mapping_path) if issuer_mapping_path else "Not found",
+        "mmd_path": str(mmd_path) if mmd_path else "Not found",
+        "issuer_reference_rows": int(len(issuer_reference)) if 'issuer_reference' in locals() else 0,
+        "normalized_issuer_count": int(market_df["issuer"].nunique()) if "issuer" in market_df.columns else 0,
+        "mapped_issuer_rows": int(market_df.get("issuer_mapped", pd.Series(dtype=bool)).fillna(False).sum()) if "issuer_mapped" in market_df.columns else 0,
+    }
+
+    return bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files, duplicates_removed, data_source_summary
+
+
 with st.sidebar:
-    st.header("1. Upload Data")
-    bond_file = st.file_uploader("Bond Master File — required", type=["csv", "xlsx", "xls"])
-    trade_files = st.file_uploader("Trade History File(s) — required", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
-    issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
-    mmd_file = st.file_uploader("MMD Curve File — optional", type=["csv", "xlsx", "xls"])
+    st.header("1. Project Data Source")
+    st.caption("This version reads project data files from data/processed instead of using upload boxes.")
+
+    trade_output_path_input = st.text_input(
+        "Combined Trade Output CSV",
+        value=str(DEFAULT_TRADE_OUTPUT_PATH),
+        help="Default: data/processed/Trade_Output_Sample.csv. This combined file can contain both security metadata and trade-history fields.",
+    )
+
+    reference_data_dir_input = st.text_input(
+        "Reference Data Folder",
+        value=str(DEFAULT_REFERENCE_DATA_DIR),
+        help="Default: data/processed. Put issuers.csv and mmd.csv here.",
+    )
+
+    duckdb_path_input = st.text_input(
+        "DuckDB Database Path",
+        value=str(DEFAULT_DUCKDB_PATH),
+        help="The app refreshes a local DuckDB table named trade_output from your combined CSV.",
+    )
 
     st.markdown("---")
-    st.caption("Tip: Keep proprietary raw exports out of public GitHub. Upload them only during your own session.")
+    st.caption("Tip: for large/company data, keep the same folder structure locally or on a shared drive and do not commit real data to GitHub.")
 
-    with st.expander("Download blank templates"):
-        template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Bond template CSV", "bond_master_template.csv")
-        template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
-        template_download_button(CURVE_TEMPLATE_COLUMNS, "Benchmark curve template CSV", "benchmark_curve_template.csv")
+    with st.expander("Expected local files"):
+        st.markdown(
+            """
+**Required**
+- `data/processed/Trade_Output_Sample.csv`
+
+**Optional reference files** inside `data/processed/`
+- `issuers.csv` or `issuer_mapping.csv`
+- `mmd.csv` or `mmd_curve.csv`
+
+The combined trade-output file is used as both the bond/security source and the trade-history source.
+            """
+        )
 
     st.markdown("---")
     st.subheader("Contents")
@@ -1319,7 +2038,7 @@ with st.sidebar:
         """
 <div class="sidebar-nav-small">
 <b>Data & Setup</b><br>
-<a href="#file-readiness">1. File Readiness Check</a><br>
+<a href="#file-readiness">1. Project Data Readiness</a><br>
 <a href="#data-quality-scorecard">2. Data Quality Scorecard</a><br>
 <a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
 
@@ -1366,82 +2085,106 @@ with st.sidebar:
     with st.expander("Version / Change Log", expanded=False):
         st.markdown(
             """
-**Current Version:** `v1.0-team-ready`
+**Current Version:** `v1.1-local-duckdb-desktop`
 
 Recent additions:
-- Cross-Issuer RV Analytics
-- Scenario Shock Analysis
-- Recommendation Narrative Engine
-- Data Quality Scorecard
-- Export Summary Package
-- Watchlist / Saved Candidates
-- Admin Methodology Page
+- project data source mode
+- Combined Trade_Output_Sample.csv as unified bond/trade source
+- Optional issuer and MMD reference files from Intern_Muni_Data
+- Local DuckDB refresh for trade_output table
             """
         )
 
-if bond_file is None or not trade_files:
-    st.info("Upload a bond master file and at least one trade-history file to generate the dashboard.")
-    with st.expander("Expected file logic"):
-        st.write(
-            "The app standardizes CUSIP fields, merges trades to bonds, infers issuer from the bond master when possible, "
-            "and falls back to the trade filename as an issuer guess when no bond match exists."
-        )
+# -----------------------------------------------------------------------------
+# Local-readiness gate
+# -----------------------------------------------------------------------------
+trade_output_path = Path(trade_output_path_input).expanduser()
+reference_data_dir = Path(reference_data_dir_input).expanduser()
+
+section_anchor("file-readiness", "Project Data Readiness Check")
+
+if not trade_output_path.exists():
+    st.error(f"Required file not found: `{trade_output_path}`")
+    st.info("Put `Trade_Output_Sample.csv` in `data/processed/`, or adjust the path in the sidebar.")
     st.stop()
 
-bond_bytes = bond_file.getvalue()
-trade_payloads = [(f.name, f.getvalue()) for f in trade_files]
-issuer_mapping_payload = (issuer_mapping_file.name, issuer_mapping_file.getvalue()) if issuer_mapping_file else None
-mmd_payload = (mmd_file.name, mmd_file.getvalue()) if mmd_file else None
+if not reference_data_dir.exists():
+    st.warning(
+        f"Reference folder not found: `{reference_data_dir}`. The dashboard can still run, "
+        "but issuer mapping and MMD comparison may be unavailable."
+    )
 
-# -----------------------------------------------------------------------------
-# File-readiness gate: inspect the uploaded files before running full analytics.
-# -----------------------------------------------------------------------------
-section_anchor("file-readiness", "File Readiness Check")
-raw_bonds_preview = read_uploaded_file(io.BytesIO(bond_bytes), bond_file.name)
-bond_report = validate_dataset(raw_bonds_preview, bond_file.name, BOND_REQUIRED, BOND_RECOMMENDED, BOND_OPTIONAL)
-bond_warnings = validate_basic_values(raw_bonds_preview, bond_report["mapping"], dataset_type="bond")
-display_validation_report("Bond Master File", bond_report, bond_warnings)
+raw_combined_preview = _safe_read_local_file(trade_output_path)
 
-trade_reports = []
-trade_blocking_failures = []
-for trade_name, trade_bytes in trade_payloads:
-    try:
-        raw_trade_preview = read_uploaded_file(io.BytesIO(trade_bytes), trade_name)
-        report = validate_dataset(raw_trade_preview, trade_name, TRADE_REQUIRED, TRADE_RECOMMENDED, TRADE_OPTIONAL)
-        warnings = validate_basic_values(raw_trade_preview, report["mapping"], dataset_type="trade")
-        trade_reports.append(report)
-        display_validation_report(f"Trade File — {trade_name}", report, warnings)
-        if not report["can_run"]:
-            trade_blocking_failures.append(trade_name)
-    except Exception as exc:
-        st.error(f"Could not read trade file {trade_name}: {exc}")
-        trade_blocking_failures.append(trade_name)
+# In the combined trade-output architecture, the trade source is the only
+# true blocker. Bond/security metadata is informational because issuer,
+# maturity bucket, coupon, and other fields can often be inferred from
+# Security Description, Mty, Cpn, and optional reference files.
+bond_report = validate_dataset(
+    raw_combined_preview,
+    trade_output_path.name,
+    BOND_REQUIRED,
+    BOND_RECOMMENDED,
+    BOND_OPTIONAL,
+)
+bond_warnings = validate_basic_values(raw_combined_preview, bond_report["mapping"], dataset_type="bond")
 
-if not bond_report["can_run"] or trade_blocking_failures:
+trade_report = validate_dataset(
+    raw_combined_preview,
+    trade_output_path.name,
+    TRADE_REQUIRED,
+    TRADE_RECOMMENDED,
+    TRADE_OPTIONAL,
+)
+trade_warnings = validate_basic_values(raw_combined_preview, trade_report["mapping"], dataset_type="trade")
+
+# Trade source readiness remains required.
+display_validation_report("Combined File as Trade Source", trade_report, trade_warnings)
+
+if not trade_report["can_run"]:
     st.error(
-        "The dashboard cannot run yet because at least one required file is missing minimum fields. "
-        "Use the readiness tables above to rename/add columns, then upload again."
+        "The project-data dashboard cannot run yet because the combined file is missing required trade fields. "
+        "At minimum, it needs CUSIP, TD & Time/Trade Date, and YTW/Yield."
     )
     st.stop()
 
-if mmd_payload is not None:
-    try:
-        mmd_name, mmd_bytes = mmd_payload
-        raw_mmd_preview = read_uploaded_file(io.BytesIO(mmd_bytes), mmd_name)
-        mmd_report = validate_dataset(raw_mmd_preview, mmd_name, MMD_REQUIRED, MMD_RECOMMENDED, [])
-        display_validation_report("MMD Curve File", mmd_report)
-        if not mmd_report["can_run"]:
-            st.warning("MMD comparison will be skipped unless the MMD file has a date column.")
-    except Exception as exc:
-        st.warning(f"Could not validate MMD file. MMD comparison may be skipped: {exc}")
+# Bond/security metadata review is informational only.
+# A missing issuer column is acceptable if Security Description exists because
+# the flexible pipeline can derive issuer names from the description or clean
+# them with issuers.csv.
+issuer_can_be_derived = bool(
+    bond_report["mapping"].get("issuer")
+    or trade_report["mapping"].get("description")
+    or _find_column(raw_combined_preview, "description")
+)
+maturity_can_be_derived = bool(
+    bond_report["mapping"].get("maturity")
+    or trade_report["mapping"].get("maturity_trade")
+    or _find_column(raw_combined_preview, "maturity_trade")
+    or _find_column(raw_combined_preview, "maturity")
+)
 
-with st.expander("Methodology: how the app decides whether a file is usable", expanded=False):
+display_trade_centric_metadata_review(
+    "Bond / Security Metadata Review",
+    bond_report,
+    bond_warnings,
+    issuer_can_be_derived=issuer_can_be_derived,
+    maturity_can_be_derived=maturity_can_be_derived,
+)
+
+st.success(
+    "Running in flexible trade-centric mode. Issuer and bond metadata are inferred "
+    "from Security Description / reference files when available."
+)
+
+with st.expander("Methodology: project data mode", expanded=False):
     st.markdown(
         """
-- **Required fields** are the minimum fields needed for the dashboard to run.
-- **Recommended fields** improve liquidity, callable-bond, tax, and relative-value analysis, but missing them should not break the app.
-- **Column aliases** let the app recognize variants like `CUSIP9`, `Cusip`, or `CUSIP` as the same internal `cusip` field.
-- **Warnings** flag data-quality issues, but the app only stops when a required field is missing.
+- The dashboard no longer uses Streamlit upload boxes.
+- `Trade_Output_Sample.csv` is treated as the unified local source for bond/security metadata and trade history.
+- `issuers.csv` / `issuer_mapping.csv` and `mmd.csv` / `mmd_curve.csv` are optional reference files read from `Intern_Muni_Data`.
+- The app refreshes a local DuckDB table named `trade_output`, while the existing analytics engine continues to use standardized DataFrames downstream.
+- Real data stays outside GitHub by default.
         """
     )
 
@@ -1453,42 +2196,69 @@ with st.expander("Methodology: how the app decides whether a file is usable", ex
     mmd_df,
     failed_files,
     duplicates_removed,
-) = process_uploads(
-    bond_bytes=bond_bytes,
-    bond_name=bond_file.name,
-    trade_payloads=trade_payloads,
-    issuer_mapping_payload=issuer_mapping_payload,
-    mmd_payload=mmd_payload,
+    data_source_summary,
+) = process_local_desktop_data(
+    trade_output_path_str=str(trade_output_path_input),
+    reference_data_dir_str=str(reference_data_dir_input),
+    duckdb_path_str=str(duckdb_path_input),
 )
 
 # Normalize legacy tenor-style bucket labels into presentation-friendly curve sectors.
 # This keeps the dashboard compatible with existing data_utils output while making
 # the user-facing terminology clearer.
-for _df in [bonds_df, trades_df, market_df]:
-    if isinstance(_df, pd.DataFrame) and "maturity_bucket" in _df.columns:
-        _df["maturity_bucket"] = _df["maturity_bucket"].replace(MATURITY_BUCKET_RENAME)
+for _df_name, _df in [("bonds_df", bonds_df), ("trades_df", trades_df), ("market_df", market_df)]:
+    if isinstance(_df, pd.DataFrame):
+        _fixed = _add_required_optional_columns(_df)
+        if _df_name == "bonds_df":
+            bonds_df = _fixed
+        elif _df_name == "trades_df":
+            trades_df = _fixed
+        else:
+            market_df = _fixed
 
 if failed_files:
-    with st.warning("Some trade files failed to process."):
+    with st.warning("Some local reference files could not be processed."):
         st.write(failed_files)
 
+with st.expander("Local data source summary", expanded=False):
+    st.json(data_source_summary)
+
+# Reference-data QA: show issuer strings that were normalized but not mapped by issuers.csv.
+# This is designed as a maintenance queue: users can copy suggested rows into
+# issuers.csv over time to make the issuer universe cleaner.
+unmapped_issuer_review = build_unmapped_issuer_review_table(market_df)
+with st.expander("Unmapped issuer review table", expanded=False):
+    st.caption(
+        "Rows below were normalized from Security Description but did not match issuers.csv. "
+        "Add important names to issuers.csv with issuer_key, standard_issuer, sector, and primary_type to improve the dropdown."
+    )
+    if unmapped_issuer_review.empty:
+        st.success("All issuer keys are mapped, or no issuer_key field is available.")
+    else:
+        st.dataframe(unmapped_issuer_review.head(500), use_container_width=True, hide_index=True)
+        dataframe_download_button(
+            unmapped_issuer_review,
+            "Download unmapped issuer review CSV",
+            "unmapped_issuer_review.csv",
+        )
+
 if bonds_df.empty:
-    st.error("No usable bonds found. Please check that your bond master includes CUSIP and maturity fields.")
+    st.error("No usable bond/security rows found. Check that Trade_Output_Sample.csv includes CUSIP, issuer, and maturity fields.")
     st.stop()
 
 if market_df.empty:
-    st.error("No usable trade rows found. Please check that trade files include CUSIP and trade date fields.")
+    st.error("No usable trade rows found. Check that Trade_Output_Sample.csv includes CUSIP, trade date, and yield fields.")
     st.stop()
 
 uploaded_issuers = sorted(market_df["issuer"].dropna().astype(str).unique().tolist())
 
 if not uploaded_issuers:
-    st.error("No issuer names were detected from the uploaded files. Please check the issuer field in the bond master or trade filenames.")
+    st.error("No issuer names were detected from the local combined file. Please check the issuer field or issuer mapping file.")
     st.stop()
 
 st.success(
-    f"Processed {len(bonds_df):,} bonds and {len(market_df):,} merged trade rows "
-    f"from {len(trade_files):,} trade file(s). Detected {len(uploaded_issuers):,} issuer(s)."
+    f"Processed {len(bonds_df):,} bond/security rows and {len(market_df):,} merged trade rows "
+    f"from project data. Detected {len(uploaded_issuers):,} issuer(s)."
 )
 
 with st.sidebar:
@@ -6942,13 +7712,41 @@ else:
                     "recent_90d_trades", "days_since_last_trade", "total_trade_amount", "outstanding_amount",
                     "turnover_ratio", "maturity", "coupon", "avg_price",
                 ]
+                # Keep only existing columns and remove duplicates.
+                # In flexible trade-centric mode, rv_y_axis_col can equal a column
+                # already listed above (for example, liquidity_score). Duplicate
+                # column names make rv_display[c] return a DataFrame instead of a
+                # Series, which breaks pd.to_numeric().
                 display_cols = [c for c in display_cols if c in rv_summary.columns]
+                display_cols = list(dict.fromkeys(display_cols))
+
                 rv_display = rv_summary[display_cols].copy()
-                for c in ["liquidity_score", rv_y_axis_col, "avg_yield", "benchmark_yield", "turnover_ratio", "avg_price"]:
-                    if c in rv_display.columns:
+                rv_display = rv_display.loc[:, ~rv_display.columns.duplicated()].copy()
+
+                numeric_cols = [
+                    "liquidity_score",
+                    rv_y_axis_col,
+                    "avg_yield",
+                    "benchmark_yield",
+                    "turnover_ratio",
+                    "avg_price",
+                ]
+                numeric_cols = list(dict.fromkeys([c for c in numeric_cols if c in rv_display.columns]))
+
+                for c in numeric_cols:
+                    try:
                         rv_display[c] = pd.to_numeric(rv_display[c], errors="coerce").round(2)
+                    except Exception:
+                        # Leave problematic optional columns unchanged instead of
+                        # stopping the full dashboard.
+                        pass
+
+                sort_cols = [c for c in [rv_y_axis_col, "liquidity_score"] if c in rv_display.columns]
+                if sort_cols:
+                    rv_display = rv_display.sort_values(sort_cols, ascending=False)
+
                 st.dataframe(
-                    rv_display.sort_values([rv_y_axis_col, "liquidity_score"], ascending=False),
+                    rv_display,
                     use_container_width=True,
                     hide_index=True,
                     height=420,
