@@ -1433,6 +1433,7 @@ def _derive_issuer_from_description(desc: object) -> str:
         return "Unknown"
     upper = text.upper()
     cut_words = [
+        " CAP APPREC", " CAP APPRECIATION", " CAP APPN", " CAP APP", " CAB",
         " ELECTION", " REV", " REF", " SER", " SERIES", " BOND", " GO ",
         " TAXABLE", " UNLTD", " LTD", " 20", " 19",
     ]
@@ -1456,25 +1457,61 @@ def _derive_issuer_from_description(desc: object) -> str:
 # It makes the dashboard behave more like a real reference-data system.
 
 ISSUER_NOISE_PATTERNS = [
-    r"\bCAP(?:ITAL)?\s+APP(?:N|RECIATION)?\b.*$",
-    r"\bCAP\s+APPN\b.*$",
-    r"\bCAP\s+APP\b.*$",
+    # Capital-appreciation / CAB language should never define issuer identity.
+    r"\bCAP(?:ITAL)?\s+APP(?:REC|RECIATION|RECIATN|N)?\b.*$",
+    r"\bCAP\s+APP(?:REC|N)?\b.*$",
+    r"\bCAP\s+A\b.*$",
+    r"\bCAB(?:S)?\b.*$",
+    r"\bZERO\s+CPN\b.*$",
+    r"\bCURRENT\s+INT(?:EREST)?\b.*$",
+
+    # Series / refunding / security-structure descriptors.
     r"\bREF(?:UNDING)?\b.*$",
     r"\bREV(?:ENUE)?\b.*$",
     r"\bGO\b.*$",
+    r"\bG\s+O\b.*$",
     r"\bBDS?\b.*$",
     r"\bBONDS?\b.*$",
     r"\bSER(?:IES)?\s+[A-Z0-9\-]+\b.*$",
     r"\bSER(?:IES)?\b.*$",
+    r"\bISSUE\b.*$",
+    r"\bCERT(?:IFICATE)?S?\s+OF\s+PART(?:ICIPATION)?\b.*$",
+    r"\bCOP(?:S)?\b.*$",
+    r"\bLEASE\s+REV(?:ENUE)?\b.*$",
+
+    # Election / tax / measure / dating language.
     r"\bELECTION\b.*$",
     r"\bMEASURE\b.*$",
     r"\bTAXABLE\b.*$",
+    r"\bTAX\s+EXEMPT\b.*$",
     r"\bUNLTD\s+TAX\b.*$",
     r"\bLTD\s+TAX\b.*$",
     r"\bDATED\b.*$",
     r"\bDUE\b.*$",
+
+    # Dates / years usually indicate bond series or maturity metadata.
     r"\b\d{1,2}/\d{1,2}/\d{2,4}\b.*$",
     r"\b(?:19|20)\d{2}\b.*$",
+]
+
+ISSUER_ENTITY_TERMINALS = [
+    "SCHOOL DISTRICT",
+    "HIGH SCHOOL DISTRICT",
+    "UNIFIED SCHOOL DISTRICT",
+    "UNION SCHOOL DISTRICT",
+    "COMMUNITY COLLEGE DISTRICT",
+    "COLLEGE DISTRICT",
+    "WATER DISTRICT",
+    "IRRIGATION DISTRICT",
+    "SANITATION DISTRICT",
+    "UTILITY DISTRICT",
+    "DISTRICT",
+    "AUTHORITY",
+    "FINANCE AUTHORITY",
+    "FINANCING AUTHORITY",
+    "CITY",
+    "COUNTY",
+    "STATE",
 ]
 
 COMMON_ISSUER_ABBREVIATIONS = {
@@ -1527,6 +1564,26 @@ def normalize_issuer_key(value: object) -> str:
     tokens = [COMMON_ISSUER_ABBREVIATIONS.get(tok, tok) for tok in text.split()]
     text = " ".join(tokens)
     text = re.sub(r"\s+", " ", text).strip()
+
+    # Final canonicalization pass: after abbreviation expansion, remove any
+    # remaining bond-structure suffixes and trim fragments after recognized
+    # municipal entity endings. This collapses examples such as:
+    #   ACALANES CA UNION HIGH SCHOOL DISTRICT CAP APPREC
+    #   ACALANES CA UNION HIGH SCHOOL DISTRICT SERIES 2016
+    # into one issuer key.
+    for pattern in ISSUER_NOISE_PATTERNS:
+        text = re.sub(pattern, "", text).strip()
+
+    for terminal in sorted(ISSUER_ENTITY_TERMINALS, key=len, reverse=True):
+        idx = text.find(terminal)
+        if idx >= 0:
+            end = idx + len(terminal)
+            tail = text[end:].strip()
+            if not tail or re.search(r"\b(CAP|APP|APPREC|APPRECIATION|CAB|SER|SERIES|REF|REFUNDING|REV|BOND|BONDS|BDS|ELECTION|MEASURE|TAX|DATED|DUE|\d{4})\b", tail):
+                text = text[:end].strip()
+                break
+
+    text = re.sub(r"\s+", " ", text).strip(" -_/,")
     return text or "UNKNOWN"
 
 
