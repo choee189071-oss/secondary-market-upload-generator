@@ -1733,6 +1733,217 @@ def build_unmapped_issuer_review_table(market_df: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+
+def _unique_text_values(df: pd.DataFrame, column: str) -> list[str]:
+    """Return clean unique text values from a possibly duplicated column name."""
+    if df is None or df.empty or column not in df.columns:
+        return []
+    series_or_df = df.loc[:, column]
+    if isinstance(series_or_df, pd.DataFrame):
+        series = series_or_df.iloc[:, 0]
+    else:
+        series = series_or_df
+    values = (
+        series.dropna()
+        .astype(str)
+        .str.strip()
+        .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA, "Unknown": pd.NA, "UNKNOWN": pd.NA})
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    return sorted(set(values))
+
+
+def _load_existing_issuer_mapping(mapping_path: Path) -> pd.DataFrame:
+    """Load issuers.csv if it exists, otherwise create the expected schema."""
+    base_cols = ["raw_issuer", "issuer_key", "standard_issuer", "sector", "primary_type"]
+    if mapping_path.exists():
+        try:
+            existing = pd.read_csv(mapping_path)
+        except Exception:
+            existing = pd.DataFrame(columns=base_cols)
+    else:
+        existing = pd.DataFrame(columns=base_cols)
+
+    for col in base_cols:
+        if col not in existing.columns:
+            existing[col] = pd.NA
+    return existing
+
+
+def save_manual_issuer_merge_mapping(
+    mapping_path: Path,
+    selected_names: list[str],
+    canonical_issuer: str,
+    sector: str = "Unknown",
+    primary_type: str = "Unknown",
+) -> pd.DataFrame:
+    """Append manual issuer merge rows to issuers.csv.
+
+    The saved file becomes a reference-data table. On the next rerun, the issuer
+    normalization layer maps every selected raw/detected name to the canonical
+    issuer selected by the user.
+    """
+    mapping_path = Path(mapping_path)
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+
+    canonical_issuer = str(canonical_issuer).strip()
+    if not canonical_issuer:
+        raise ValueError("Canonical issuer name cannot be blank.")
+    if not selected_names:
+        raise ValueError("Select at least one issuer name to merge.")
+
+    sector = str(sector).strip() or "Unknown"
+    primary_type = str(primary_type).strip() or "Unknown"
+
+    new_rows = []
+    for raw_name in selected_names:
+        raw_name = str(raw_name).strip()
+        if not raw_name:
+            continue
+        new_rows.append(
+            {
+                "raw_issuer": raw_name,
+                "issuer_key": normalize_issuer_key(raw_name),
+                "standard_issuer": canonical_issuer,
+                "sector": sector,
+                "primary_type": primary_type,
+            }
+        )
+
+    if not new_rows:
+        raise ValueError("No valid issuer names were selected.")
+
+    existing = _load_existing_issuer_mapping(mapping_path)
+    updated = pd.concat([existing, pd.DataFrame(new_rows)], ignore_index=True)
+
+    # Keep the latest manual decision for each normalized issuer key.
+    updated["issuer_key"] = updated["issuer_key"].apply(normalize_issuer_key)
+    updated = updated.replace({"nan": pd.NA, "None": pd.NA, "": pd.NA})
+    updated = updated.dropna(subset=["issuer_key"])
+    updated = updated[updated["issuer_key"] != "UNKNOWN"]
+    updated = updated.drop_duplicates(subset=["issuer_key"], keep="last")
+    updated = updated.sort_values(["standard_issuer", "issuer_key"]).reset_index(drop=True)
+    updated.to_csv(mapping_path, index=False)
+    return updated
+
+
+def render_manual_issuer_merge_tool(
+    market_df: pd.DataFrame,
+    reference_data_dir: Path,
+):
+    """Render a Streamlit UI for manually merging detected issuer names.
+
+    This solves the unavoidable issuer-normalization problem: automated parsing
+    is helpful, but a human reviewer should be able to override entity mapping
+    and persist the result into issuers.csv.
+    """
+    mapping_path = Path(reference_data_dir) / "issuers.csv"
+
+    with st.expander("Manual Issuer Merge Tool", expanded=False):
+        st.markdown(
+            """
+Use this tool when several detected issuer names actually represent the same issuer.  
+Select the messy/raw names, enter one canonical display name, and save. The mapping is written to `data/processed/issuers.csv` and will apply after the app reruns.
+            """
+        )
+
+        if market_df is None or market_df.empty:
+            st.info("No market data is loaded yet.")
+            return
+
+        candidate_values = []
+        for col in ["raw_issuer", "issuer", "issuer_key"]:
+            candidate_values.extend(_unique_text_values(market_df, col))
+        candidate_values = sorted(set(candidate_values))
+
+        if not candidate_values:
+            st.info("No issuer candidates are available for manual merging.")
+            return
+
+        selected_names = st.multiselect(
+            "Select issuer names to merge",
+            candidate_values,
+            help="Choose every raw/detected issuer label that should collapse into one standard issuer.",
+        )
+
+        suggested_name = ""
+        if selected_names:
+            suggested_name = display_issuer_from_key(normalize_issuer_key(selected_names[0]))
+
+        canonical_issuer = st.text_input(
+            "Canonical issuer name",
+            value=suggested_name,
+            placeholder="e.g. Acalanes Union High School District",
+            help="This is the clean issuer name that will appear in the issuer dropdown.",
+        )
+
+        sector_values = ["Unknown"] + _unique_text_values(market_df, "sector")
+        sector_values = list(dict.fromkeys(sector_values))
+        sector = st.selectbox(
+            "Sector",
+            sector_values,
+            index=0,
+            help="Optional, but recommended for sector filtering and peer comparison.",
+        )
+
+        primary_type_values = ["Unknown"] + _unique_text_values(market_df, "primary_type")
+        primary_type_values = list(dict.fromkeys(primary_type_values))
+        primary_type = st.selectbox(
+            "Primary Type",
+            primary_type_values,
+            index=0,
+            help="Optional reference field. Leave Unknown if you do not need it yet.",
+        )
+
+        if selected_names:
+            preview = pd.DataFrame(
+                {
+                    "selected_name": selected_names,
+                    "issuer_key_to_save": [normalize_issuer_key(x) for x in selected_names],
+                    "standard_issuer_to_save": canonical_issuer,
+                    "sector_to_save": sector,
+                    "primary_type_to_save": primary_type,
+                }
+            )
+            st.caption("Preview of mapping rows to be saved")
+            st.dataframe(preview, use_container_width=True, hide_index=True)
+
+        save_col, file_col = st.columns([1, 2])
+        with save_col:
+            save_clicked = st.button("Save merge mapping", type="primary")
+        with file_col:
+            st.caption(f"Mapping file: `{mapping_path}`")
+
+        if save_clicked:
+            try:
+                updated_mapping = save_manual_issuer_merge_mapping(
+                    mapping_path=mapping_path,
+                    selected_names=selected_names,
+                    canonical_issuer=canonical_issuer,
+                    sector=sector,
+                    primary_type=primary_type,
+                )
+                st.success(
+                    f"Saved {len(selected_names)} selected name(s) into issuers.csv. "
+                    "The app will rerun and apply the merge now."
+                )
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save issuer merge mapping: {exc}")
+
+        if mapping_path.exists():
+            with st.expander("Current issuer mapping file preview", expanded=False):
+                try:
+                    current_mapping = pd.read_csv(mapping_path)
+                    st.dataframe(current_mapping.tail(300), use_container_width=True, hide_index=True)
+                    dataframe_download_button(current_mapping, "Download current issuers.csv", "issuers.csv")
+                except Exception as exc:
+                    st.warning(f"Could not preview issuers.csv: {exc}")
+
+
 def _assign_maturity_bucket_from_years(years: float | int | None) -> str:
     if pd.isna(years):
         return "Unknown"
@@ -2149,6 +2360,7 @@ Recent additions:
 - Combined Trade_Output_Sample.csv as unified bond/trade source
 - Optional issuer and MMD reference files from Intern_Muni_Data
 - Local DuckDB refresh for trade_output table
+- Manual Issuer Merge Tool for persistent issuer mapping overrides
             """
         )
 
@@ -2298,6 +2510,11 @@ with st.expander("Unmapped issuer review table", expanded=False):
             "Download unmapped issuer review CSV",
             "unmapped_issuer_review.csv",
         )
+
+
+# Manual reference-data override: let users merge messy issuer labels into one
+# canonical issuer without editing CSV files by hand.
+render_manual_issuer_merge_tool(market_df, reference_data_dir)
 
 if bonds_df.empty:
     st.error("No usable bond/security rows found. Check that Trade_Output_Sample.csv includes CUSIP, issuer, and maturity fields.")
