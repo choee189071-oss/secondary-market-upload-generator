@@ -3459,6 +3459,41 @@ else:
                                 st.plotly_chart(peer_heatmap_fig, use_container_width=True)
 
                                 st.subheader("3. Peer Ranking Table")
+
+                                # -------------------------------------------------------------
+                                # Peer ranking methodology
+                                # -------------------------------------------------------------
+                                # Average spread is a simple arithmetic average across maturity
+                                # buckets. Weighted average spread gives more influence to buckets
+                                # with larger uploaded trade amount / par volume.
+                                #
+                                # Spread-to-benchmark is calculated as:
+                                #   (Issuer average trade yield - benchmark yield) * 100
+                                # where yields are in percentage-point terms and the output is bps.
+                                # -------------------------------------------------------------
+
+                                def _weighted_avg_spread_by_amount(group: pd.DataFrame) -> float:
+                                    spreads = pd.to_numeric(group["spread_to_benchmark_bps"], errors="coerce")
+                                    weights = pd.to_numeric(group["total_trade_amount"], errors="coerce").fillna(0)
+                                    valid = spreads.notna() & weights.gt(0)
+                                    if valid.any():
+                                        return float((spreads[valid] * weights[valid]).sum() / weights[valid].sum())
+                                    return float(spreads.mean())
+
+                                weighted_spread = (
+                                    peer_summary.groupby("issuer")
+                                    .apply(_weighted_avg_spread_by_amount)
+                                    .reset_index(name="weighted_avg_spread_bps")
+                                )
+
+                                weight_basis = (
+                                    peer_summary.groupby("issuer", as_index=False)
+                                    .agg(weighted_trade_amount_used=("total_trade_amount", "sum"))
+                                )
+                                weight_basis["weighting_method"] = weight_basis["weighted_trade_amount_used"].apply(
+                                    lambda x: "Trade-amount weighted" if pd.notna(x) and x > 0 else "Unweighted fallback"
+                                )
+
                                 peer_rank = (
                                     peer_summary.groupby("issuer", as_index=False)
                                     .agg(
@@ -3468,19 +3503,79 @@ else:
                                         total_trade_amount=("total_trade_amount", "sum"),
                                         latest_trade=("latest_trade", "max"),
                                     )
-                                    .sort_values("avg_spread_bps", ascending=False)
+                                    .merge(weighted_spread, on="issuer", how="left")
+                                    .merge(weight_basis[["issuer", "weighting_method"]], on="issuer", how="left")
                                 )
-                                peer_rank["rank_by_avg_spread"] = range(1, len(peer_rank) + 1)
+
+                                peer_rank["rank_by_weighted_spread"] = (
+                                    peer_rank["weighted_avg_spread_bps"]
+                                    .rank(method="dense", ascending=False)
+                                    .astype(int)
+                                )
+                                peer_rank["rank_by_avg_spread"] = (
+                                    peer_rank["avg_spread_bps"]
+                                    .rank(method="dense", ascending=False)
+                                    .astype(int)
+                                )
+                                peer_rank = peer_rank.sort_values(
+                                    ["rank_by_weighted_spread", "rank_by_avg_spread", "issuer"],
+                                    ascending=[True, True, True],
+                                )
+
+                                with st.expander("Peer ranking methodology", expanded=False):
+                                    st.markdown(f"""
+### How the Peer Ranking Is Calculated
+
+This table ranks issuers by **weighted average spread-to-benchmark**, measured in basis points.
+
+**Spread-to-benchmark formula:**
+
+`Spread (bps) = (Issuer Average Trade Yield - Benchmark Yield) × 100`
+
+**Weighted average spread formula:**
+
+`Weighted Avg Spread = Σ(Spread × Trade Amount) / Σ(Trade Amount)`
+
+### Current Ranking Logic
+
+- Benchmark rating selected: **{peer_rating}**
+- Lookback window selected: **{peer_window_label}**
+- Maturity buckets included: selected peer maturity scope shown in this section
+- Issuers are ranked from **widest** to **tightest** based on `weighted_avg_spread_bps`
+- If trade amount is unavailable or zero, the dashboard falls back to the simple average spread
+
+### Interpretation
+
+- **Positive spread**: issuer is trading wider than the selected benchmark
+- **Negative spread**: issuer is trading tighter than the selected benchmark
+- **Higher rank**: wider screened spread, potentially more yield compensation versus benchmark
+
+### Important Caveats
+
+This is a **relative-value screening tool**, not a standalone trading recommendation. Rankings can be affected by:
+
+- Trade size and odd-lot effects
+- Liquidity differences across CUSIPs
+- Callable structures and coupon differences
+- Credit quality differences not fully captured by benchmark rating
+- Limited observations in the selected time window
+- Stale or uneven trading activity across issuers
+
+Use this ranking as a first-pass screen, then review the CUSIP-level drilldown and liquidity metrics before drawing trading conclusions.
+""")
 
                                 st.dataframe(
                                     peer_rank[
                                         [
+                                            "rank_by_weighted_spread",
                                             "rank_by_avg_spread",
                                             "issuer",
+                                            "weighted_avg_spread_bps",
                                             "avg_spread_bps",
                                             "max_spread_bps",
                                             "trade_count",
                                             "total_trade_amount",
+                                            "weighting_method",
                                             "latest_trade",
                                         ]
                                     ],
@@ -3493,10 +3588,11 @@ else:
                                     widest = peer_rank.iloc[0]
                                     tightest = peer_rank.iloc[-1]
                                     st.info(
-                                        f"Peer read-through: {widest['issuer']} screens widest on average "
-                                        f"at {widest['avg_spread_bps']:+.1f} bp versus {peer_rating}, while "
-                                        f"{tightest['issuer']} screens tightest at {tightest['avg_spread_bps']:+.1f} bp. "
-                                        f"Use this as a screening signal and review CUSIP-level liquidity before drawing trading conclusions."
+                                        f"Peer read-through: {widest['issuer']} screens widest on a trade-amount weighted basis "
+                                        f"at {widest['weighted_avg_spread_bps']:+.1f} bp versus {peer_rating}, while "
+                                        f"{tightest['issuer']} screens tightest at {tightest['weighted_avg_spread_bps']:+.1f} bp. "
+                                        f"The simple average spread is also shown for comparison. Use this as a screening signal "
+                                        f"and review CUSIP-level liquidity before drawing trading conclusions."
                                     )
 
                                 with st.expander("Peer comparison audit table", expanded=False):
