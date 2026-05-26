@@ -1445,6 +1445,43 @@ def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
     if "primary_type" not in out.columns:
         out["primary_type"] = pd.NA
 
+    # -------------------------------------------------------------------------
+    # Trade-only compatibility placeholders
+    # -------------------------------------------------------------------------
+    # The dashboard is now trade-first: bond/security reference fields are
+    # optional enrichment, not required inputs. Some legacy analytics sections
+    # still aggregate fields such as outstanding_amount, call_date, or lien.
+    # Creating placeholder columns prevents Pandas groupby().agg() from raising
+    # KeyError when users upload only MuniPro trade exports.
+    placeholder_defaults = {
+        "description": "",
+        "price": pd.NA,
+        "trade_amount": 0,
+        "coupon_bond": out["coupon_trade"] if "coupon_trade" in out.columns else pd.NA,
+        "maturity_bond": out["maturity"] if "maturity" in out.columns else pd.NaT,
+        "outstanding_amount": pd.NA,
+        "call_date": pd.NaT,
+        "call_price": pd.NA,
+        "lien": pd.NA,
+        "fed_tax": pd.NA,
+        "amt": pd.NA,
+        "secondary_credit": pd.NA,
+        "series": pd.NA,
+        "election": pd.NA,
+        "term": pd.NA,
+    }
+    for _col, _default in placeholder_defaults.items():
+        if _col not in out.columns:
+            out[_col] = _default
+
+    # Ensure placeholder numeric/date columns have stable dtypes.
+    for _num_col in ["price", "trade_amount", "outstanding_amount", "call_price"]:
+        if _num_col in out.columns:
+            out[_num_col] = pd.to_numeric(out[_num_col], errors="coerce")
+    for _date_col in ["maturity_bond", "call_date"]:
+        if _date_col in out.columns:
+            out[_date_col] = pd.to_datetime(out[_date_col], errors="coerce")
+
     return out
 
 
