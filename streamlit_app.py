@@ -324,6 +324,172 @@ LARGE_TABLE_ROW_THRESHOLD = 8
 LARGE_TABLE_COL_THRESHOLD = 8
 
 
+# =========================
+# Central Data Model + Defensive Schema Helpers
+# =========================
+# The dashboard accepts user-uploaded trade tapes, optional MMD curves, and optional
+# reference data. Different sections may call the same concept by different names
+# (for example maturity_bucket, maturity_year, maturity_zone, or bucket).  These
+# helpers create one central schema layer so chart code does not crash when a
+# column is renamed or omitted by an optional workflow.
+
+DATA_MODEL: dict[str, list[str]] = {
+    "issuer": ["issuer", "Issuer", "issuer_name", "obligor"],
+    "sector": ["sector", "Sector", "industry"],
+    "cusip": ["cusip", "CUSIP", "cusip9", "CUSIP9"],
+    "trade_date": ["trade_date", "Trade Date", "Trade Date/Time", "trade_datetime", "date", "Date"],
+    "maturity": ["maturity", "Maturity", "Maturity Date", "maturity_date", "maturity_trade"],
+    "maturity_bucket": ["maturity_bucket", "maturity_year", "maturity_zone", "bucket", "tenor", "Maturity Year"],
+    "maturity_year": ["maturity_year", "maturity_bucket", "Maturity Year", "tenor"],
+    "yield": ["yield", "Yield", "avg_yield", "issuer_yield", "current_avg_yield"],
+    "spread_bps": ["spread_to_benchmark_bps", "spread_bps", "current_spread_bps", "spread", "Spread"],
+    "benchmark_yield": ["benchmark_yield", "Index Rate", "index_rate"],
+    "benchmark_rating": ["benchmark_rating", "Benchmark Rating", "rating", "Rating"],
+    "liquidity_score": ["liquidity_score", "Liquidity Score"],
+    "trade_amount": ["trade_amount", "Trade Amount", "total_trade_amount", "volume"],
+    "trade_count": ["trade_count", "Trade Count", "recent_90d_trades"],
+    "peer_gap_bps": ["peer_gap_bps", "Peer Gap", "peer_gap"],
+    "rv_score": ["rv_score", "RV Score"],
+}
+
+
+def resolve_model_col(df: pd.DataFrame, concept: str, required: bool = False) -> str | None:
+    """Return the actual dataframe column for a central dashboard concept.
+
+    This is the main defensive-programming entry point. Chart code should ask for
+    a concept (for example "maturity_bucket") instead of hard-coding one possible
+    column name. If required=True, a clear KeyError is raised instead of a vague
+    pandas error later in the pipeline.
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        if required:
+            raise KeyError(f"No dataframe supplied while resolving required concept: {concept}")
+        return None
+    candidates = DATA_MODEL.get(concept, [concept])
+    exact = {str(c): c for c in df.columns}
+    lowered = {str(c).strip().lower(): c for c in df.columns}
+    for candidate in candidates:
+        if candidate in exact:
+            return exact[candidate]
+        key = str(candidate).strip().lower()
+        if key in lowered:
+            return lowered[key]
+    if required:
+        raise KeyError(f"Required concept '{concept}' not found. Available columns: {list(df.columns)}")
+    return None
+
+
+def coerce_maturity_label(value: object) -> str | pd.NA:
+    """Normalize maturity labels to dashboard labels such as 5Y or 13-20Y."""
+    if pd.isna(value):
+        return pd.NA
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "unknown"}:
+        return pd.NA
+    zone_values = {"1-3Y", "4-7Y", "8-12Y", "13-20Y", "21Y+"}
+    if text.upper() in {z.upper() for z in zone_values}:
+        return text.upper().replace("Y+", "Y+")
+    m = re.search(r"(\d{1,2})", text)
+    if m:
+        year = int(m.group(1))
+        max_year = globals().get("MAX_MATURITY_YEAR", 40)
+        if 1 <= year <= max_year:
+            return f"{year}Y"
+    return text
+
+
+def ensure_model_columns(df: pd.DataFrame, concepts: list[str] | None = None) -> pd.DataFrame:
+    """Return a copy with central model columns added when aliases exist.
+
+    This does not delete original columns. It only adds canonical columns such as
+    maturity_bucket, spread_to_benchmark_bps, and liquidity_score when the same
+    information exists under a different name.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame() if df is None else df
+    out = df.copy()
+    concepts = concepts or list(DATA_MODEL.keys())
+    canonical_map = {
+        "spread_bps": "spread_to_benchmark_bps",
+        "maturity_bucket": "maturity_bucket",
+        "maturity_year": "maturity_year",
+        "benchmark_rating": "benchmark_rating",
+        "liquidity_score": "liquidity_score",
+        "peer_gap_bps": "peer_gap_bps",
+        "rv_score": "rv_score",
+    }
+    for concept in concepts:
+        target = canonical_map.get(concept, concept)
+        if target in out.columns:
+            continue
+        src = resolve_model_col(out, concept, required=False)
+        if src is not None and src in out.columns:
+            out[target] = out[src]
+    if "maturity_bucket" in out.columns:
+        out["maturity_bucket"] = out["maturity_bucket"].apply(coerce_maturity_label)
+    return out
+
+
+def safe_melt_by_maturity(
+    df: pd.DataFrame,
+    value_name: str,
+    var_name: str = "benchmark_rating",
+    maturity_concept: str = "maturity_bucket",
+    value_vars: list[str] | None = None,
+) -> pd.DataFrame:
+    """Melt wide matrices defensively using the central maturity concept.
+
+    If the input index already contains maturity labels, this function promotes
+    the index into a maturity_bucket column. If no maturity column can be found,
+    it returns an empty dataframe rather than crashing the Streamlit app.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+
+    maturity_col = resolve_model_col(out, maturity_concept, required=False)
+    if maturity_col is None:
+        # Common case: a matrix has maturity labels as the index after reset_index.
+        index_name = out.index.name or "maturity_bucket"
+        out = out.reset_index().rename(columns={index_name: "maturity_bucket", "index": "maturity_bucket"})
+        maturity_col = resolve_model_col(out, maturity_concept, required=False)
+
+    if maturity_col is None or maturity_col not in out.columns:
+        return pd.DataFrame()
+
+    if maturity_col != "maturity_bucket":
+        out = out.rename(columns={maturity_col: "maturity_bucket"})
+        maturity_col = "maturity_bucket"
+    out["maturity_bucket"] = out["maturity_bucket"].apply(coerce_maturity_label)
+
+    if value_vars is None:
+        value_vars = [c for c in out.columns if c != maturity_col]
+    value_vars = [c for c in value_vars if c in out.columns and c != maturity_col]
+    if not value_vars:
+        return pd.DataFrame()
+
+    melted = out.melt(
+        id_vars=maturity_col,
+        value_vars=value_vars,
+        var_name=var_name,
+        value_name=value_name,
+    )
+    melted[value_name] = pd.to_numeric(melted[value_name], errors="coerce")
+    melted = melted.dropna(subset=[value_name, maturity_col])
+    return melted
+
+
+def safe_chart_df(df: pd.DataFrame, required_concepts: list[str], section_name: str = "chart") -> pd.DataFrame:
+    """Prepare chart dataframe and warn, not crash, if required concepts are absent."""
+    out = ensure_model_columns(df)
+    missing = [c for c in required_concepts if resolve_model_col(out, c, required=False) is None]
+    if missing:
+        st.warning(f"{section_name}: missing required data fields: {', '.join(missing)}. This section was skipped safely.")
+        return pd.DataFrame()
+    return out
+
+
 def _make_unique_columns(columns) -> list[str]:
     """Return unique, human-readable column names for Streamlit/Arrow display."""
     seen: dict[str, int] = {}
@@ -5112,36 +5278,41 @@ else:
             level_text = level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
 
             # 1) Spread level curve: one line per selected benchmark rating.
-            curve_df = level_matrix.reset_index().rename(columns={"index": "maturity_bucket"})
-            curve_long = curve_df.melt(
-                id_vars="maturity_bucket",
-                var_name="benchmark_rating",
+            # Defensive schema handling: level_matrix may have maturity labels as the index
+            # or under maturity_bucket/maturity_year depending on earlier transformations.
+            curve_df = level_matrix.copy()
+            curve_long = safe_melt_by_maturity(
+                curve_df,
                 value_name="spread_to_benchmark_bps",
-            ).dropna(subset=["spread_to_benchmark_bps"])
-            curve_long["maturity_bucket"] = pd.Categorical(
-                curve_long["maturity_bucket"],
-                categories=MATURITY_BUCKET_ORDER,
-                ordered=True,
+                var_name="benchmark_rating",
             )
-            curve_long = curve_long.sort_values(["benchmark_rating", "maturity_bucket"])
 
             st.subheader("1. Current Spread Curve")
-            level_curve_fig = px.line(
-                curve_long,
-                x="maturity_bucket",
-                y="spread_to_benchmark_bps",
-                color="benchmark_rating",
-                markers=True,
-                title=f"{selected_issuer} Current Spread Curve vs Selected Benchmarks",
-                labels={
-                    "maturity_bucket": "Maturity Year",
-                    "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
-                    "benchmark_rating": "Benchmark Curve",
-                },
-            )
-            level_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.5)
-            level_curve_fig.update_layout(hovermode="x unified")
-            safe_plotly_chart(level_curve_fig, width="stretch")
+            if curve_long.empty:
+                st.warning("Current Spread Curve skipped safely: no maturity field or benchmark spread values were available.")
+            else:
+                curve_long["maturity_bucket"] = pd.Categorical(
+                    curve_long["maturity_bucket"],
+                    categories=[b for b in MATURITY_BUCKET_ORDER if b in set(curve_long["maturity_bucket"].astype(str))],
+                    ordered=True,
+                )
+                curve_long = curve_long.sort_values(["benchmark_rating", "maturity_bucket"])
+                level_curve_fig = px.line(
+                    curve_long,
+                    x="maturity_bucket",
+                    y="spread_to_benchmark_bps",
+                    color="benchmark_rating",
+                    markers=True,
+                    title=f"{selected_issuer} Current Spread Curve vs Selected Benchmarks",
+                    labels={
+                        "maturity_bucket": "Maturity Year",
+                        "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
+                        "benchmark_rating": "Benchmark Curve",
+                    },
+                )
+                level_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.5)
+                level_curve_fig.update_layout(hovermode="x unified")
+                safe_plotly_chart(level_curve_fig, width="stretch")
 
             # 2) Spread level heatmap: maturity year x benchmark rating.
             st.subheader("2. Current Spread Level Heatmap")
