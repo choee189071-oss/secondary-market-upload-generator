@@ -450,7 +450,7 @@ def safe_melt_by_maturity(
 
     maturity_col = resolve_model_col(out, maturity_concept, required=False)
     if maturity_col is None:
-        # Common case: a matrix has maturity labels as the index after reset_index.
+        # Common case: a table has maturity labels as the index after reset_index.
         index_name = out.index.name or "maturity_bucket"
         out = out.reset_index().rename(columns={index_name: "maturity_bucket", "index": "maturity_bucket"})
         maturity_col = resolve_model_col(out, maturity_concept, required=False)
@@ -612,14 +612,14 @@ def safe_plotly_chart(fig, *args, **kwargs):
     return st.plotly_chart(fig, *args, **kwargs)
 
 
-def compact_heatmap_matrix_for_display(matrix: pd.DataFrame, max_rows: int | None = None) -> pd.DataFrame:
-    """Limit heatmap rows to the most informative non-empty maturity rows.
+def compact_ladder_table_for_display(table: pd.DataFrame, max_rows: int | None = None) -> pd.DataFrame:
+    """Limit ladder rows to the most informative non-empty maturity rows.
 
     Rows are ranked by maximum absolute movement so the chart stays readable.
     """
-    if matrix is None or matrix.empty:
-        return matrix
-    out = matrix.dropna(how="all").copy()
+    if table is None or table.empty:
+        return table
+    out = table.dropna(how="all").copy()
     if out.empty:
         return out
     max_rows = max_rows or MAX_HEATMAP_ROWS
@@ -653,7 +653,7 @@ MATURITY_ZONE_ORDER = ["1-3Y", "4-7Y", "8-12Y", "13-20Y", "21Y+"]
 def maturity_display_order(values: object) -> list[str]:
     """Return a stable maturity display order for annual buckets or maturity zones.
 
-    This prevents charts from going blank when a matrix has been aggregated from
+    This prevents charts from going blank when a table has been aggregated from
     1Y/2Y/... into 1-3Y/4-7Y/... zones. Previously some charts forced
     MATURITY_BUCKET_ORDER only, which converted zone labels into NaN categories.
     """
@@ -734,11 +734,11 @@ def curve_data_audit(df: pd.DataFrame, required_cols: list[str] | None = None) -
     return pd.DataFrame(rows)
 
 
-def aggregate_maturity_rows_for_display(matrix: pd.DataFrame, agg: str = "median") -> pd.DataFrame:
-    """Aggregate heatmap rows from 1Y..40Y into readable maturity zones."""
-    if matrix is None or matrix.empty:
-        return matrix
-    out = matrix.dropna(how="all").copy()
+def aggregate_maturity_rows_for_display(table: pd.DataFrame, agg: str = "median") -> pd.DataFrame:
+    """Aggregate ladder rows from 1Y..40Y into readable maturity zones."""
+    if table is None or table.empty:
+        return table
+    out = table.dropna(how="all").copy()
     if out.empty:
         return out
     out["__maturity_zone__"] = [maturity_zone_label(idx) for idx in out.index]
@@ -747,11 +747,11 @@ def aggregate_maturity_rows_for_display(matrix: pd.DataFrame, agg: str = "median
     return grouped
 
 
-def aggregate_maturity_columns_for_display(matrix: pd.DataFrame, agg: str = "median") -> pd.DataFrame:
-    """Aggregate heatmap columns from 1Y..40Y into readable maturity zones."""
-    if matrix is None or matrix.empty:
-        return matrix
-    out = matrix.dropna(how="all").copy()
+def aggregate_maturity_columns_for_display(table: pd.DataFrame, agg: str = "median") -> pd.DataFrame:
+    """Aggregate ladder columns from 1Y..40Y into readable maturity zones."""
+    if table is None or table.empty:
+        return table
+    out = table.dropna(how="all").copy()
     if out.empty:
         return out
     zone_map = {col: maturity_zone_label(col) for col in out.columns}
@@ -934,7 +934,7 @@ Trade Date/Time, Description, Coupon, Price, Trade Amount, Index, Index Rate, Sp
 <ol style='margin-top:2px; margin-bottom:6px;'>
 <li><b>Desk Market Snapshot</b>: spread trend, trading volume, curve snapshot, and top movers.</li>
 <li><b>Issuer Curve vs Benchmark</b>: where the issuer curve sits versus the active benchmark.</li>
-<li><b>Spread Movement Heatmap</b>: use as a drilldown, not the first page.</li>
+<li><b>Spread Movement Ladder</b>: use as a drilldown, not the first page.</li>
 <li><b>Liquidity / Trading Frequency</b>: confirm whether the signal is supported by enough trading activity.</li>
 <li><b>CUSIP Drilldown / Screener</b>: investigate specific bonds after the high-level view.</li>
 </ol>
@@ -1082,7 +1082,7 @@ def observed_maturity_years(
 ) -> list[str]:
     """Return only maturity years that actually exist in the data.
 
-    This prevents heatmaps/charts from showing empty 1Y..40Y rows.
+    This prevents ladders/charts from showing empty 1Y..40Y rows.
     Set min_observations > 1 when a chart should suppress noisy one-off tenors.
     """
     if df is None or df.empty or bucket_col not in df.columns:
@@ -1098,11 +1098,11 @@ def observed_maturity_years(
     return sorted(valid, key=maturity_year_sort_key)
 
 
-def compact_maturity_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
+def compact_maturity_table(table: pd.DataFrame) -> pd.DataFrame:
     """Drop all-empty maturity rows and sort annual maturity labels numerically."""
-    if matrix is None or matrix.empty:
-        return matrix
-    out = matrix.dropna(how="all")
+    if table is None or table.empty:
+        return table
+    out = table.dropna(how="all")
     if out.empty:
         return out
     return out.loc[sorted(out.index, key=maturity_year_sort_key)]
@@ -1358,11 +1358,11 @@ def build_spread_observations(
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def build_spread_movement_heatmap_data(
+def build_spread_movement_ladder_data(
     spread_obs: pd.DataFrame,
     windows: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return heatmap matrix and audit table for spread movement.
+    """Return ladder table and audit table for spread movement.
 
     For each maturity year and lookback window:
     Spread movement = latest available spread - historical spread at/before target date.
@@ -1382,7 +1382,7 @@ def build_spread_movement_heatmap_data(
     obs = obs.dropna(subset=["trade_date", "spread_to_benchmark_bps", "maturity_bucket"])
 
     maturity_order = observed_maturity_years(obs, min_observations=1)
-    matrix = pd.DataFrame(index=maturity_order, columns=list(windows.keys()), dtype="float")
+    table = pd.DataFrame(index=maturity_order, columns=list(windows.keys()), dtype="float")
 
     for bucket in maturity_order:
         bucket_obs = obs[obs["maturity_bucket"] == bucket].sort_values("trade_date")
@@ -1416,7 +1416,7 @@ def build_spread_movement_heatmap_data(
             historical_date = historical_row["trade_date"]
             historical_spread = historical_row["spread_to_benchmark_bps"]
             movement = latest_spread - historical_spread
-            matrix.loc[bucket, label] = movement
+            table.loc[bucket, label] = movement
             audit_rows.append(
                 {
                     "maturity_bucket": bucket,
@@ -1431,7 +1431,7 @@ def build_spread_movement_heatmap_data(
                 }
             )
 
-    return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
+    return compact_maturity_table(table), pd.DataFrame(audit_rows)
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
@@ -1441,7 +1441,7 @@ def build_spread_level_data(
     issuer: str,
     ratings: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return current spread level matrix and audit table.
+    """Return current spread level table and audit table.
 
     Matrix rows are maturity years; columns are benchmark ratings.
     Each cell is the latest available issuer spread to that benchmark, in bps:
@@ -1452,11 +1452,11 @@ def build_spread_level_data(
     """
     maturity_order = observed_maturity_years(market_df, min_observations=1) or MATURITY_BUCKET_ORDER
     clean_ratings = [r for r in ratings if r in BENCHMARK_RATINGS]
-    matrix = pd.DataFrame(index=maturity_order, columns=clean_ratings, dtype="float")
+    table = pd.DataFrame(index=maturity_order, columns=clean_ratings, dtype="float")
     audit_rows: list[dict] = []
 
     if not clean_ratings or market_df.empty or mmd_df.empty:
-        return matrix, pd.DataFrame(audit_rows)
+        return table, pd.DataFrame(audit_rows)
 
     for rating in clean_ratings:
         spread_obs = build_spread_observations(
@@ -1496,7 +1496,7 @@ def build_spread_level_data(
 
             latest = bucket_obs.iloc[-1]
             spread_level = latest["spread_to_benchmark_bps"]
-            matrix.loc[bucket, rating] = spread_level
+            table.loc[bucket, rating] = spread_level
             audit_rows.append(
                 {
                     "maturity_bucket": bucket,
@@ -1515,7 +1515,7 @@ def build_spread_level_data(
                 }
             )
 
-    return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
+    return compact_maturity_table(table), pd.DataFrame(audit_rows)
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
@@ -2365,7 +2365,7 @@ with st.sidebar:
     PERFORMANCE_MODE = st.checkbox(
         "Fast mode",
         value=True,
-        help="Caches heavy calculations, limits displayed rows, and keeps heatmaps readable.",
+        help="Caches heavy calculations, limits displayed rows, and keeps ladders readable.",
     )
     MAX_TABLE_ROWS = st.number_input(
         "Max table rows shown",
@@ -2376,7 +2376,7 @@ with st.sidebar:
         help="Only limits displayed tables; underlying analytics still use the full filtered dataset.",
     )
     MAX_HEATMAP_ROWS = st.slider(
-        "Max heatmap maturity rows",
+        "Max ladder maturity rows",
         min_value=8,
         max_value=40,
         value=18,
@@ -2665,26 +2665,51 @@ This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... 
     )
 
     # -----------------------------------------------------------------------------
-    # Optional Trade Date Filter
+    # Snapshot / Chart Period Selector
     # -----------------------------------------------------------------------------
-    trade_date_filter_enabled = st.checkbox(
-        "Apply Trade Date Filter",
-        value=False,
-        help="Optional. Leave off when your uploaded trade file is already limited to the target period, such as 2024–2026.",
-    )
     selected_trade_date_range = None
-    if trade_date_filter_enabled and "trade_date" in market_df.columns:
+    trade_date_filter_enabled = False
+    snapshot_period = st.selectbox(
+        "Snapshot / Chart Period",
+        ["All", "Last 3M", "Last 6M", "Last 1Y", "YTD", "Custom"],
+        index=3,
+        help="Controls the first two desk snapshot charts and downstream trade-date filtered views. Filters by trade date, not maturity date.",
+    )
+    if "trade_date" in market_df.columns:
         _trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
         if not _trade_dates.empty:
-            _min_date = _trade_dates.min().date()
-            _max_date = _trade_dates.max().date()
-            selected_trade_date_range = st.date_input(
-                "Trade Date Range",
-                value=(_min_date, _max_date),
-                min_value=_min_date,
-                max_value=_max_date,
-                help="Filters by trade date, not maturity date.",
-            )
+            _min_ts = _trade_dates.min().normalize()
+            _max_ts = _trade_dates.max().normalize()
+            _min_date = _min_ts.date()
+            _max_date = _max_ts.date()
+            if snapshot_period == "All":
+                trade_date_filter_enabled = False
+                selected_trade_date_range = None
+            elif snapshot_period == "Custom":
+                trade_date_filter_enabled = True
+                selected_trade_date_range = st.date_input(
+                    "Custom Trade Date Range",
+                    value=(_min_date, _max_date),
+                    min_value=_min_date,
+                    max_value=_max_date,
+                    help="Choose the exact trade-date period to show in the spread and volume snapshot charts.",
+                )
+            else:
+                trade_date_filter_enabled = True
+                if snapshot_period == "Last 3M":
+                    _start_ts = max(_min_ts, _max_ts - pd.DateOffset(months=3))
+                elif snapshot_period == "Last 6M":
+                    _start_ts = max(_min_ts, _max_ts - pd.DateOffset(months=6))
+                elif snapshot_period == "Last 1Y":
+                    _start_ts = max(_min_ts, _max_ts - pd.DateOffset(years=1))
+                elif snapshot_period == "YTD":
+                    _start_ts = max(_min_ts, pd.Timestamp(year=_max_ts.year, month=1, day=1))
+                else:
+                    _start_ts = _min_ts
+                selected_trade_date_range = (_start_ts.date(), _max_date)
+                st.caption(f"Active period: {_start_ts:%m/%d/%Y} → {_max_ts:%m/%d/%Y}")
+    else:
+        st.caption("Snapshot period unavailable until trade dates are loaded.")
     # Keep legacy variable available for older downstream chart blocks.
     maturity_bucket = selected_maturity_year
 
@@ -2720,7 +2745,7 @@ Useful for:
 <a href="#yield-relative-value">1. Secondary Market Spreads</a><br>
 <a href="#trading-volume">2. Secondary Market Trading Volume</a><br>
 <a href="#issuer-curve">3. Issuer Curve vs Benchmark</a><br>
-<a href="#spread-movement">4. Spread Movement Heatmap</a><br>
+<a href="#spread-movement">4. Spread Movement Ladder</a><br>
 <a href="#liquidity">5. Liquidity / Trading Frequency</a><br>
 <a href="#cusip-drilldown">6. CUSIP Drilldown</a><br>
 <a href="#security-screener">7. Security Screener</a><br><br>
@@ -2728,7 +2753,7 @@ Useful for:
 <b>Relative Value Research</b><br>
 <a href="#peer-rv">8. Peer RV Comparison</a><br>
 <a href="#cross-issuer-rv">9. Cross-Issuer RV Analytics</a><br>
-<a href="#spread-level">10. Current Spread Level</a><br>
+<a href="#spread-level">10. Current Spread Curve</a><br>
 <a href="#spread-attribution">11. Spread Attribution</a><br>
 <a href="#historical-spread">12. Historical Spread Percentile</a><br>
 <a href="#curve-shape">13. Curve Shape Analytics</a><br><br>
@@ -3461,11 +3486,11 @@ else:
 
 
 
-section_anchor("spread-movement", "Spread Movement Heatmap")
-with st.expander("Methodology: spread movement heatmap", expanded=False):
+section_anchor("spread-movement", "Spread Movement Ladder")
+with st.expander("Methodology: spread movement ladder", expanded=False):
     st.markdown(
         """
-This heatmap shows whether the selected issuer has become richer or cheaper versus the selected benchmark curve.
+This section replaces the old ladder with a desk-readable **ranked ladder**.
 
 **Calculation:**
 
@@ -3475,80 +3500,96 @@ This heatmap shows whether the selected issuer has become richer or cheaper vers
 
 **How to read it:**
 
-- **Positive / red = widening**: issuer spread increased versus the benchmark; the issuer/bucket became cheaper or underperformed.
-- **Negative / green = tightening**: issuer spread decreased versus the benchmark; the issuer/bucket became richer or outperformed.
-- Rows are maturity years. Columns are lookback windows.
-- Because municipal bonds can trade sparsely, the historical value uses the latest available observation at or before the lookback target date.
+- Positive = widening / cheaper versus the benchmark.
+- Negative = tightening / richer versus the benchmark.
+- The chart ranks the largest absolute movers first so the signal is visible without reading a dense grid.
         """
     )
 
 if mmd_df.empty:
-    st.info("Upload an MMD curve file to enable the spread movement heatmap.")
+    st.info("Upload or enable a benchmark source to calculate spread movement ladders.")
 else:
-    heatmap_col1, heatmap_col2 = st.columns([1, 2])
-    with heatmap_col1:
-        heatmap_rating = st.selectbox(
-            "Heatmap Benchmark Curve",
+    ladder_col1, ladder_col2 = st.columns([1, 2])
+    with ladder_col1:
+        movement_rating = st.selectbox(
+            "Movement Benchmark Curve",
             BENCHMARK_RATINGS,
-            index=BENCHMARK_RATINGS.index("AAA") if "AAA" in BENCHMARK_RATINGS else 0,
-            help="Priority: uploaded rating curve columns first; otherwise MMD/AAA plus the visible rating-spread assumptions.",
+            index=0,
+            key="movement_ladder_rating",
         )
-    with heatmap_col2:
-        st.caption(
-            "Cells show change in spread, in basis points, from the latest available observation to each lookback window."
+    with ladder_col2:
+        movement_window = st.selectbox(
+            "Lookback Window",
+            ["1W", "1M", "3M", "6M", "1Y"],
+            index=2,
+            help="Ranks maturity years by spread movement over the selected lookback window.",
         )
 
-    heatmap_spread_obs = build_spread_observations(
+    movement_spread_obs = build_spread_observations(
         market_df=market_df,
         mmd_df=mmd_df,
         issuer=selected_issuer,
-        rating=heatmap_rating,
+        rating=movement_rating,
     )
-
-    if heatmap_spread_obs.empty:
-        st.warning(
-            "No overlapping issuer trade dates and benchmark dates were found for the heatmap. "
-            "Check that the curve file has a Date column plus either 5Y/10Y/20Y/30Y base columns or explicit rating curve columns such as AA_10Y, and that trade dates overlap with the curve history."
+    if movement_spread_obs.empty:
+        st.info(
+            "No overlapping issuer trade dates and benchmark dates were found for the spread movement ladder. "
+            "Check whether the uploaded benchmark file covers the same dates as the trade data."
         )
     else:
-        heatmap_matrix, heatmap_audit = build_spread_movement_heatmap_data(heatmap_spread_obs)
-        if heatmap_matrix.empty or heatmap_matrix.isna().all().all():
-            st.info("Not enough historical spread observations to calculate movement across the selected windows yet.")
+        movement_table, movement_audit = build_spread_movement_ladder_data(movement_spread_obs)
+        if movement_table.empty or movement_table.isna().all().all() or movement_window not in movement_table.columns:
+            st.info("No spread movement observations are available for the selected lookback window.")
         else:
-            heatmap_matrix = aggregate_maturity_rows_for_display(heatmap_matrix) if len(heatmap_matrix.index) > 10 else heatmap_matrix
-            heatmap_text = heatmap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
-            heatmap_fig = px.imshow(
-                heatmap_matrix.astype(float),
-                x=heatmap_matrix.columns,
-                y=heatmap_matrix.index,
-                color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
-                color_continuous_midpoint=0,
-                aspect="auto",
-                title=f"{selected_issuer} Spread Movement vs {heatmap_rating} Curve",
-                labels={"x": "Lookback Window", "y": "Maturity Year", "color": "Spread Movement (bps)"},
+            ladder_df = movement_table[[movement_window]].reset_index().rename(
+                columns={"index": "maturity_bucket", movement_window: "spread_movement_bps"}
             )
-            heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
-            heatmap_height = max(320, min(760, 110 + 38 * len(heatmap_matrix.index)))
-            heatmap_fig.update_layout(height=heatmap_height)
-            safe_plotly_chart(heatmap_fig, width="stretch")
+            if "maturity_bucket" not in ladder_df.columns:
+                ladder_df = ladder_df.rename(columns={ladder_df.columns[0]: "maturity_bucket"})
+            ladder_df["spread_movement_bps"] = pd.to_numeric(ladder_df["spread_movement_bps"], errors="coerce")
+            ladder_df = ladder_df.dropna(subset=["spread_movement_bps"]).copy()
+            ladder_df["abs_movement_bps"] = ladder_df["spread_movement_bps"].abs()
+            ladder_df["maturity_zone"] = ladder_df["maturity_bucket"].apply(maturity_zone_label)
+            ladder_df["signal"] = np.where(ladder_df["spread_movement_bps"] >= 0, "Widened / Cheaper", "Tightened / Richer")
+            ladder_df = ladder_df.sort_values("abs_movement_bps", ascending=False).head(15)
 
-            latest_obs_date = heatmap_spread_obs["trade_date"].max()
-            st.caption(
-                f"Latest available spread observation used: {latest_obs_date.strftime('%Y-%m-%d')}. "
-                "Positive values indicate spread widening; negative values indicate spread tightening."
-            )
+            if ladder_df.empty:
+                st.info("No valid spread movement values after filtering.")
+            else:
+                movement_fig = px.bar(
+                    ladder_df.sort_values("spread_movement_bps"),
+                    x="spread_movement_bps",
+                    y="maturity_bucket",
+                    orientation="h",
+                    color="signal",
+                    hover_data=["maturity_zone", "abs_movement_bps"],
+                    title=f"{selected_issuer} Largest Spread Movers vs {movement_rating} ({movement_window})",
+                    labels={
+                        "spread_movement_bps": "Spread Movement (bps)",
+                        "maturity_bucket": "Maturity Year",
+                        "signal": "Signal",
+                    },
+                )
+                movement_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
+                movement_fig.update_layout(height=max(420, 28 * len(ladder_df) + 160), legend_title_text="Direction")
+                safe_plotly_chart(movement_fig, width="stretch")
 
-            with st.expander("Heatmap calculation audit table", expanded=False):
-                display_cols = [
-                    "maturity_bucket", "window", "latest_date", "latest_spread_bps", "target_date",
-                    "historical_date", "historical_spread_bps", "spread_movement_bps", "note",
-                ]
-                audit_display = heatmap_audit[[c for c in display_cols if c in heatmap_audit.columns]].copy()
-                for c in ["latest_spread_bps", "historical_spread_bps", "spread_movement_bps"]:
-                    if c in audit_display.columns:
-                        audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
-                safe_dataframe(audit_display, width="stretch", hide_index=True)
+                top_move = ladder_df.iloc[0]
+                st.info(
+                    f"Largest {movement_window} move: {top_move['maturity_bucket']} "
+                    f"moved {top_move['spread_movement_bps']:+.1f} bps vs {movement_rating}."
+                )
 
+                with st.expander("Movement calculation audit table", expanded=False):
+                    display_cols = [
+                        "maturity_bucket", "window", "latest_date", "latest_spread_bps",
+                        "target_date", "historical_date", "historical_spread_bps", "spread_movement_bps", "note",
+                    ]
+                    audit_display = movement_audit[[c for c in display_cols if c in movement_audit.columns]].copy()
+                    for c in ["latest_spread_bps", "historical_spread_bps", "spread_movement_bps"]:
+                        if c in audit_display.columns:
+                            audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
+                    safe_dataframe(audit_display, width="stretch", hide_index=True)
 
 
 section_anchor("liquidity", "Liquidity / Trading Frequency Analysis")
@@ -4710,36 +4751,34 @@ else:
                                 peer_curve_fig.update_layout(height=520, hovermode="x unified")
                                 safe_plotly_chart(peer_curve_fig, width="stretch")
 
-                                st.subheader("2. Peer Spread Heatmap")
-                                peer_matrix = peer_summary.pivot_table(
-                                    index="issuer",
-                                    columns="maturity_bucket",
-                                    values="spread_to_benchmark_bps",
-                                    aggfunc="mean",
-                                    observed=False,
-                                ).reindex(columns=maturity_order)
-                                peer_text = peer_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
-                                peer_heatmap_fig = px.imshow(
-                                    peer_matrix.astype(float),
-                                    x=peer_matrix.columns.astype(str),
-                                    y=peer_matrix.index.astype(str),
-                                    color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
-                                    color_continuous_midpoint=0,
-                                    aspect="auto",
-                                    title=f"Peer Spread Heatmap vs {peer_rating}",
-                                    labels={
-                                        "x": "Maturity Year",
-                                        "y": "Issuer",
-                                        "color": "Spread (bps)",
-                                    },
-                                )
-                                peer_heatmap_fig.update_traces(
-                                    text=peer_text.values,
-                                    texttemplate="%{text}",
-                                    hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
-                                )
-                                peer_heatmap_fig.update_layout(height=max(380, 70 * len(peer_matrix.index)))
-                                safe_plotly_chart(peer_heatmap_fig, width="stretch")
+                                st.subheader("2. Peer Spread Ladder")
+                                peer_ladder = peer_summary.copy()
+                                peer_ladder["spread_to_benchmark_bps"] = pd.to_numeric(peer_ladder["spread_to_benchmark_bps"], errors="coerce")
+                                peer_ladder = peer_ladder.dropna(subset=["spread_to_benchmark_bps"]).copy()
+                                if peer_ladder.empty:
+                                    st.info("No peer spread values available for the ladder view.")
+                                else:
+                                    peer_ladder["security_bucket"] = peer_ladder["issuer"].astype(str) + " " + peer_ladder["maturity_bucket"].astype(str)
+                                    peer_ladder["abs_spread_bps"] = peer_ladder["spread_to_benchmark_bps"].abs()
+                                    peer_ladder["maturity_zone"] = peer_ladder["maturity_bucket"].apply(maturity_zone_label)
+                                    peer_ladder = peer_ladder.sort_values("abs_spread_bps", ascending=False).head(20)
+                                    peer_ladder_fig = px.bar(
+                                        peer_ladder.sort_values("spread_to_benchmark_bps"),
+                                        x="spread_to_benchmark_bps",
+                                        y="security_bucket",
+                                        orientation="h",
+                                        color="issuer",
+                                        hover_data=["maturity_zone", "avg_yield", "benchmark_yield", "trade_count", "total_trade_amount"],
+                                        title=f"Largest Peer Spreads vs {peer_rating}",
+                                        labels={
+                                            "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
+                                            "security_bucket": "Issuer / Maturity",
+                                            "issuer": "Issuer",
+                                        },
+                                    )
+                                    peer_ladder_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
+                                    peer_ladder_fig.update_layout(height=max(420, 28 * len(peer_ladder) + 160), legend_title_text="Issuer")
+                                    safe_plotly_chart(peer_ladder_fig, width="stretch")
 
                                 st.subheader("3. Peer Ranking Table")
 
@@ -5145,38 +5184,34 @@ else:
 
                                     xrv_summary["x_issuer_signal"] = xrv_summary.apply(classify_xrv, axis=1)
 
-                                    st.subheader("1. Peer Gap Matrix")
-                                    maturity_order = MATURITY_BUCKET_ORDER
-                                    gap_matrix = xrv_summary.pivot_table(
-                                        index="issuer",
-                                        columns="maturity_bucket",
-                                        values="peer_gap_bps",
-                                        aggfunc="mean",
-                                        observed=False,
-                                    ).reindex(columns=maturity_order)
-                                    gap_matrix = aggregate_maturity_columns_for_display(gap_matrix) if len(gap_matrix.columns) > 10 else gap_matrix
-                                    gap_text = gap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
-                                    gap_fig = px.imshow(
-                                        gap_matrix.astype(float),
-                                        x=gap_matrix.columns.astype(str),
-                                        y=gap_matrix.index.astype(str),
-                                        color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
-                                        color_continuous_midpoint=0,
-                                        aspect="auto",
-                                        title=f"Peer Gap Matrix vs {xrv_rating} Benchmark",
-                                        labels={
-                                            "x": "Maturity Year",
-                                            "y": "Issuer",
-                                            "color": "Peer Gap (bps)",
-                                        },
-                                    )
-                                    gap_fig.update_traces(
-                                        text=gap_text.values,
-                                        texttemplate="%{text}",
-                                        hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Peer Gap=%{z:.1f} bp<extra></extra>",
-                                    )
-                                    gap_fig.update_layout(height=max(390, 72 * len(gap_matrix.index)))
-                                    safe_plotly_chart(gap_fig, width="stretch")
+                                    st.subheader("1. Peer Gap Ladder")
+                                    gap_ladder = xrv_summary.copy()
+                                    gap_ladder["peer_gap_bps"] = pd.to_numeric(gap_ladder["peer_gap_bps"], errors="coerce")
+                                    gap_ladder = gap_ladder.dropna(subset=["peer_gap_bps"]).copy()
+                                    if gap_ladder.empty:
+                                        st.info("No peer-gap values available for the ladder view.")
+                                    else:
+                                        gap_ladder["issuer_bucket"] = gap_ladder["issuer"].astype(str) + " " + gap_ladder["maturity_bucket"].astype(str)
+                                        gap_ladder["abs_peer_gap_bps"] = gap_ladder["peer_gap_bps"].abs()
+                                        gap_ladder["maturity_zone"] = gap_ladder["maturity_bucket"].apply(maturity_zone_label)
+                                        gap_ladder = gap_ladder.sort_values("abs_peer_gap_bps", ascending=False).head(20)
+                                        gap_fig = px.bar(
+                                            gap_ladder.sort_values("peer_gap_bps"),
+                                            x="peer_gap_bps",
+                                            y="issuer_bucket",
+                                            orientation="h",
+                                            color="issuer",
+                                            hover_data=["maturity_zone", "spread_to_benchmark_bps", "bucket_peer_median_bps", "liquidity_score"],
+                                            title=f"Largest Peer Gaps vs {xrv_rating} Benchmark",
+                                            labels={
+                                                "peer_gap_bps": "Peer Gap (bps)",
+                                                "issuer_bucket": "Issuer / Maturity",
+                                                "issuer": "Issuer",
+                                            },
+                                        )
+                                        gap_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
+                                        gap_fig.update_layout(height=max(420, 28 * len(gap_ladder) + 160), legend_title_text="Issuer")
+                                        safe_plotly_chart(gap_fig, width="stretch")
 
                                     st.subheader("2. Cross-Issuer RV Ranking")
                                     ranking = xrv_summary.sort_values("x_issuer_rv_score", ascending=False, na_position="last").copy()
@@ -5346,25 +5381,25 @@ else:
     if not level_ratings:
         st.info("Select at least one benchmark curve to display current spread levels.")
     else:
-        level_matrix, level_audit = build_spread_level_data(
+        level_table, level_audit = build_spread_level_data(
             market_df=market_df,
             mmd_df=mmd_df,
             issuer=selected_issuer,
             ratings=level_ratings,
         )
-        if level_matrix.isna().all().all():
+        if level_table.isna().all().all():
             st.warning(
                 "No overlapping issuer trade dates and benchmark dates were found for current spread levels. "
                 "Check that the curve file has a Date column plus either 5Y/10Y/20Y/30Y base columns or explicit rating curve columns such as AA_10Y, and that trade dates overlap with the curve history."
             )
         else:
-            level_matrix = aggregate_maturity_rows_for_display(level_matrix) if len(level_matrix.index) > 10 else level_matrix
-            level_text = level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+            level_table = aggregate_maturity_rows_for_display(level_table) if len(level_table.index) > 10 else level_table
+            level_text = level_table.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
 
             # 1) Spread level curve: one line per selected benchmark rating.
-            # Defensive schema handling: level_matrix may have maturity labels as the index
+            # Defensive schema handling: level_table may have maturity labels as the index
             # or under maturity_bucket/maturity_year depending on earlier transformations.
-            curve_df = level_matrix.copy()
+            curve_df = level_table.copy()
             curve_long = safe_melt_by_maturity(
                 curve_df,
                 value_name="spread_to_benchmark_bps",
@@ -5403,33 +5438,49 @@ else:
                 level_curve_fig.update_layout(hovermode="x unified")
                 safe_plotly_chart(level_curve_fig, width="stretch")
 
-            # 2) Spread level heatmap: maturity year x benchmark rating.
-            st.subheader("2. Current Spread Level Heatmap")
-            level_heatmap_fig = px.imshow(
-                level_matrix.astype(float),
-                x=level_matrix.columns,
-                y=level_matrix.index,
-                color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
-                color_continuous_midpoint=0,
-                aspect="auto",
-                title=f"{selected_issuer} Current Spread Level vs Benchmark Curves",
-                labels={"x": "Benchmark Curve", "y": "Maturity Year", "color": "Current Spread (bps)"},
+            # 2) Spread level ladder: maturity year x benchmark rating, shown as ranked bars instead of a ladder.
+            st.subheader("2. Current Spread Level Ladder")
+            level_ladder = safe_melt_by_maturity(
+                level_table.reset_index().rename(columns={level_table.index.name or "index": "maturity_bucket"}),
+                value_vars=[c for c in level_table.columns if c in level_ratings],
+                id_vars="maturity_bucket",
+                var_name="benchmark_rating",
+                value_name="spread_to_benchmark_bps",
             )
-            level_heatmap_fig.update_traces(
-                text=level_text.values,
-                texttemplate="%{text}",
-                hovertemplate="Maturity=%{y}<br>Benchmark=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
-            )
-            level_heatmap_fig.update_layout(height=420)
-            safe_plotly_chart(level_heatmap_fig, width="stretch")
+            if level_ladder.empty:
+                st.info("No current spread level values available for the ladder view.")
+            else:
+                level_ladder["spread_to_benchmark_bps"] = pd.to_numeric(level_ladder["spread_to_benchmark_bps"], errors="coerce")
+                level_ladder = level_ladder.dropna(subset=["spread_to_benchmark_bps"]).copy()
+                level_ladder["security_bucket"] = level_ladder["benchmark_rating"].astype(str) + " / " + level_ladder["maturity_bucket"].astype(str)
+                level_ladder["abs_spread_bps"] = level_ladder["spread_to_benchmark_bps"].abs()
+                level_ladder["maturity_zone"] = level_ladder["maturity_bucket"].apply(maturity_zone_label)
+                level_ladder = level_ladder.sort_values("abs_spread_bps", ascending=False).head(20)
+                level_ladder_fig = px.bar(
+                    level_ladder.sort_values("spread_to_benchmark_bps"),
+                    x="spread_to_benchmark_bps",
+                    y="security_bucket",
+                    orientation="h",
+                    color="benchmark_rating",
+                    hover_data=["maturity_zone", "abs_spread_bps"],
+                    title=f"{selected_issuer} Largest Current Spread Levels",
+                    labels={
+                        "spread_to_benchmark_bps": "Current Spread (bps)",
+                        "security_bucket": "Benchmark / Maturity",
+                        "benchmark_rating": "Benchmark Curve",
+                    },
+                )
+                level_ladder_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
+                level_ladder_fig.update_layout(height=max(420, 28 * len(level_ladder) + 160), legend_title_text="Benchmark")
+                safe_plotly_chart(level_ladder_fig, width="stretch")
 
             # 3) Quick signal: identify the cheapest bucket vs the first selected benchmark.
             primary_rating = level_ratings[0]
-            if primary_rating in level_matrix.columns and level_matrix[primary_rating].notna().any():
-                cheapest_bucket = level_matrix[primary_rating].astype(float).idxmax()
-                cheapest_spread = level_matrix.loc[cheapest_bucket, primary_rating]
-                richest_bucket = level_matrix[primary_rating].astype(float).idxmin()
-                richest_spread = level_matrix.loc[richest_bucket, primary_rating]
+            if primary_rating in level_table.columns and level_table[primary_rating].notna().any():
+                cheapest_bucket = level_table[primary_rating].astype(float).idxmax()
+                cheapest_spread = level_table.loc[cheapest_bucket, primary_rating]
+                richest_bucket = level_table[primary_rating].astype(float).idxmin()
+                richest_spread = level_table.loc[richest_bucket, primary_rating]
                 st.info(
                     f"Relative value read-through vs {primary_rating}: "
                     f"{cheapest_bucket} appears cheapest at {cheapest_spread:+.1f} bp, "
@@ -8670,29 +8721,40 @@ if ENABLE_REPORT_EXPORTS:
     except Exception:
         pass
 
-    # 3) Current spread level heatmap
+    # 3) Current spread level ladder
     try:
         if not mmd_df.empty:
-            export_level_matrix, export_level_audit = build_spread_level_data(
+            export_level_table, export_level_audit = build_spread_level_data(
                 market_df=market_df,
                 mmd_df=mmd_df,
                 issuer=selected_issuer,
                 ratings=["AAA", "AA", "A", "BBB"],
             )
-            if not export_level_matrix.empty and not export_level_matrix.isna().all().all():
-                export_level_text = export_level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
-                export_level_fig = px.imshow(
-                    export_level_matrix.astype(float),
-                    x=export_level_matrix.columns,
-                    y=export_level_matrix.index,
-                    color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
-                    color_continuous_midpoint=0,
-                    aspect="auto",
-                    title=f"{selected_issuer} Current Spread Level",
-                    labels={"x": "Benchmark Curve", "y": "Maturity Year", "color": "Spread (bps)"},
+            if not export_level_table.empty and not export_level_table.isna().all().all():
+                export_level_ladder = safe_melt_by_maturity(
+                    export_level_table.reset_index().rename(columns={export_level_table.index.name or "index": "maturity_bucket"}),
+                    value_vars=[c for c in export_level_table.columns if c in ["AAA", "AA", "A", "BBB"]],
+                    id_vars="maturity_bucket",
+                    var_name="benchmark_rating",
+                    value_name="spread_to_benchmark_bps",
                 )
-                export_level_fig.update_traces(text=export_level_text.values, texttemplate="%{text}")
-                add_export_chart("current_spread_level_heatmap", export_level_fig, export_level_audit)
+                if not export_level_ladder.empty:
+                    export_level_ladder["spread_to_benchmark_bps"] = pd.to_numeric(export_level_ladder["spread_to_benchmark_bps"], errors="coerce")
+                    export_level_ladder = export_level_ladder.dropna(subset=["spread_to_benchmark_bps"]).copy()
+                    export_level_ladder["label"] = export_level_ladder["benchmark_rating"].astype(str) + " / " + export_level_ladder["maturity_bucket"].astype(str)
+                    export_level_ladder["abs_spread_bps"] = export_level_ladder["spread_to_benchmark_bps"].abs()
+                    export_level_ladder = export_level_ladder.sort_values("abs_spread_bps", ascending=False).head(20)
+                    export_level_fig = px.bar(
+                        export_level_ladder.sort_values("spread_to_benchmark_bps"),
+                        x="spread_to_benchmark_bps",
+                        y="label",
+                        orientation="h",
+                        color="benchmark_rating",
+                        title=f"{selected_issuer} Current Spread Level Ladder",
+                        labels={"spread_to_benchmark_bps": "Spread (bps)", "label": "Benchmark / Maturity"},
+                    )
+                    export_level_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
+                    add_export_chart("current_spread_level_ladder", export_level_fig, export_level_audit)
     except Exception:
         pass
 
