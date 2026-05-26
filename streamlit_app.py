@@ -300,8 +300,67 @@ div[data-testid="stDataFrame"] {
 }
 </style>
 """,
+
     unsafe_allow_html=True,
 )
+
+
+# =========================
+# Performance Controls
+# =========================
+# Streamlit reruns the whole script after each widget interaction. These helpers
+# keep large tables/charts from overwhelming Streamlit Cloud and the browser.
+PERFORMANCE_MODE = True
+MAX_TABLE_ROWS = 3000
+MAX_HEATMAP_ROWS = 18
+SHOW_FULL_RAW_TABLES = False
+ENABLE_REPORT_EXPORTS = False
+
+
+def safe_dataframe(df, *args, **kwargs):
+    """Display large dataframes safely by truncating rows in performance mode."""
+    try:
+        if isinstance(df, pd.DataFrame):
+            display_df = df
+            if PERFORMANCE_MODE and not SHOW_FULL_RAW_TABLES and len(display_df) > MAX_TABLE_ROWS:
+                st.caption(
+                    f"Showing first {MAX_TABLE_ROWS:,} of {len(display_df):,} rows for performance. "
+                    "Use downloads/export for the full dataset."
+                )
+                display_df = display_df.head(MAX_TABLE_ROWS).copy()
+            return st.dataframe(display_df, *args, **kwargs)
+    except Exception:
+        pass
+    return st.dataframe(df, *args, **kwargs)
+
+
+def safe_plotly_chart(fig, *args, **kwargs):
+    """Central wrapper for Plotly charts so future throttling can happen in one place."""
+    try:
+        if fig is not None:
+            fig.update_layout(uirevision="keep")
+    except Exception:
+        pass
+    return st.plotly_chart(fig, *args, **kwargs)
+
+
+def compact_heatmap_matrix_for_display(matrix: pd.DataFrame, max_rows: int | None = None) -> pd.DataFrame:
+    """Limit heatmap rows to the most informative non-empty maturity rows.
+
+    Rows are ranked by maximum absolute movement so the chart stays readable.
+    """
+    if matrix is None or matrix.empty:
+        return matrix
+    out = matrix.dropna(how="all").copy()
+    if out.empty:
+        return out
+    max_rows = max_rows or MAX_HEATMAP_ROWS
+    if PERFORMANCE_MODE and len(out) > max_rows:
+        score = out.abs().max(axis=1).sort_values(ascending=False)
+        keep = score.head(max_rows).index.tolist()
+        out = out.loc[keep]
+        out = out.loc[sorted(out.index, key=maturity_year_sort_key)]
+    return out
 
 
 def section_anchor(anchor_id: str, title: str, level: int = 2):
@@ -764,6 +823,7 @@ def _detect_mmd_date_column(mmd_df: pd.DataFrame) -> str | None:
     return None
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
     """Convert MMD wide curve data into long benchmark data by maturity year.
 
@@ -811,6 +871,7 @@ def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def build_spread_observations(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -862,6 +923,7 @@ def build_spread_observations(
     return spread_obs.sort_values(["maturity_bucket", "trade_date"])
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def build_spread_movement_heatmap_data(
     spread_obs: pd.DataFrame,
     windows: dict[str, int] | None = None,
@@ -938,6 +1000,7 @@ def build_spread_movement_heatmap_data(
     return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def build_spread_level_data(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -1021,6 +1084,7 @@ def build_spread_level_data(
     return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def build_issuer_curve_snapshot(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -1292,7 +1356,7 @@ def display_validation_report(title: str, report: dict, warnings: list[str] | No
             {"Internal Field": key, "Uploaded Column Detected": value or "—"}
             for key, value in report["mapping"].items()
         ]
-        st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+        safe_dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
 
 
 def template_download_button(columns: list[str], label: str, filename: str):
@@ -1366,6 +1430,7 @@ def _issuer_from_source_file(source_file: object) -> str:
     return name.title().replace(" Ca ", " CA ").replace(" Usd", " USD ").replace(" Go ", " GO ")
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
     """Make standardized trade exports self-sufficient for dashboard analytics."""
     if trades_df is None or trades_df.empty:
@@ -1499,6 +1564,7 @@ def _parse_trade_index_tenor(index_value: object) -> str | None:
     return f"{min(year, MAX_MATURITY_YEAR)}Y"
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataFrame:
     """Build a benchmark curve table directly from trade-file Index / Index Rate columns.
 
@@ -1530,6 +1596,7 @@ def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataF
     return wide.sort_values("Date").reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build issuer / sector reference from trades and optional mapping."""
     if market_df is None or market_df.empty or "issuer" not in market_df.columns:
@@ -1567,6 +1634,7 @@ def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df:
     return base.sort_values("issuer").reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def _build_security_reference_from_trades(market_df: pd.DataFrame, optional_bonds_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Create a security reference table from the trade tape, enriched by optional bond data."""
     if market_df is None or market_df.empty or "cusip" not in market_df.columns:
@@ -1619,74 +1687,17 @@ def _is_date_like_col(col: object) -> bool:
 
 
 def _is_mmd_tenor_col(col: object, max_year: int = MMD_MAX_TENOR_YEAR) -> bool:
-    """Return True for tenor columns like 1Y, 1-Yr, 01 Yr, AAA_10Y, MMD 30-Year."""
+    """Return True for tenor columns like 1Y, 01Y, AAA_10Y, MMD 30Y."""
     text = str(col).strip().upper()
     # Keep simple numeric tenor columns and benchmark-labeled tenor columns.
-    # Compatible with MMD exports such as: 1-Yr, 2-Yr, 10-Yr, 30-Yr.
-    match = re.search(r"(?:^|[^0-9])0?([1-9]|[1-3][0-9]|40)\s*(?:-|_|\s)?\s*(?:Y|YR|YRS|YEAR|YEARS)(?:[^0-9]|$)", text)
+    match = re.search(r"(?:^|[^0-9])0?([1-9]|[1-3][0-9]|40)\s*Y(?:[^0-9]|$)", text)
     if not match:
         return False
     year = int(match.group(1))
     return 1 <= year <= max_year
 
 
-def normalize_mmd_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize common MMD tenor column labels to the app's 1Y / 2Y / ... format.
-
-    Examples converted:
-    - 1-Yr, 01-Yr, 1 Yr, 1-Year -> 1Y
-    - AAA 10-Yr, AAA_10 Yr -> AAA_10Y
-    - MMD 30-Year -> MMD_30Y
-
-    This prevents benchmark-source warnings when uploaded MMD files use vendor
-    labels like `1-Yr` while the app expects `1Y`.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame() if df is None else df
-
-    out = df.copy()
-    rename: dict[object, str] = {}
-    used = set(map(str, out.columns))
-
-    for col in out.columns:
-        raw = str(col).strip()
-        if _is_date_like_col(raw):
-            # Keep date as Date so existing date detection works.
-            rename[col] = "Date"
-            continue
-
-        # Bare tenor: 1-Yr / 1 Yr / 1-Year -> 1Y
-        m = re.match(r"^0?([1-9]|[1-3][0-9]|40)\s*(?:-|_|\s)?\s*(?:Y|YR|YRS|YEAR|YEARS)$", raw, flags=re.I)
-        if m:
-            target = f"{int(m.group(1))}Y"
-            rename[col] = target
-            used.add(target)
-            continue
-
-        # Labeled tenor: AAA 10-Yr / AA_10 Yr / MMD 30-Year -> AAA_10Y / AA_10Y / MMD_30Y
-        m = re.match(r"^(.+?)\s*(?:-|_|\s)+0?([1-9]|[1-3][0-9]|40)\s*(?:-|_|\s)?\s*(?:Y|YR|YRS|YEAR|YEARS)$", raw, flags=re.I)
-        if m:
-            prefix = re.sub(r"[^A-Za-z0-9+\-]+", "_", m.group(1).strip()).strip("_")
-            target = f"{prefix}_{int(m.group(2))}Y" if prefix else f"{int(m.group(2))}Y"
-            rename[col] = target
-            used.add(target)
-
-    if rename:
-        out = out.rename(columns=rename)
-        # After renaming, duplicate columns can occur if the file already had both 1-Yr and 1Y.
-        # Keep the first non-null value across duplicates, then remove duplicate names.
-        if out.columns.duplicated().any():
-            combined = {}
-            for col in out.columns:
-                data = out.loc[:, out.columns == col]
-                if isinstance(data, pd.DataFrame) and data.shape[1] > 1:
-                    combined[col] = data.bfill(axis=1).iloc[:, 0]
-                else:
-                    combined[col] = data.iloc[:, 0] if isinstance(data, pd.DataFrame) else data
-            out = pd.DataFrame(combined)
-    return out
-
-
+@st.cache_data(show_spinner=False, max_entries=32)
 def _trim_mmd_frame(mmd_df: pd.DataFrame, lookback_years: int = MMD_FALLBACK_LOOKBACK_YEARS) -> pd.DataFrame:
     """Keep only recent dates and needed benchmark tenor columns."""
     if mmd_df is None or mmd_df.empty:
@@ -1715,6 +1726,7 @@ def _trim_mmd_frame(mmd_df: pd.DataFrame, lookback_years: int = MMD_FALLBACK_LOO
     return out[keep_cols].reset_index(drop=True) if keep_cols else out.reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def read_external_mmd_fallback_file(
     file_name: str,
     payload: bytes,
@@ -1739,9 +1751,7 @@ def read_external_mmd_fallback_file(
     else:
         raw_mmd = read_uploaded_file(io.BytesIO(payload), file_name)
 
-    raw_mmd = normalize_mmd_columns(raw_mmd)
     standardized = standardize_mmd(raw_mmd)
-    standardized = normalize_mmd_columns(standardized)
     return _trim_mmd_frame(standardized, lookback_years=lookback_years)
 
 @st.cache_data(show_spinner="Processing uploaded data...")
@@ -1877,30 +1887,6 @@ def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
     st.download_button(label=label, data=csv, file_name=filename, mime="text/csv")
 
 
-def safe_numeric_series(df: pd.DataFrame, col: str) -> pd.Series:
-    """Return a single numeric-safe Series even when duplicate column names exist.
-
-    Pandas returns a DataFrame instead of a Series when a DataFrame contains
-    duplicate column names. This helper prevents `pd.to_numeric()` TypeError in
-    display tables after complex merges.
-    """
-    data = df[col]
-    if isinstance(data, pd.DataFrame):
-        data = data.bfill(axis=1).iloc[:, 0]
-    return pd.to_numeric(data, errors="coerce")
-
-
-def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse duplicate column names by keeping the first non-null value."""
-    if df is None or df.empty or not df.columns.duplicated().any():
-        return df
-    combined = {}
-    for col in df.columns:
-        data = df.loc[:, df.columns == col]
-        combined[col] = data.bfill(axis=1).iloc[:, 0] if data.shape[1] > 1 else data.iloc[:, 0]
-    return pd.DataFrame(combined)
-
-
 with st.sidebar:
     st.header("1. Trading Data")
     trade_files = st.file_uploader(
@@ -1939,6 +1925,42 @@ with st.sidebar:
         template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
         template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Optional bond reference template CSV", "bond_reference_template.csv")
         template_download_button(CURVE_TEMPLATE_COLUMNS, "Fallback MMD curve template CSV", "benchmark_curve_template.csv")
+
+    st.markdown("---")
+    st.header("Performance")
+    PERFORMANCE_MODE = st.checkbox(
+        "Fast mode",
+        value=True,
+        help="Caches heavy calculations, limits displayed rows, and keeps heatmaps readable.",
+    )
+    MAX_TABLE_ROWS = st.number_input(
+        "Max table rows shown",
+        min_value=500,
+        max_value=20000,
+        value=3000,
+        step=500,
+        help="Only limits displayed tables; underlying analytics still use the full filtered dataset.",
+    )
+    MAX_HEATMAP_ROWS = st.slider(
+        "Max heatmap maturity rows",
+        min_value=8,
+        max_value=40,
+        value=18,
+        help="Fast mode keeps the maturity years with the largest absolute signal.",
+    )
+    SHOW_FULL_RAW_TABLES = st.checkbox(
+        "Show full raw tables",
+        value=False,
+        help="Usually keep this off. Full raw tables are one of the biggest Streamlit slowdowns.",
+    )
+    ENABLE_REPORT_EXPORTS = st.checkbox(
+        "Enable report export builder",
+        value=False,
+        help="Keep off while exploring. Report export recomputes multiple charts and can slow the app.",
+    )
+    if st.button("Clear cached calculations"):
+        st.cache_data.clear()
+        st.rerun()
 
 if not trade_files:
     st.info("Upload at least one MuniPro trade-history file to generate the dashboard. Bond reference data is optional enrichment.")
@@ -2090,7 +2112,7 @@ This dashboard uses **one benchmark source at a time** to avoid benchmark-source
 Trade-sheet index rates and an external MMD sheet may differ by date, tenor, rounding, provider convention, or interpolation method. Mixing them can shift spreads by several basis points and make relative-value signals inconsistent.
         """
     )
-    st.dataframe(
+    safe_dataframe(
         pd.DataFrame([
             {"Item": "Active benchmark source", "Value": benchmark_source_mode},
             {"Item": "Priority", "Value": benchmark_priority},
@@ -2465,7 +2487,7 @@ This section groups uploaded trade rows by **trade date** and **issuer**, then p
 - This is an internal analytical benchmark, not a live Bloomberg/BVAL/ICE curve. Replace assumptions with firm-approved or vendor curves when available.
         """
     )
-    st.dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
+    safe_dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
 
 issuer_choices = uploaded_issuers
 default_compare = [selected_issuer] if selected_issuer in issuer_choices else issuer_choices[:1]
@@ -2558,7 +2580,7 @@ else:
             st.warning("Benchmark curves could not be plotted because the curve file does not contain a usable date column.")
 
     fig.update_layout(xaxis_title="Trade Date", yaxis_title="Yield (%)", hovermode="x unified")
-    st.plotly_chart(fig, use_container_width=True)
+    safe_plotly_chart(fig, use_container_width=True)
 
     if show_spread_to_benchmark and benchmark_ready and not daily.empty:
         spread_base = daily.copy()
@@ -2581,7 +2603,7 @@ else:
                 title="Issuer Spread to Selected Benchmark Curve(s)",
             )
             spread_fig.update_layout(xaxis_title="Trade Date", yaxis_title="Spread to Benchmark (bps)", hovermode="x unified")
-            st.plotly_chart(spread_fig, use_container_width=True)
+            safe_plotly_chart(spread_fig, use_container_width=True)
 
             with st.expander("Spread-to-benchmark calculation details", expanded=False):
                 st.markdown(
@@ -2595,7 +2617,7 @@ Where:
 `Benchmark Yield = uploaded rating curve if available; otherwise MMD/AAA Tenor Yield + Rating Spread Assumption`
                     """
                 )
-                st.dataframe(
+                safe_dataframe(
                     spread_to_benchmark[[
                         "trade_date", "issuer", "benchmark_rating", "mmd_tenor", "avg_yield",
                         "benchmark_yield", "benchmark_source", "source_column", "rating_spread_bps", "spread_to_benchmark_bps",
@@ -2718,7 +2740,7 @@ else:
                     },
                 )
                 curve_fig.update_layout(hovermode="x unified", height=500)
-                st.plotly_chart(curve_fig, use_container_width=True)
+                safe_plotly_chart(curve_fig, use_container_width=True)
 
                 table_cols = [
                     "maturity_bucket", "benchmark_rating", "issuer_yield", "benchmark_yield",
@@ -2732,7 +2754,7 @@ else:
                         curve_table[c] = pd.to_numeric(curve_table[c], errors="coerce").round(2)
 
                 st.subheader("Curve Spread Table")
-                st.dataframe(curve_table, use_container_width=True, hide_index=True)
+                safe_dataframe(curve_table, use_container_width=True, hide_index=True)
 
                 primary_curve_rating = curve_benchmark_ratings[0]
                 primary_rows = issuer_curve_audit[issuer_curve_audit["benchmark_rating"] == primary_curve_rating].copy()
@@ -2900,7 +2922,7 @@ else:
                                 },
                             )
                             fig_curve_shape.update_layout(height=450, hovermode="x unified")
-                            st.plotly_chart(fig_curve_shape, use_container_width=True)
+                            safe_plotly_chart(fig_curve_shape, use_container_width=True)
 
                             curve_values = (
                                 curve_shape_df.set_index("maturity_bucket")[metric_col]
@@ -3053,7 +3075,7 @@ else:
                             analytics_status_df = pd.DataFrame(analytics_status)
 
                             with st.expander("Curve Analytics Availability", expanded=False):
-                                st.dataframe(
+                                safe_dataframe(
                                     analytics_status_df,
                                     use_container_width=True,
                                     hide_index=True,
@@ -3072,7 +3094,7 @@ else:
                                 for idx, (_, row) in enumerate(metrics_df.head(4).iterrows()):
                                     mcols[idx % len(mcols)].metric(row["Metric"], row["Display"])
 
-                                st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+                                safe_dataframe(metrics_df, use_container_width=True, hide_index=True)
 
                                 # Read-through
                                 slope_1030 = metrics_df.loc[metrics_df["Metric"] == "10s30s Slope", "Value"]
@@ -3120,7 +3142,7 @@ else:
                                         f"Issuer lookback: latest {cs_lookback} days. "
                                         f"Benchmark date: {cs_benchmark_date.strftime('%Y-%m-%d')}."
                                     )
-                                    st.dataframe(audit_curve, use_container_width=True, hide_index=True)
+                                    safe_dataframe(audit_curve, use_container_width=True, hide_index=True)
 
 
 section_anchor("spread-level", "Current Spread Level Framework")
@@ -3210,7 +3232,7 @@ else:
             )
             level_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.5)
             level_curve_fig.update_layout(hovermode="x unified")
-            st.plotly_chart(level_curve_fig, use_container_width=True)
+            safe_plotly_chart(level_curve_fig, use_container_width=True)
 
             # 2) Spread level heatmap: maturity year x benchmark rating.
             st.subheader("2. Current Spread Level Heatmap")
@@ -3230,7 +3252,7 @@ else:
                 hovertemplate="Maturity=%{y}<br>Benchmark=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
             )
             level_heatmap_fig.update_layout(height=420)
-            st.plotly_chart(level_heatmap_fig, use_container_width=True)
+            safe_plotly_chart(level_heatmap_fig, use_container_width=True)
 
             # 3) Quick signal: identify the cheapest bucket vs the first selected benchmark.
             primary_rating = level_ratings[0]
@@ -3255,7 +3277,7 @@ else:
                 for c in ["avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "rating_spread_bps"]:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
-                st.dataframe(audit_display, use_container_width=True, hide_index=True)
+                safe_dataframe(audit_display, use_container_width=True, hide_index=True)
 
 
 section_anchor("spread-attribution", "Spread Attribution Waterfall")
@@ -3477,7 +3499,7 @@ else:
                                 height=540,
                                 showlegend=False,
                             )
-                            st.plotly_chart(wf_fig, use_container_width=True)
+                            safe_plotly_chart(wf_fig, use_container_width=True)
 
                             wf_metric1, wf_metric2, wf_metric3, wf_metric4 = st.columns(4)
                             wf_metric1.metric("Issuer Yield", f"{wf_avg_issuer_yield:.2f}%")
@@ -3528,7 +3550,7 @@ else:
                                         {"Metric": "Benchmark source column", "Value": wf_aaa_meta.get("source_column")},
                                     ]
                                 )
-                                st.dataframe(audit_df, use_container_width=True, hide_index=True)
+                                safe_dataframe(audit_df, use_container_width=True, hide_index=True)
 
 
 
@@ -3640,7 +3662,7 @@ with mn_tab1:
                     yaxis2=dict(title="Average Yield (%)", overlaying="y", side="right"),
                     hovermode="x unified",
                 )
-                st.plotly_chart(tl_fig, use_container_width=True)
+                safe_plotly_chart(tl_fig, use_container_width=True)
 
                 amount_fig = px.bar(
                     timeline_plot,
@@ -3654,7 +3676,7 @@ with mn_tab1:
                     hover_data={"trade_count": ":,.0f", "avg_yield": ":.2f"},
                 )
                 amount_fig.update_layout(height=380)
-                st.plotly_chart(amount_fig, use_container_width=True)
+                safe_plotly_chart(amount_fig, use_container_width=True)
 
                 # Simple narrative event detection
                 event_rows = []
@@ -3688,7 +3710,7 @@ with mn_tab1:
                 if event_rows:
                     st.subheader("Narrative Signals")
                     events_df = pd.DataFrame(event_rows)
-                    st.dataframe(events_df, use_container_width=True, hide_index=True)
+                    safe_dataframe(events_df, use_container_width=True, hide_index=True)
                 else:
                     st.info("No unusually large activity/volume/yield-move events were detected in the selected timeline window.")
 
@@ -3842,7 +3864,7 @@ with mn_tab2:
                 bgcolor="rgba(255,255,255,0.75)",
             )
             q_fig.update_layout(height=560, hovermode="closest")
-            st.plotly_chart(q_fig, use_container_width=True)
+            safe_plotly_chart(q_fig, use_container_width=True)
 
             q_summary = (
                 quadrant_df.groupby("Quadrant", as_index=False)
@@ -3853,7 +3875,7 @@ with mn_tab2:
                     total_trade_amount=("total_trade_amount", "sum") if "total_trade_amount" in quadrant_df.columns else ("liquidity_score", "count"),
                 )
             )
-            st.dataframe(q_summary, use_container_width=True, hide_index=True)
+            safe_dataframe(q_summary, use_container_width=True, hide_index=True)
 
             with st.expander("Quadrant security-level table", expanded=False):
                 display_cols = [
@@ -3861,7 +3883,7 @@ with mn_tab2:
                     "avg_yield", "trade_count", "recent_90d_trades", "days_since_last_trade",
                     "total_trade_amount", "outstanding_amount", "liquidity_tier",
                 ]
-                st.dataframe(
+                safe_dataframe(
                     quadrant_df[[c for c in display_cols if c in quadrant_df.columns]]
                     .sort_values(["Quadrant", "liquidity_score"], ascending=[True, False])
                     .head(5000),
@@ -4095,7 +4117,7 @@ else:
                                 )
                                 peer_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.45)
                                 peer_curve_fig.update_layout(height=520, hovermode="x unified")
-                                st.plotly_chart(peer_curve_fig, use_container_width=True)
+                                safe_plotly_chart(peer_curve_fig, use_container_width=True)
 
                                 st.subheader("2. Peer Spread Heatmap")
                                 peer_matrix = peer_summary.pivot_table(
@@ -4126,7 +4148,7 @@ else:
                                     hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
                                 )
                                 peer_heatmap_fig.update_layout(height=max(380, 70 * len(peer_matrix.index)))
-                                st.plotly_chart(peer_heatmap_fig, use_container_width=True)
+                                safe_plotly_chart(peer_heatmap_fig, use_container_width=True)
 
                                 st.subheader("3. Peer Ranking Table")
 
@@ -4234,7 +4256,7 @@ This is a **relative-value screening tool**, not a standalone trading recommenda
 Use this ranking as a first-pass screen, then review the CUSIP-level drilldown and liquidity metrics before drawing trading conclusions.
 """)
 
-                                st.dataframe(
+                                safe_dataframe(
                                     peer_rank[
                                         [
                                             "rank_by_weighted_spread",
@@ -4288,7 +4310,7 @@ Use this ranking as a first-pass screen, then review the CUSIP-level drilldown a
                                         f"Benchmark date used: {peer_benchmark_date.strftime('%Y-%m-%d')}. "
                                         f"Lookback window: {peer_window_label}."
                                     )
-                                    st.dataframe(audit_df, use_container_width=True, hide_index=True)
+                                    safe_dataframe(audit_df, use_container_width=True, hide_index=True)
 
 
 
@@ -4562,7 +4584,7 @@ else:
                                         hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Peer Gap=%{z:.1f} bp<extra></extra>",
                                     )
                                     gap_fig.update_layout(height=max(390, 72 * len(gap_matrix.index)))
-                                    st.plotly_chart(gap_fig, use_container_width=True)
+                                    safe_plotly_chart(gap_fig, use_container_width=True)
 
                                     st.subheader("2. Cross-Issuer RV Ranking")
                                     ranking = xrv_summary.sort_values("x_issuer_rv_score", ascending=False, na_position="last").copy()
@@ -4593,7 +4615,7 @@ else:
                                         if c in ranking_display.columns:
                                             ranking_display[c] = pd.to_numeric(ranking_display[c], errors="coerce").round(2)
 
-                                    st.dataframe(ranking_display, use_container_width=True, hide_index=True, height=430)
+                                    safe_dataframe(ranking_display, use_container_width=True, hide_index=True, height=430)
 
                                     st.subheader("3. Cross-Issuer Opportunity Map")
                                     xrv_scatter = px.scatter(
@@ -4626,7 +4648,7 @@ else:
                                     xrv_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
                                     xrv_scatter.add_vline(x=60, line_dash="dash", opacity=0.35)
                                     xrv_scatter.update_layout(height=540, hovermode="closest")
-                                    st.plotly_chart(xrv_scatter, use_container_width=True)
+                                    safe_plotly_chart(xrv_scatter, use_container_width=True)
 
                                     if not ranking.empty:
                                         top = ranking.iloc[0]
@@ -4671,7 +4693,7 @@ else:
                                             f"Benchmark date used: {xrv_benchmark_date.strftime('%Y-%m-%d')}. "
                                             f"Lookback window: {xrv_window}."
                                         )
-                                        st.dataframe(audit_xrv, use_container_width=True, hide_index=True)
+                                        safe_dataframe(audit_xrv, use_container_width=True, hide_index=True)
 
 
 section_anchor("historical-spread", "Historical Spread Range & Percentile")
@@ -4870,7 +4892,7 @@ else:
                 hist_fig.add_hline(y=hist_p25, line_dash="dot", opacity=0.45, annotation_text="25th")
                 hist_fig.add_hline(y=hist_p75, line_dash="dot", opacity=0.45, annotation_text="75th")
                 hist_fig.update_layout(height=520, hovermode="x unified")
-                st.plotly_chart(hist_fig, use_container_width=True)
+                safe_plotly_chart(hist_fig, use_container_width=True)
 
                 dist_col1, dist_col2 = st.columns([1.2, 1])
                 with dist_col1:
@@ -4884,7 +4906,7 @@ else:
                     hist_dist_fig.add_vline(x=current_spread, line_dash="solid", annotation_text="Current")
                     hist_dist_fig.add_vline(x=hist_median, line_dash="dash", annotation_text="Median")
                     hist_dist_fig.update_layout(height=430)
-                    st.plotly_chart(hist_dist_fig, use_container_width=True)
+                    safe_plotly_chart(hist_dist_fig, use_container_width=True)
 
                 with dist_col2:
                     pct_table = pd.DataFrame(
@@ -4900,7 +4922,7 @@ else:
                         ]
                     )
                     pct_table["Spread (bps)"] = pct_table["Spread (bps)"].round(2)
-                    st.dataframe(pct_table, use_container_width=True, hide_index=True)
+                    safe_dataframe(pct_table, use_container_width=True, hide_index=True)
 
                 with st.expander("Historical spread audit table", expanded=False):
                     audit_cols = [
@@ -4918,7 +4940,7 @@ else:
                     for c in ["spread_to_benchmark_bps", "display_spread_bps", "avg_yield", "benchmark_yield"]:
                         if c in audit_hist.columns:
                             audit_hist[c] = pd.to_numeric(audit_hist[c], errors="coerce").round(2)
-                    st.dataframe(
+                    safe_dataframe(
                         audit_hist.sort_values("trade_date", ascending=False).head(1000),
                         use_container_width=True,
                         hide_index=True,
@@ -5076,7 +5098,7 @@ else:
             },
         )
         flow_fig.update_layout(height=430)
-        st.plotly_chart(flow_fig, use_container_width=True)
+        safe_plotly_chart(flow_fig, use_container_width=True)
 
         dealer_daily = (
             dealer_df.groupby(["trade_date", "flow_side"], as_index=False)
@@ -5114,7 +5136,7 @@ else:
         )
         pressure_fig.add_hline(y=0, line_dash="dash", opacity=0.45)
         pressure_fig.update_layout(height=430)
-        st.plotly_chart(pressure_fig, use_container_width=True)
+        safe_plotly_chart(pressure_fig, use_container_width=True)
 
         with st.expander("Dealer proxy audit table", expanded=False):
             audit_cols = [
@@ -5138,7 +5160,7 @@ else:
             dealer_audit_display = dealer_audit_display.loc[:, ~dealer_audit_display.columns.duplicated()].copy()
 
             st.caption(f"Side classification source column: `{dealer_trade_type_col}`.")
-            st.dataframe(
+            safe_dataframe(
                 dealer_audit_display.sort_values("trade_date", ascending=False).head(5000),
                 use_container_width=True,
                 hide_index=True,
@@ -5384,7 +5406,7 @@ else:
                             if c in display_candidates.columns:
                                 display_candidates[c] = pd.to_numeric(display_candidates[c], errors="coerce").round(2)
 
-                        st.dataframe(
+                        safe_dataframe(
                             display_candidates.head(1000),
                             use_container_width=True,
                             hide_index=True,
@@ -5420,7 +5442,7 @@ else:
                         screener_fig.add_vline(x=min_liquidity, line_dash="dash", opacity=0.45)
                         screener_fig.add_hline(y=min_spread, line_dash="dash", opacity=0.45)
                         screener_fig.update_layout(height=520, hovermode="closest")
-                        st.plotly_chart(screener_fig, use_container_width=True)
+                        safe_plotly_chart(screener_fig, use_container_width=True)
 
                         csv_candidates = candidates.to_csv(index=False).encode("utf-8")
                         st.download_button(
@@ -5450,7 +5472,7 @@ else:
                         for c in ["avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "liquidity_score"]:
                             if c in audit_screen.columns:
                                 audit_screen[c] = pd.to_numeric(audit_screen[c], errors="coerce").round(2)
-                        st.dataframe(audit_screen.head(5000), use_container_width=True, hide_index=True)
+                        safe_dataframe(audit_screen.head(5000), use_container_width=True, hide_index=True)
 
 
 
@@ -5539,7 +5561,7 @@ else:
             .reset_index()
         )
         st.metric("Saved CUSIPs", f"{len(watchlist_summary):,}")
-        st.dataframe(watchlist_summary, use_container_width=True, hide_index=True)
+        safe_dataframe(watchlist_summary, use_container_width=True, hide_index=True)
 
         st.download_button(
             label="Download Watchlist CSV",
@@ -5948,7 +5970,7 @@ else:
     if evidence_rows:
         st.markdown("### Evidence Trail")
         evidence_df = pd.DataFrame(evidence_rows)
-        st.dataframe(evidence_df, use_container_width=True, hide_index=True)
+        safe_dataframe(evidence_df, use_container_width=True, hide_index=True)
 
     with st.expander("Rule thresholds used in this narrative", expanded=False):
         rule_df = pd.DataFrame(
@@ -5965,7 +5987,7 @@ else:
                 {"Rule": "Buy-heavy flow", "Threshold": "Flow imbalance <= -25%"},
             ]
         )
-        st.dataframe(rule_df, use_container_width=True, hide_index=True)
+        safe_dataframe(rule_df, use_container_width=True, hide_index=True)
 
 
 
@@ -6571,14 +6593,14 @@ else:
         )
         shock_bar.add_hline(y=0, line_dash="dash", opacity=0.45)
         shock_bar.update_layout(height=440)
-        st.plotly_chart(shock_bar, use_container_width=True)
+        safe_plotly_chart(shock_bar, use_container_width=True)
 
         st.subheader("2. Shock Summary Table")
         bucket_display = bucket_summary.copy()
         for col in ["avg_yield", "avg_price", "proxy_duration", "shocked_yield", "approx_price_impact_pct"]:
             if col in bucket_display.columns:
                 bucket_display[col] = pd.to_numeric(bucket_display[col], errors="coerce").round(2)
-        st.dataframe(
+        safe_dataframe(
             bucket_display[
                 [
                     "maturity_bucket",
@@ -6644,7 +6666,7 @@ else:
                 if col in detail_display.columns:
                     detail_display[col] = pd.to_numeric(detail_display[col], errors="coerce").round(2)
 
-            st.dataframe(detail_display.head(5000), use_container_width=True, hide_index=True, height=480)
+            safe_dataframe(detail_display.head(5000), use_container_width=True, hide_index=True, height=480)
 
             shock_scatter = px.scatter(
                 cusip_shock,
@@ -6666,7 +6688,7 @@ else:
             )
             shock_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
             shock_scatter.update_layout(height=500)
-            st.plotly_chart(shock_scatter, use_container_width=True)
+            safe_plotly_chart(shock_scatter, use_container_width=True)
 
         with st.expander("Scenario shock assumptions and audit", expanded=False):
             shock_assumption_df = pd.DataFrame(
@@ -6680,7 +6702,7 @@ else:
                     for bucket in MATURITY_BUCKET_ORDER
                 ]
             )
-            st.dataframe(shock_assumption_df, use_container_width=True, hide_index=True)
+            safe_dataframe(shock_assumption_df, use_container_width=True, hide_index=True)
 
             st.download_button(
                 label="Download Scenario Shock Results CSV",
@@ -6758,7 +6780,7 @@ else:
             heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
             heatmap_height = max(320, min(760, 110 + 38 * len(heatmap_matrix.index)))
             heatmap_fig.update_layout(height=heatmap_height)
-            st.plotly_chart(heatmap_fig, use_container_width=True)
+            safe_plotly_chart(heatmap_fig, use_container_width=True)
 
             latest_obs_date = heatmap_spread_obs["trade_date"].max()
             st.caption(
@@ -6775,7 +6797,7 @@ else:
                 for c in ["latest_spread_bps", "historical_spread_bps", "spread_movement_bps"]:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
-                st.dataframe(audit_display, use_container_width=True, hide_index=True)
+                safe_dataframe(audit_display, use_container_width=True, hide_index=True)
 
 
 
@@ -7034,7 +7056,7 @@ else:
                                         dd_display[col] = pd.to_numeric(dd_display[col], errors="coerce").round(2)
 
                                 st.subheader("CUSIP Opportunity Table")
-                                st.dataframe(dd_display, use_container_width=True, hide_index=True, height=420)
+                                safe_dataframe(dd_display, use_container_width=True, hide_index=True, height=420)
 
                                 st.subheader("Security Detail")
                                 selected_cusip = st.selectbox(
@@ -7083,7 +7105,7 @@ else:
                                             labels={"trade_date": "Trade Date", "avg_yield": "Average Yield (%)"},
                                         )
                                         sec_yield_fig.update_layout(height=380)
-                                        st.plotly_chart(sec_yield_fig, use_container_width=True)
+                                        safe_plotly_chart(sec_yield_fig, use_container_width=True)
 
                                     with detail_col2:
                                         if "spread_to_benchmark_bps" in sec_daily.columns and sec_daily["spread_to_benchmark_bps"].notna().any():
@@ -7097,7 +7119,7 @@ else:
                                                 labels={"trade_date": "Trade Date", "spread_to_benchmark_bps": "Spread (bps)"},
                                             )
                                             sec_spread_fig.update_layout(height=380)
-                                            st.plotly_chart(sec_spread_fig, use_container_width=True)
+                                            safe_plotly_chart(sec_spread_fig, use_container_width=True)
                                         else:
                                             sec_amt_fig = px.bar(
                                                 sec_daily,
@@ -7108,7 +7130,7 @@ else:
                                                 labels={"trade_date": "Trade Date", "total_trade_amount": "Total Trade Amount"},
                                             )
                                             sec_amt_fig.update_layout(height=380)
-                                            st.plotly_chart(sec_amt_fig, use_container_width=True)
+                                            safe_plotly_chart(sec_amt_fig, use_container_width=True)
 
                                     with st.expander("Latest trades for selected CUSIP", expanded=False):
                                         latest_trade_cols = [
@@ -7116,7 +7138,7 @@ else:
                                             "maturity_bond", "coupon_trade", "coupon_bond", "yield", "price",
                                             "trade_amount", "spread", "trade_type", "ratings_m_s_f",
                                         ]
-                                        st.dataframe(
+                                        safe_dataframe(
                                             sec_trades[[c for c in latest_trade_cols if c in sec_trades.columns]]
                                             .sort_values("trade_date", ascending=False)
                                             .head(500),
@@ -7452,13 +7474,13 @@ else:
                     if pd.notna(median_y):
                         rv_fig.add_hline(y=median_y, line_dash="dash", opacity=0.45)
                     rv_fig.update_layout(height=560, hovermode="closest")
-                    st.plotly_chart(rv_fig, use_container_width=True)
+                    safe_plotly_chart(rv_fig, use_container_width=True)
                 except Exception as exc:
                     st.warning(
                         "The positioning map could not be plotted because the scatter inputs were not usable. "
                         f"The cleaned known-maturity data table is shown below for review. Error: {exc}"
                     )
-                    st.dataframe(rv_known.head(1000), use_container_width=True, hide_index=True)
+                    safe_dataframe(rv_known.head(1000), use_container_width=True, hide_index=True)
                     median_liquidity = rv_known["liquidity_score"].median() if "liquidity_score" in rv_known.columns else pd.NA
                     median_y = rv_known[rv_y_axis_col].median() if rv_y_axis_col in rv_known.columns else pd.NA
 
@@ -7491,7 +7513,7 @@ else:
                         "outstanding_amount",
                     ]
                     unknown_existing_cols = [c for c in unknown_display_cols if c in rv_unknown.columns]
-                    st.dataframe(
+                    safe_dataframe(
                         rv_unknown[unknown_existing_cols].head(5000),
                         use_container_width=True,
                         hide_index=True,
@@ -7524,11 +7546,10 @@ else:
                 ]
                 display_cols = [c for c in display_cols if c in rv_summary.columns]
                 rv_display = rv_summary[display_cols].copy()
-                rv_display = dedupe_columns(rv_display)
                 for c in ["liquidity_score", rv_y_axis_col, "avg_yield", "benchmark_yield", "turnover_ratio", "avg_price"]:
                     if c in rv_display.columns:
-                        rv_display[c] = safe_numeric_series(rv_display, c).round(2)
-                st.dataframe(
+                        rv_display[c] = pd.to_numeric(rv_display[c], errors="coerce").round(2)
+                safe_dataframe(
                     rv_display.sort_values([rv_y_axis_col, "liquidity_score"], ascending=False),
                     use_container_width=True,
                     hide_index=True,
@@ -7634,7 +7655,7 @@ else:
 
     monthly = liq_base.groupby("trade_month", as_index=False).agg(trade_count=("trade_date", "count"), total_trade_amount=("trade_amount", "sum"), avg_yield=("yield", "mean"))
     st.subheader("1. Market Activity Over Time")
-    st.plotly_chart(px.line(monthly, x="trade_month", y="trade_count", markers=True, title="Monthly Trade Count"), use_container_width=True)
+    safe_plotly_chart(px.line(monthly, x="trade_month", y="trade_count", markers=True, title="Monthly Trade Count"), use_container_width=True)
 
     st.subheader("2. Trade Size Distribution")
     with st.expander("Methodology: trade size distribution", expanded=False):
@@ -7709,7 +7730,7 @@ This is useful because trade count alone can overstate liquidity when most activ
                 },
             )
             size_fig.update_layout(height=430)
-            st.plotly_chart(size_fig, use_container_width=True)
+            safe_plotly_chart(size_fig, use_container_width=True)
 
             amount_fig = px.bar(
                 size_summary,
@@ -7732,7 +7753,7 @@ This is useful because trade count alone can overstate liquidity when most activ
                 },
             )
             amount_fig.update_layout(height=430)
-            st.plotly_chart(amount_fig, use_container_width=True)
+            safe_plotly_chart(amount_fig, use_container_width=True)
 
             retail_trade_share = size_summary.loc[
                 size_summary["trade_size_bucket"] == "< $100k", "trade_count_share"
@@ -7768,13 +7789,13 @@ This is useful because trade count alone can overstate liquidity when most activ
                     table_display[pct_col] = table_display[pct_col].map(lambda x: f"{x:.1%}" if pd.notna(x) else "")
                 for amt_col in ["total_trade_amount", "avg_trade_amount", "median_trade_amount"]:
                     table_display[amt_col] = pd.to_numeric(table_display[amt_col], errors="coerce").round(0)
-                st.dataframe(table_display, use_container_width=True, hide_index=True)
+                safe_dataframe(table_display, use_container_width=True, hide_index=True)
 
     st.subheader("3. Most Frequently Traded CUSIPs")
-    st.plotly_chart(px.bar(liq.head(25), x="cusip", y="trade_count", color="liquidity_tier", title="Top 25 Most Frequently Traded CUSIPs"), use_container_width=True)
+    safe_plotly_chart(px.bar(liq.head(25), x="cusip", y="trade_count", color="liquidity_tier", title="Top 25 Most Frequently Traded CUSIPs"), use_container_width=True)
 
     st.subheader("4. Trade Recency / Staleness")
-    st.plotly_chart(px.histogram(liq, x="days_since_last_trade", nbins=30, color="liquidity_tier", title="Distribution of Days Since Last Trade"), use_container_width=True)
+    safe_plotly_chart(px.histogram(liq, x="days_since_last_trade", nbins=30, color="liquidity_tier", title="Distribution of Days Since Last Trade"), use_container_width=True)
 
     st.subheader("5. Liquidity Ranking Table")
     display_cols = [
@@ -7783,371 +7804,377 @@ This is useful because trade count alone can overstate liquidity when most activ
         "avg_yield", "yield_range", "avg_price", "total_trade_amount", "avg_trade_amount", "turnover_ratio",
         "maturity", "coupon", "outstanding_amount",
     ]
-    st.dataframe(liq[[c for c in display_cols if c in liq.columns]], use_container_width=True, height=500)
+    safe_dataframe(liq[[c for c in display_cols if c in liq.columns]], use_container_width=True, height=500)
 
 section_anchor("bond-master", "Security Reference / Optional Bond Enrichment")
 bond_cols = ["issuer", "sector", "primary_type", "election", "series", "cusip", "secondary_credit", "term", "maturity", "par_amount", "outstanding_amount", "coupon", "call_date", "call_price", "fed_tax", "amt"]
-st.dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].sort_values([c for c in ["maturity", "cusip"] if c in issuer_bonds.columns]), use_container_width=True)
+safe_dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].sort_values([c for c in ["maturity", "cusip"] if c in issuer_bonds.columns]), use_container_width=True)
 
 section_anchor("trade-detail", "Underlying Trade Detail")
 trade_cols = ["trade_datetime", "cusip", "description", "maturity_trade", "maturity_bond", "maturity_bucket", "coupon_trade", "yield", "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"]
-st.dataframe(issuer_trades[[c for c in trade_cols if c in issuer_trades.columns]].sort_values("trade_datetime", ascending=False).head(20000), use_container_width=True)
+safe_dataframe(issuer_trades[[c for c in trade_cols if c in issuer_trades.columns]].sort_values("trade_datetime", ascending=False).head(20000), use_container_width=True)
 
 
 
-section_anchor("report-export-center", "Report Export Center")
-with st.expander("Methodology: report export center", expanded=False):
-    st.markdown(
-        """
-This section creates exportable reporting packages from the current dashboard state.
+if ENABLE_REPORT_EXPORTS:
+    section_anchor("report-export-center", "Report Export Center")
+    with st.expander("Methodology: report export center", expanded=False):
+        st.markdown(
+            """
+    This section creates exportable reporting packages from the current dashboard state.
 
-**Export options:**
+    **Export options:**
 
-- **Interactive HTML report:** includes selected charts, summary metrics, methodology notes, and key tables.
-- **PDF summary:** creates a lightweight PDF using `reportlab` when available. For a full visual PDF, download the HTML report and use browser **Print → Save as PDF**.
-- **PowerPoint slides:** creates a simple presentation using `python-pptx` when available.
-- **Chart HTML bundle:** exports selected Plotly charts as standalone HTML files inside a ZIP.
-- **Chart data CSV bundle:** exports the underlying data used to generate selected charts.
+    - **Interactive HTML report:** includes selected charts, summary metrics, methodology notes, and key tables.
+    - **PDF summary:** creates a lightweight PDF using `reportlab` when available. For a full visual PDF, download the HTML report and use browser **Print → Save as PDF**.
+    - **PowerPoint slides:** creates a simple presentation using `python-pptx` when available.
+    - **Chart HTML bundle:** exports selected Plotly charts as standalone HTML files inside a ZIP.
+    - **Chart data CSV bundle:** exports the underlying data used to generate selected charts.
 
-**Important limitation:**
+    **Important limitation:**
 
-A Streamlit app cannot reliably export the exact live browser page, all expanded/collapsed states, and all interactive widgets into a perfect PDF/PPTX without a browser automation service. This module therefore exports a clean, reproducible report built from the uploaded data and current issuer selection.
-        """
-    )
+    A Streamlit app cannot reliably export the exact live browser page, all expanded/collapsed states, and all interactive widgets into a perfect PDF/PPTX without a browser automation service. This module therefore exports a clean, reproducible report built from the uploaded data and current issuer selection.
+            """
+        )
 
-# -----------------------------
-# Build exportable chart/data objects
-# -----------------------------
-export_chart_items = []
-export_data_items = {}
+    # -----------------------------
+    # Build exportable chart/data objects
+    # -----------------------------
+    export_chart_items = []
+    export_data_items = {}
 
-def add_export_chart(name: str, fig, data: pd.DataFrame | None = None):
-    """Collect charts for HTML/ZIP/PPT export without breaking if one chart fails."""
+    def add_export_chart(name: str, fig, data: pd.DataFrame | None = None):
+        """Collect charts for HTML/ZIP/PPT export without breaking if one chart fails."""
+        try:
+            export_chart_items.append((name, fig))
+            if data is not None and not data.empty:
+                export_data_items[name] = data.copy()
+        except Exception:
+            pass
+
+    # 1) Yield trend chart
     try:
-        export_chart_items.append((name, fig))
-        if data is not None and not data.empty:
-            export_data_items[name] = data.copy()
+        export_yield_df = market_df[market_df["issuer"] == selected_issuer].copy()
+        export_yield_df["trade_date"] = pd.to_datetime(export_yield_df["trade_date"], errors="coerce")
+        export_yield_df["yield"] = pd.to_numeric(export_yield_df["yield"], errors="coerce")
+        export_yield_df = export_yield_df.dropna(subset=["trade_date", "yield"])
+        if not export_yield_df.empty:
+            export_yield_daily = (
+                export_yield_df.groupby("trade_date", as_index=False)
+                .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"), total_trade_amount=("trade_amount", "sum") if "trade_amount" in export_yield_df.columns else ("yield", "count"))
+                .sort_values("trade_date")
+            )
+            export_yield_fig = px.line(
+                export_yield_daily,
+                x="trade_date",
+                y="avg_yield",
+                markers=True,
+                title=f"{selected_issuer} Average Trade Yield",
+                labels={"trade_date": "Trade Date", "avg_yield": "Average Yield (%)"},
+            )
+            add_export_chart("yield_trend", export_yield_fig, export_yield_daily)
     except Exception:
         pass
 
-# 1) Yield trend chart
-try:
-    export_yield_df = market_df[market_df["issuer"] == selected_issuer].copy()
-    export_yield_df["trade_date"] = pd.to_datetime(export_yield_df["trade_date"], errors="coerce")
-    export_yield_df["yield"] = pd.to_numeric(export_yield_df["yield"], errors="coerce")
-    export_yield_df = export_yield_df.dropna(subset=["trade_date", "yield"])
-    if not export_yield_df.empty:
-        export_yield_daily = (
-            export_yield_df.groupby("trade_date", as_index=False)
-            .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"), total_trade_amount=("trade_amount", "sum") if "trade_amount" in export_yield_df.columns else ("yield", "count"))
-            .sort_values("trade_date")
-        )
-        export_yield_fig = px.line(
-            export_yield_daily,
-            x="trade_date",
-            y="avg_yield",
-            markers=True,
-            title=f"{selected_issuer} Average Trade Yield",
-            labels={"trade_date": "Trade Date", "avg_yield": "Average Yield (%)"},
-        )
-        add_export_chart("yield_trend", export_yield_fig, export_yield_daily)
-except Exception:
-    pass
-
-# 2) Issuer curve chart
-try:
-    export_curve_df = market_df[market_df["issuer"] == selected_issuer].copy()
-    export_curve_df["trade_date"] = pd.to_datetime(export_curve_df["trade_date"], errors="coerce").dt.normalize()
-    export_curve_df["yield"] = pd.to_numeric(export_curve_df["yield"], errors="coerce")
-    export_curve_df = export_curve_df.dropna(subset=["trade_date", "yield", "maturity_bucket"])
-    export_curve_df = export_curve_df[export_curve_df["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
-    if not export_curve_df.empty:
-        latest_curve_date = export_curve_df["trade_date"].max()
-        export_curve_df = export_curve_df[export_curve_df["trade_date"] >= latest_curve_date - pd.Timedelta(days=30)]
-        export_curve_summary = (
-            export_curve_df.groupby("maturity_bucket", as_index=False)
-            .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"))
-        )
-        export_curve_summary["maturity_bucket"] = pd.Categorical(
-            export_curve_summary["maturity_bucket"],
-            categories=MATURITY_BUCKET_ORDER,
-            ordered=True,
-        )
-        export_curve_summary = export_curve_summary.sort_values("maturity_bucket")
-        export_curve_fig = px.line(
-            export_curve_summary,
-            x="maturity_bucket",
-            y="avg_yield",
-            markers=True,
-            title=f"{selected_issuer} Issuer Curve — Latest 30D Average",
-            labels={"maturity_bucket": "Maturity Year", "avg_yield": "Average Yield (%)"},
-        )
-        add_export_chart("issuer_curve_latest_30d", export_curve_fig, export_curve_summary)
-except Exception:
-    pass
-
-# 3) Current spread level heatmap
-try:
-    if not mmd_df.empty:
-        export_level_matrix, export_level_audit = build_spread_level_data(
-            market_df=market_df,
-            mmd_df=mmd_df,
-            issuer=selected_issuer,
-            ratings=["AAA", "AA", "A", "BBB"],
-        )
-        if not export_level_matrix.empty and not export_level_matrix.isna().all().all():
-            export_level_text = export_level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
-            export_level_fig = px.imshow(
-                export_level_matrix.astype(float),
-                x=export_level_matrix.columns,
-                y=export_level_matrix.index,
-                color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
-                color_continuous_midpoint=0,
-                aspect="auto",
-                title=f"{selected_issuer} Current Spread Level",
-                labels={"x": "Benchmark Curve", "y": "Maturity Year", "color": "Spread (bps)"},
+    # 2) Issuer curve chart
+    try:
+        export_curve_df = market_df[market_df["issuer"] == selected_issuer].copy()
+        export_curve_df["trade_date"] = pd.to_datetime(export_curve_df["trade_date"], errors="coerce").dt.normalize()
+        export_curve_df["yield"] = pd.to_numeric(export_curve_df["yield"], errors="coerce")
+        export_curve_df = export_curve_df.dropna(subset=["trade_date", "yield", "maturity_bucket"])
+        export_curve_df = export_curve_df[export_curve_df["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
+        if not export_curve_df.empty:
+            latest_curve_date = export_curve_df["trade_date"].max()
+            export_curve_df = export_curve_df[export_curve_df["trade_date"] >= latest_curve_date - pd.Timedelta(days=30)]
+            export_curve_summary = (
+                export_curve_df.groupby("maturity_bucket", as_index=False)
+                .agg(avg_yield=("yield", "mean"), trade_count=("yield", "count"))
             )
-            export_level_fig.update_traces(text=export_level_text.values, texttemplate="%{text}")
-            add_export_chart("current_spread_level_heatmap", export_level_fig, export_level_audit)
-except Exception:
-    pass
+            export_curve_summary["maturity_bucket"] = pd.Categorical(
+                export_curve_summary["maturity_bucket"],
+                categories=MATURITY_BUCKET_ORDER,
+                ordered=True,
+            )
+            export_curve_summary = export_curve_summary.sort_values("maturity_bucket")
+            export_curve_fig = px.line(
+                export_curve_summary,
+                x="maturity_bucket",
+                y="avg_yield",
+                markers=True,
+                title=f"{selected_issuer} Issuer Curve — Latest 30D Average",
+                labels={"maturity_bucket": "Maturity Year", "avg_yield": "Average Yield (%)"},
+            )
+            add_export_chart("issuer_curve_latest_30d", export_curve_fig, export_curve_summary)
+    except Exception:
+        pass
 
-# 4) Liquidity monthly activity chart
-try:
-    export_liq_df = market_df[market_df["issuer"] == selected_issuer].copy()
-    export_liq_df["trade_date"] = pd.to_datetime(export_liq_df["trade_date"], errors="coerce")
-    export_liq_df = export_liq_df.dropna(subset=["trade_date"])
-    if "trade_amount" in export_liq_df.columns:
-        export_liq_df["trade_amount"] = pd.to_numeric(export_liq_df["trade_amount"], errors="coerce").fillna(0)
-    else:
-        export_liq_df["trade_amount"] = 0.0
-    if not export_liq_df.empty:
-        export_liq_df["trade_month"] = export_liq_df["trade_date"].dt.to_period("M").astype(str)
-        export_monthly = (
-            export_liq_df.groupby("trade_month", as_index=False)
-            .agg(trade_count=("trade_date", "count"), total_trade_amount=("trade_amount", "sum"))
-        )
-        export_monthly_fig = px.line(
-            export_monthly,
-            x="trade_month",
-            y="trade_count",
-            markers=True,
-            title=f"{selected_issuer} Monthly Trade Count",
-            labels={"trade_month": "Trade Month", "trade_count": "Trade Count"},
-        )
-        add_export_chart("monthly_trade_count", export_monthly_fig, export_monthly)
-except Exception:
-    pass
+    # 3) Current spread level heatmap
+    try:
+        if not mmd_df.empty:
+            export_level_matrix, export_level_audit = build_spread_level_data(
+                market_df=market_df,
+                mmd_df=mmd_df,
+                issuer=selected_issuer,
+                ratings=["AAA", "AA", "A", "BBB"],
+            )
+            if not export_level_matrix.empty and not export_level_matrix.isna().all().all():
+                export_level_text = export_level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+                export_level_fig = px.imshow(
+                    export_level_matrix.astype(float),
+                    x=export_level_matrix.columns,
+                    y=export_level_matrix.index,
+                    color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
+                    color_continuous_midpoint=0,
+                    aspect="auto",
+                    title=f"{selected_issuer} Current Spread Level",
+                    labels={"x": "Benchmark Curve", "y": "Maturity Year", "color": "Spread (bps)"},
+                )
+                export_level_fig.update_traces(text=export_level_text.values, texttemplate="%{text}")
+                add_export_chart("current_spread_level_heatmap", export_level_fig, export_level_audit)
+    except Exception:
+        pass
 
-# -----------------------------
-# Export controls
-# -----------------------------
-export_options = st.multiselect(
-    "Select charts to include",
-    [name for name, _fig in export_chart_items],
-    default=[name for name, _fig in export_chart_items],
-    help="These are reconstructed export charts based on current selected issuer and uploaded data.",
-)
+    # 4) Liquidity monthly activity chart
+    try:
+        export_liq_df = market_df[market_df["issuer"] == selected_issuer].copy()
+        export_liq_df["trade_date"] = pd.to_datetime(export_liq_df["trade_date"], errors="coerce")
+        export_liq_df = export_liq_df.dropna(subset=["trade_date"])
+        if "trade_amount" in export_liq_df.columns:
+            export_liq_df["trade_amount"] = pd.to_numeric(export_liq_df["trade_amount"], errors="coerce").fillna(0)
+        else:
+            export_liq_df["trade_amount"] = 0.0
+        if not export_liq_df.empty:
+            export_liq_df["trade_month"] = export_liq_df["trade_date"].dt.to_period("M").astype(str)
+            export_monthly = (
+                export_liq_df.groupby("trade_month", as_index=False)
+                .agg(trade_count=("trade_date", "count"), total_trade_amount=("trade_amount", "sum"))
+            )
+            export_monthly_fig = px.line(
+                export_monthly,
+                x="trade_month",
+                y="trade_count",
+                markers=True,
+                title=f"{selected_issuer} Monthly Trade Count",
+                labels={"trade_month": "Trade Month", "trade_count": "Trade Count"},
+            )
+            add_export_chart("monthly_trade_count", export_monthly_fig, export_monthly)
+    except Exception:
+        pass
 
-selected_export_charts = [(name, fig) for name, fig in export_chart_items if name in export_options]
-
-export_meta = {
-    "Generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
-    "Selected Issuer": selected_issuer,
-    "Sector": selected_sector,
-    "Securities": f"{len(issuer_bonds):,}",
-    "Trades in Current Filter": f"{len(issuer_trades):,}",
-    "Latest Trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades",
-}
-
-report_html_parts = [
-    "<html><head><meta charset='utf-8'><title>Municipal Secondary Market Dashboard Report</title>",
-    "<style>body{font-family:Arial,sans-serif;margin:32px;color:#111827;} h1,h2{color:#111827;} table{border-collapse:collapse;width:100%;margin:16px 0;} td,th{border:1px solid #e5e7eb;padding:8px;text-align:left;} .note{color:#64748b;font-size:13px;}</style>",
-    "</head><body>",
-    "<h1>Municipal Secondary Market Dashboard Report</h1>",
-    "<h2>Executive Summary</h2>",
-    "<table>",
-]
-for k, v in export_meta.items():
-    report_html_parts.append(f"<tr><th>{k}</th><td>{v}</td></tr>")
-report_html_parts.extend([
-    "</table>",
-    "<p class='note'>Benchmark curves use uploaded rating curves when available; otherwise the app falls back to MMD/AAA plus transparent spread assumptions. Screening outputs are not investment recommendations.</p>",
-])
-
-for name, fig in selected_export_charts:
-    report_html_parts.append(f"<h2>{name.replace('_', ' ').title()}</h2>")
-    report_html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
-
-report_html_parts.append("</body></html>")
-full_report_html = "\n".join(report_html_parts)
-
-export_col1, export_col2, export_col3 = st.columns(3)
-
-with export_col1:
-    st.download_button(
-        label="Download Interactive HTML Report",
-        data=full_report_html.encode("utf-8"),
-        file_name=f"{selected_issuer}_dashboard_report.html".replace(" ", "_"),
-        mime="text/html",
-        help="Open this file in a browser. For a visual PDF, use browser Print → Save as PDF.",
+    # -----------------------------
+    # Export controls
+    # -----------------------------
+    export_options = st.multiselect(
+        "Select charts to include",
+        [name for name, _fig in export_chart_items],
+        default=[name for name, _fig in export_chart_items],
+        help="These are reconstructed export charts based on current selected issuer and uploaded data.",
     )
 
-with export_col2:
-    # Lightweight PDF summary via reportlab, if installed.
-    try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib import colors
+    selected_export_charts = [(name, fig) for name, fig in export_chart_items if name in export_options]
 
-        pdf_buffer = io.BytesIO()
-        doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
-        styles = getSampleStyleSheet()
-        story = [
-            Paragraph("Municipal Secondary Market Dashboard Summary", styles["Title"]),
-            Spacer(1, 12),
-        ]
-        meta_table = Table([[k, str(v)] for k, v in export_meta.items()])
-        meta_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        story.append(meta_table)
-        story.append(Spacer(1, 14))
-        story.append(Paragraph("Included Charts", styles["Heading2"]))
-        for name, _fig in selected_export_charts:
-            story.append(Paragraph(f"• {name.replace('_', ' ').title()}", styles["BodyText"]))
-        story.append(Spacer(1, 14))
-        story.append(Paragraph("Methodology Note", styles["Heading2"]))
-        story.append(Paragraph(
-            "This PDF is a lightweight summary. For interactive charts and fuller visual output, use the HTML report and browser Print → Save as PDF.",
-            styles["BodyText"],
-        ))
-        doc.build(story)
-        pdf_bytes = pdf_buffer.getvalue()
+    export_meta = {
+        "Generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+        "Selected Issuer": selected_issuer,
+        "Sector": selected_sector,
+        "Securities": f"{len(issuer_bonds):,}",
+        "Trades in Current Filter": f"{len(issuer_trades):,}",
+        "Latest Trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades",
+    }
 
+    report_html_parts = [
+        "<html><head><meta charset='utf-8'><title>Municipal Secondary Market Dashboard Report</title>",
+        "<style>body{font-family:Arial,sans-serif;margin:32px;color:#111827;} h1,h2{color:#111827;} table{border-collapse:collapse;width:100%;margin:16px 0;} td,th{border:1px solid #e5e7eb;padding:8px;text-align:left;} .note{color:#64748b;font-size:13px;}</style>",
+        "</head><body>",
+        "<h1>Municipal Secondary Market Dashboard Report</h1>",
+        "<h2>Executive Summary</h2>",
+        "<table>",
+    ]
+    for k, v in export_meta.items():
+        report_html_parts.append(f"<tr><th>{k}</th><td>{v}</td></tr>")
+    report_html_parts.extend([
+        "</table>",
+        "<p class='note'>Benchmark curves use uploaded rating curves when available; otherwise the app falls back to MMD/AAA plus transparent spread assumptions. Screening outputs are not investment recommendations.</p>",
+    ])
+
+    for name, fig in selected_export_charts:
+        report_html_parts.append(f"<h2>{name.replace('_', ' ').title()}</h2>")
+        report_html_parts.append(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+
+    report_html_parts.append("</body></html>")
+    full_report_html = "\n".join(report_html_parts)
+
+    export_col1, export_col2, export_col3 = st.columns(3)
+
+    with export_col1:
         st.download_button(
-            label="Download PDF Summary",
-            data=pdf_bytes,
-            file_name=f"{selected_issuer}_dashboard_summary.pdf".replace(" ", "_"),
-            mime="application/pdf",
+            label="Download Interactive HTML Report",
+            data=full_report_html.encode("utf-8"),
+            file_name=f"{selected_issuer}_dashboard_report.html".replace(" ", "_"),
+            mime="text/html",
+            help="Open this file in a browser. For a visual PDF, use browser Print → Save as PDF.",
         )
-    except Exception:
-        st.info("PDF summary export requires `reportlab`. Add `reportlab` to requirements.txt, or download HTML and print/save as PDF.")
 
-with export_col3:
-    # PPTX summary via python-pptx, if installed.
-    try:
-        from pptx import Presentation
-        from pptx.util import Inches, Pt
+    with export_col2:
+        # Lightweight PDF summary via reportlab, if installed.
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
 
-        prs = Presentation()
-        slide = prs.slides.add_slide(prs.slide_layouts[0])
-        slide.shapes.title.text = "Municipal Secondary Market Dashboard"
-        slide.placeholders[1].text = f"{selected_issuer} | {selected_sector} | Generated {export_meta['Generated']}"
+            pdf_buffer = io.BytesIO()
+            doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = [
+                Paragraph("Municipal Secondary Market Dashboard Summary", styles["Title"]),
+                Spacer(1, 12),
+            ]
+            meta_table = Table([[k, str(v)] for k, v in export_meta.items()])
+            meta_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(meta_table)
+            story.append(Spacer(1, 14))
+            story.append(Paragraph("Included Charts", styles["Heading2"]))
+            for name, _fig in selected_export_charts:
+                story.append(Paragraph(f"• {name.replace('_', ' ').title()}", styles["BodyText"]))
+            story.append(Spacer(1, 14))
+            story.append(Paragraph("Methodology Note", styles["Heading2"]))
+            story.append(Paragraph(
+                "This PDF is a lightweight summary. For interactive charts and fuller visual output, use the HTML report and browser Print → Save as PDF.",
+                styles["BodyText"],
+            ))
+            doc.build(story)
+            pdf_bytes = pdf_buffer.getvalue()
 
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = "Executive Snapshot"
-        body = slide.placeholders[1].text_frame
-        body.clear()
-        for k, v in export_meta.items():
-            p = body.add_paragraph()
-            p.text = f"{k}: {v}"
-            p.font.size = Pt(18)
+            st.download_button(
+                label="Download PDF Summary",
+                data=pdf_bytes,
+                file_name=f"{selected_issuer}_dashboard_summary.pdf".replace(" ", "_"),
+                mime="application/pdf",
+            )
+        except Exception:
+            st.info("PDF summary export requires `reportlab`. Add `reportlab` to requirements.txt, or download HTML and print/save as PDF.")
 
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = "Included Dashboard Charts"
-        body = slide.placeholders[1].text_frame
-        body.clear()
-        for name, _fig in selected_export_charts:
-            p = body.add_paragraph()
-            p.text = name.replace("_", " ").title()
-            p.level = 0
-            p.font.size = Pt(18)
+    with export_col3:
+        # PPTX summary via python-pptx, if installed.
+        try:
+            from pptx import Presentation
+            from pptx.util import Inches, Pt
 
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = "Methodology Notes"
-        body = slide.placeholders[1].text_frame
-        body.clear()
-        notes = [
-            "Benchmark curves use uploaded rating curves when available.",
-            "Fallback curves use MMD/AAA plus visible rating-spread assumptions.",
-            "Liquidity and RV scores are screening tools, not trade recommendations.",
-            "Scenario shock uses duration proxies, not full cash-flow pricing.",
-        ]
-        for note in notes:
-            p = body.add_paragraph()
-            p.text = note
-            p.font.size = Pt(16)
+            prs = Presentation()
+            slide = prs.slides.add_slide(prs.slide_layouts[0])
+            slide.shapes.title.text = "Municipal Secondary Market Dashboard"
+            slide.placeholders[1].text = f"{selected_issuer} | {selected_sector} | Generated {export_meta['Generated']}"
 
-        pptx_buffer = io.BytesIO()
-        prs.save(pptx_buffer)
-        pptx_bytes = pptx_buffer.getvalue()
+            slide = prs.slides.add_slide(prs.slide_layouts[1])
+            slide.shapes.title.text = "Executive Snapshot"
+            body = slide.placeholders[1].text_frame
+            body.clear()
+            for k, v in export_meta.items():
+                p = body.add_paragraph()
+                p.text = f"{k}: {v}"
+                p.font.size = Pt(18)
 
-        st.download_button(
-            label="Download PowerPoint Slides",
-            data=pptx_bytes,
-            file_name=f"{selected_issuer}_dashboard_slides.pptx".replace(" ", "_"),
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            slide = prs.slides.add_slide(prs.slide_layouts[1])
+            slide.shapes.title.text = "Included Dashboard Charts"
+            body = slide.placeholders[1].text_frame
+            body.clear()
+            for name, _fig in selected_export_charts:
+                p = body.add_paragraph()
+                p.text = name.replace("_", " ").title()
+                p.level = 0
+                p.font.size = Pt(18)
+
+            slide = prs.slides.add_slide(prs.slide_layouts[1])
+            slide.shapes.title.text = "Methodology Notes"
+            body = slide.placeholders[1].text_frame
+            body.clear()
+            notes = [
+                "Benchmark curves use uploaded rating curves when available.",
+                "Fallback curves use MMD/AAA plus visible rating-spread assumptions.",
+                "Liquidity and RV scores are screening tools, not trade recommendations.",
+                "Scenario shock uses duration proxies, not full cash-flow pricing.",
+            ]
+            for note in notes:
+                p = body.add_paragraph()
+                p.text = note
+                p.font.size = Pt(16)
+
+            pptx_buffer = io.BytesIO()
+            prs.save(pptx_buffer)
+            pptx_bytes = pptx_buffer.getvalue()
+
+            st.download_button(
+                label="Download PowerPoint Slides",
+                data=pptx_bytes,
+                file_name=f"{selected_issuer}_dashboard_slides.pptx".replace(" ", "_"),
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        except Exception:
+            st.info("PowerPoint export requires `python-pptx`. Add `python-pptx` to requirements.txt to enable slide export.")
+
+    # Chart HTML bundle and chart data bundle
+    bundle_col1, bundle_col2 = st.columns(2)
+
+    with bundle_col1:
+        try:
+            import zipfile
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for name, fig in selected_export_charts:
+                    zf.writestr(f"{name}.html", fig.to_html(full_html=True, include_plotlyjs="cdn"))
+            st.download_button(
+                label="Download Chart HTML Bundle",
+                data=zip_buffer.getvalue(),
+                file_name=f"{selected_issuer}_chart_html_bundle.zip".replace(" ", "_"),
+                mime="application/zip",
+            )
+        except Exception as exc:
+            st.info(f"Chart bundle export unavailable: {exc}")
+
+    with bundle_col2:
+        try:
+            import zipfile
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for name, df in export_data_items.items():
+                    if name in export_options and df is not None and not df.empty:
+                        zf.writestr(f"{name}_data.csv", df.to_csv(index=False))
+            st.download_button(
+                label="Download Chart Data CSV Bundle",
+                data=zip_buffer.getvalue(),
+                file_name=f"{selected_issuer}_chart_data_bundle.zip".replace(" ", "_"),
+                mime="application/zip",
+            )
+        except Exception as exc:
+            st.info(f"Chart data bundle export unavailable: {exc}")
+
+    with st.expander("How to export the full live webpage as PDF", expanded=False):
+        st.markdown(
+            """
+    For the exact live Streamlit page:
+
+    1. Open the dashboard in your browser.
+    2. Expand the sections you want included.
+    3. Press **Cmd+P** on Mac or **Ctrl+P** on Windows.
+    4. Choose **Save as PDF**.
+    5. Set scale to 70–85% if charts are too wide.
+
+    For a cleaner report with reproducible charts, use **Download Interactive HTML Report** above.
+            """
         )
-    except Exception:
-        st.info("PowerPoint export requires `python-pptx`. Add `python-pptx` to requirements.txt to enable slide export.")
-
-# Chart HTML bundle and chart data bundle
-bundle_col1, bundle_col2 = st.columns(2)
-
-with bundle_col1:
-    try:
-        import zipfile
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for name, fig in selected_export_charts:
-                zf.writestr(f"{name}.html", fig.to_html(full_html=True, include_plotlyjs="cdn"))
-        st.download_button(
-            label="Download Chart HTML Bundle",
-            data=zip_buffer.getvalue(),
-            file_name=f"{selected_issuer}_chart_html_bundle.zip".replace(" ", "_"),
-            mime="application/zip",
-        )
-    except Exception as exc:
-        st.info(f"Chart bundle export unavailable: {exc}")
-
-with bundle_col2:
-    try:
-        import zipfile
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for name, df in export_data_items.items():
-                if name in export_options and df is not None and not df.empty:
-                    zf.writestr(f"{name}_data.csv", df.to_csv(index=False))
-        st.download_button(
-            label="Download Chart Data CSV Bundle",
-            data=zip_buffer.getvalue(),
-            file_name=f"{selected_issuer}_chart_data_bundle.zip".replace(" ", "_"),
-            mime="application/zip",
-        )
-    except Exception as exc:
-        st.info(f"Chart data bundle export unavailable: {exc}")
-
-with st.expander("How to export the full live webpage as PDF", expanded=False):
-    st.markdown(
-        """
-For the exact live Streamlit page:
-
-1. Open the dashboard in your browser.
-2. Expand the sections you want included.
-3. Press **Cmd+P** on Mac or **Ctrl+P** on Windows.
-4. Choose **Save as PDF**.
-5. Set scale to 70–85% if charts are too wide.
-
-For a cleaner report with reproducible charts, use **Download Interactive HTML Report** above.
-        """
-    )
 
 
+else:
+    section_anchor("report-export-center", "Report Export Center")
+    st.info("Report export builder is disabled for speed. Enable it in the sidebar Performance panel when you need HTML/PDF/PPTX exports.")
+    export_chart_items = []
+    export_data_items = {}
 section_anchor("export-summary", "Export Summary Package")
 with st.expander("Methodology: export summary package", expanded=False):
     st.markdown(
@@ -8253,13 +8280,13 @@ Rule-based and explainable. Each phrase is triggered by spread movement, histori
 )
 
 with st.expander("Rating spread assumptions", expanded=False):
-    st.dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
+    safe_dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
 
 with st.expander("Duration proxy assumptions", expanded=False):
     duration_proxy_df = pd.DataFrame(
         [{"Maturity Year": f"{y}Y", "Proxy Duration": DURATION_PROXY[f"{y}Y"]} for y in range(1, MAX_MATURITY_YEAR + 1)]
     )
-    st.dataframe(duration_proxy_df, use_container_width=True, hide_index=True)
+    safe_dataframe(duration_proxy_df, use_container_width=True, hide_index=True)
 
 section_anchor("version-changelog", "Version / Change Log")
 version_rows = [
@@ -8267,7 +8294,7 @@ version_rows = [
     {"Version": "v1.1", "Change": "Added Cross-Issuer RV Analytics, Scenario Shock, Recommendation Narrative, and CUSIP Drilldown."},
     {"Version": "v1.2", "Change": "Added Data Quality Scorecard, Export Summary Package, Admin Methodology Page, and Watchlist."},
 ]
-st.dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
+safe_dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
 st.caption("Update this changelog whenever the team changes methodology, assumptions, or major modules.")
 
 
@@ -8283,10 +8310,10 @@ with d3:
 if show_raw_tables:
     st.header("Raw / Processed Tables")
     st.subheader("Issuer Master")
-    st.dataframe(issuer_master, use_container_width=True)
+    safe_dataframe(issuer_master, use_container_width=True)
     st.subheader("Security Reference")
-    st.dataframe(bonds_df, use_container_width=True)
+    safe_dataframe(bonds_df, use_container_width=True)
     st.subheader("All Trades")
-    st.dataframe(trades_df.head(20000), use_container_width=True)
+    safe_dataframe(trades_df.head(20000), use_container_width=True)
     st.subheader("Merged Market Data")
-    st.dataframe(market_df.head(20000), use_container_width=True)
+    safe_dataframe(market_df.head(20000), use_container_width=True)
