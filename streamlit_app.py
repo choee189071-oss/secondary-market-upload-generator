@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
 import pandas as pd
 import plotly.express as px
@@ -198,7 +199,7 @@ from data_utils import (
 
 st.set_page_config(page_title="Municipal Secondary Market Dashboard Generator", layout="wide")
 st.title("Municipal Secondary Market Dashboard Generator")
-st.caption("Bring your own bond master and trade-history exports. Generate issuer-level relative value and liquidity analytics.")
+st.caption("Bring your own MuniPro trade-history exports. Generate issuer-level relative value and liquidity analytics; bond reference data is optional enrichment.")
 
 st.markdown(
     """
@@ -387,30 +388,29 @@ with st.expander("Instructions", expanded=False):
         """
 <div style='font-size:15px; color:black; line-height:1.4;'>
 
-<h5 style='margin-bottom:4px;'>Step 1: Upload Required Files</h5>
+<h5 style='margin-bottom:4px;'>Step 1: Upload Required Trade File(s)</h5>
 
 <div style='padding-left:18px;'>
 
-<b>1. Bond File</b>
+<b>1. Trade History File(s) — Required</b>
 
 <ul style='margin-top:2px; margin-bottom:6px;'>
-<li>Information can be found from Munipro</li>
+<li>Information can be extracted from MuniPro</li>
 <li>Row 1 must contain column headers</li>
 <li>Actual data should begin from Row 2</li>
-<li>Multiple issuers’ bond data should be combined into the same file</li>
+<li>Multiple issuers’ trade data can be uploaded separately or combined into one file</li>
 </ul>
 
-<b>Minimum Required Columns:</b><br>Issuer, Cusip, Maturity<br><br><b>Recommended Columns:</b><br>Type, Lien, Election, Series, Secondary Credit, Term, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
+<b>Minimum Useful Columns:</b><br>Cusip, Maturity<br><br><b>Recommended Columns:</b><br>Issuer, Type, Lien, Election, Series, Secondary Credit, Term, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
 
 <div style='height:10px;'></div>
 
-<b>2. Trade History File(s)</b>
+<b>2. Optional Bond Reference File</b>
 
 <ul style='margin-top:2px; margin-bottom:6px;'>
-<li>Information can be extracted from Munipro</li>
-<li>Row 1 must contain column headers</li>
-<li>Actual data should begin from Row 2</li>
-<li>Trade files should be uploaded separately</li>
+<li>Use only if you want to enrich trades with static bond metadata</li>
+<li>Examples: call date, call price, lien, tax status, outstanding amount</li>
+<li>The dashboard can run without this file</li>
 </ul>
 
 <b>Minimum Required Columns:</b><br>CUSIP9, Trade Date, Yield<br><br><b>Recommended Columns:</b><br>Trade Date/Time, Description, Maturity Date, Settlement Date, Coupon, Price, Trade Amount, Calculation Date, Calculation Price, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
@@ -418,7 +418,7 @@ with st.expander("Instructions", expanded=False):
 <div style='height:8px;'></div>
 
 <b>Important:</b><br>
-CUSIP9 in Trade Files must match Cusip in Bond File.
+CUSIP9 in Trade Files is now the primary security identifier. Bond reference data is optional and only enriches the trade tape when CUSIPs match.
 
 <div style='height:10px;'></div>
 
@@ -427,6 +427,7 @@ CUSIP9 in Trade Files must match Cusip in Bond File.
 <ul style='margin-top:2px; margin-bottom:2px;'>
 <li>Issuer / Sector Mapping File</li>
 <li>MMD Curve File</li>
+<li>Bond Reference File</li>
 </ul>
 
 </div>
@@ -434,7 +435,7 @@ CUSIP9 in Trade Files must match Cusip in Bond File.
 <h5 style='margin-top:10px; margin-bottom:4px;'>Step 2: Automatic Issuer Detection</h5>
 
 <div style='padding-left:18px;'>
-The dashboard automatically detects issuer names from uploaded datasets.
+The dashboard automatically detects issuer names from trade descriptions, issuer mapping, and optional bond reference data.
 </div>
 
 <h5 style='margin-top:10px; margin-bottom:4px;'>Step 3: Select Uploaded Issuer</h5>
@@ -442,7 +443,7 @@ The dashboard automatically detects issuer names from uploaded datasets.
 <div style='padding-left:18px;'>
 
 <ul style='margin-top:2px; margin-bottom:6px;'>
-<li>Select one of the detected issuers</li>
+<li>Select one of the detected issuers from the trade tape</li>
 <li>Apply optional filters:
     <ul style='margin-top:2px; margin-bottom:2px;'>
         <li>Maturity Bucket</li>
@@ -1244,17 +1245,197 @@ def template_download_button(columns: list[str], label: str, filename: str):
     )
 
 
+
+
+def _infer_issuer_from_description(description: object, fallback: str = "Unknown") -> str:
+    """Conservative issuer extraction from MuniPro security descriptions."""
+    text = "" if pd.isna(description) else str(description).strip()
+    if not text:
+        return fallback or "Unknown"
+
+    # Common MuniPro descriptions use an issuer prefix followed by bond structure details.
+    # Keep the issuer-like prefix and drop series / GO / REV / maturity fragments.
+    upper = text.upper()
+    cut_patterns = [
+        r"\s+--\s+", r"\s+—\s+", r"\s+-\s+",
+        r"\s+GO\s", r"\s+REV\s", r"\s+REF\s", r"\s+SER\s", r"\s+SERIES\s",
+        r"\s+BONDS?\s", r"\s+CAP\s+APP", r"\s+VARIOUS\s+PURPOSE",
+        r"\s+20\d{2}\b", r"\s+19\d{2}\b",
+    ]
+    cut_positions = []
+    for pattern in cut_patterns:
+        m = re.search(pattern, upper)
+        if m and m.start() >= 4:
+            cut_positions.append(m.start())
+    if cut_positions:
+        text = text[: min(cut_positions)].strip(" ,-–—")
+    return text or fallback or "Unknown"
+
+
+def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
+    """Make standardized trade exports self-sufficient for dashboard analytics."""
+    if trades_df is None or trades_df.empty:
+        return pd.DataFrame()
+
+    out = trades_df.copy()
+
+    # Normalize dates/numeric fields used throughout the dashboard.
+    if "trade_date" in out.columns:
+        out["trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce")
+    if "trade_datetime" in out.columns:
+        out["trade_datetime"] = pd.to_datetime(out["trade_datetime"], errors="coerce")
+    elif "trade_date" in out.columns:
+        out["trade_datetime"] = out["trade_date"]
+
+    if "maturity" not in out.columns:
+        if "maturity_trade" in out.columns:
+            out["maturity"] = out["maturity_trade"]
+        elif "maturity_date" in out.columns:
+            out["maturity"] = out["maturity_date"]
+    if "maturity_trade" not in out.columns and "maturity" in out.columns:
+        out["maturity_trade"] = out["maturity"]
+    if "maturity_bond" not in out.columns and "maturity" in out.columns:
+        out["maturity_bond"] = out["maturity"]
+    if "maturity" in out.columns:
+        out["maturity"] = pd.to_datetime(out["maturity"], errors="coerce")
+        out["maturity_trade"] = pd.to_datetime(out.get("maturity_trade", out["maturity"]), errors="coerce")
+        out["maturity_bond"] = pd.to_datetime(out.get("maturity_bond", out["maturity"]), errors="coerce")
+
+    for col in ["yield", "price", "trade_amount", "spread", "index_rate", "coupon"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    if "coupon_trade" not in out.columns and "coupon" in out.columns:
+        out["coupon_trade"] = out["coupon"]
+
+    # Issuer inference is now trade-tape-first.
+    if "issuer" not in out.columns:
+        if "description" in out.columns:
+            out["issuer"] = out["description"].apply(_infer_issuer_from_description)
+        else:
+            out["issuer"] = out.get("source_file", pd.Series(["Unknown"] * len(out), index=out.index))
+    else:
+        missing_issuer = out["issuer"].isna() | (out["issuer"].astype(str).str.strip() == "") | (out["issuer"].astype(str).str.lower() == "unknown")
+        if "description" in out.columns:
+            out.loc[missing_issuer, "issuer"] = out.loc[missing_issuer, "description"].apply(_infer_issuer_from_description)
+        if "source_file" in out.columns:
+            out.loc[out["issuer"].isna() | (out["issuer"].astype(str).str.strip() == ""), "issuer"] = out.loc[out["issuer"].isna() | (out["issuer"].astype(str).str.strip() == ""), "source_file"]
+
+    out["issuer"] = out["issuer"].fillna("Unknown").astype(str).str.strip()
+
+    # Years to maturity and bucket are derived directly from trade maturity.
+    if "years_to_maturity" not in out.columns and {"maturity", "trade_date"}.issubset(out.columns):
+        out["years_to_maturity"] = (out["maturity"] - out["trade_date"]).dt.days / 365.25
+
+    if "maturity_bucket" not in out.columns and "years_to_maturity" in out.columns:
+        y = pd.to_numeric(out["years_to_maturity"], errors="coerce")
+        out["maturity_bucket"] = pd.cut(
+            y,
+            bins=[-float("inf"), 7, 15, 25, float("inf")],
+            labels=["Short", "Intermediate", "Long", "Extended Long"],
+        ).astype("object")
+    if "maturity_bucket" in out.columns:
+        out["maturity_bucket"] = out["maturity_bucket"].replace(MATURITY_BUCKET_RENAME).fillna("Unknown")
+
+    if "sector" not in out.columns:
+        out["sector"] = "Unknown"
+    if "primary_type" not in out.columns:
+        out["primary_type"] = pd.NA
+
+    return out
+
+
+def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Build issuer / sector reference from trades and optional mapping."""
+    if market_df is None or market_df.empty or "issuer" not in market_df.columns:
+        base = pd.DataFrame(columns=["issuer", "sector", "primary_type"])
+    else:
+        agg_cols = {"sector": "first", "primary_type": "first"}
+        present = {k: v for k, v in agg_cols.items() if k in market_df.columns}
+        if present:
+            base = market_df.groupby("issuer", as_index=False).agg(present)
+        else:
+            base = market_df[["issuer"]].drop_duplicates().copy()
+            base["sector"] = "Unknown"
+            base["primary_type"] = pd.NA
+
+    if issuer_mapping_df is not None and not issuer_mapping_df.empty:
+        mapping = issuer_mapping_df.copy()
+        if "issuer" in mapping.columns:
+            keep_cols = [c for c in ["issuer", "sector", "primary_type"] if c in mapping.columns]
+            mapping = mapping[keep_cols].drop_duplicates("issuer", keep="first")
+            base = base.merge(mapping, on="issuer", how="left", suffixes=("", "_map"))
+            for col in ["sector", "primary_type"]:
+                map_col = f"{col}_map"
+                if map_col in base.columns:
+                    if col not in base.columns:
+                        base[col] = base[map_col]
+                    else:
+                        base[col] = base[map_col].combine_first(base[col])
+                    base = base.drop(columns=[map_col])
+
+    if "sector" not in base.columns:
+        base["sector"] = "Unknown"
+    base["sector"] = base["sector"].fillna("Unknown").replace({"": "Unknown", "nan": "Unknown"})
+    if "primary_type" not in base.columns:
+        base["primary_type"] = pd.NA
+    return base.sort_values("issuer").reset_index(drop=True)
+
+
+def _build_security_reference_from_trades(market_df: pd.DataFrame, optional_bonds_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Create a security reference table from the trade tape, enriched by optional bond data."""
+    if market_df is None or market_df.empty or "cusip" not in market_df.columns:
+        return pd.DataFrame()
+
+    candidate_cols = [
+        "issuer", "sector", "primary_type", "cusip", "description", "trade_date", "maturity", "maturity_trade",
+        "coupon", "coupon_trade", "ratings_m_s_f", "rating", "index", "trade_type"
+    ]
+    cols = [c for c in candidate_cols if c in market_df.columns]
+    ref = market_df[cols].dropna(subset=["cusip"]).copy()
+    ref = ref.sort_values([c for c in ["cusip", "trade_date"] if c in market_df.columns]) if "trade_date" in market_df.columns else ref.sort_values("cusip")
+    ref = ref.drop_duplicates("cusip", keep="last")
+
+    # Add trade-derived liquidity/security attributes.
+    trade_agg = market_df.groupby("cusip", as_index=False).agg(
+        trade_count=("cusip", "count"),
+        first_trade=("trade_date", "min") if "trade_date" in market_df.columns else ("cusip", "count"),
+        latest_trade=("trade_date", "max") if "trade_date" in market_df.columns else ("cusip", "count"),
+        total_trade_amount=("trade_amount", "sum") if "trade_amount" in market_df.columns else ("cusip", "count"),
+    )
+    ref = ref.merge(trade_agg, on="cusip", how="left")
+
+    if optional_bonds_df is not None and not optional_bonds_df.empty and "cusip" in optional_bonds_df.columns:
+        bond_enrich = optional_bonds_df.drop_duplicates("cusip", keep="first").copy()
+        enrich_cols = [c for c in [
+            "cusip", "lien", "election", "series", "secondary_credit", "term", "par_amount",
+            "outstanding_amount", "call_date", "call_price", "fed_tax", "amt"
+        ] if c in bond_enrich.columns]
+        if len(enrich_cols) > 1:
+            ref = ref.merge(bond_enrich[enrich_cols], on="cusip", how="left")
+
+    return ref.reset_index(drop=True)
+
 @st.cache_data(show_spinner="Processing uploaded data...")
 def process_uploads(
-    bond_bytes: bytes,
-    bond_name: str,
     trade_payloads: list[tuple[str, bytes]],
     issuer_mapping_payload: tuple[str, bytes] | None,
     mmd_payload: tuple[str, bytes] | None,
+    bond_payload: tuple[str, bytes] | None = None,
 ):
-    bond_file = io.BytesIO(bond_bytes)
-    raw_bonds = read_uploaded_file(bond_file, bond_name)
-    bonds_df = standardize_bonds(raw_bonds)
+    """Process a trade-first dashboard dataset.
+
+    Required input is now only trade history. Bond/security reference data is
+    optional enrichment and is no longer used as the primary merge gate.
+    """
+    optional_bonds_df = pd.DataFrame()
+    if bond_payload is not None:
+        try:
+            bond_name, bond_bytes = bond_payload
+            raw_bonds = read_uploaded_file(io.BytesIO(bond_bytes), bond_name)
+            optional_bonds_df = standardize_bonds(raw_bonds)
+        except Exception:
+            optional_bonds_df = pd.DataFrame()
 
     issuer_mapping_df = pd.DataFrame()
     if issuer_mapping_payload is not None:
@@ -1262,25 +1443,55 @@ def process_uploads(
         raw_mapping = read_uploaded_file(io.BytesIO(payload), name)
         issuer_mapping_df = standardize_issuer_mapping(raw_mapping)
 
-    issuer_master = build_issuer_master(bonds_df, issuer_mapping_df)
-
     trade_frames = []
     failed_files = []
     for trade_name, trade_bytes in trade_payloads:
         try:
             raw_trade = read_uploaded_file(io.BytesIO(trade_bytes), trade_name)
-            trade_frames.append(standardize_trades(raw_trade, source_file=trade_name))
+            standardized = standardize_trades(raw_trade, source_file=trade_name)
+            standardized = _ensure_trade_only_fields(standardized)
+            trade_frames.append(standardized)
         except Exception as exc:
             failed_files.append((trade_name, str(exc)))
 
     trades_df = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
 
-    # Data Health metric: remove exact duplicate trade rows before analytics.
     before_dedup = len(trades_df)
     trades_df = trades_df.drop_duplicates().reset_index(drop=True)
     duplicates_removed = before_dedup - len(trades_df)
 
-    market_df = merge_market_data(bonds_df, trades_df, issuer_master)
+    market_df = _ensure_trade_only_fields(trades_df)
+
+    # Optional bond reference enriches missing static metadata but does not decide whether trades survive.
+    if not optional_bonds_df.empty and "cusip" in optional_bonds_df.columns and "cusip" in market_df.columns:
+        enrich = optional_bonds_df.drop_duplicates("cusip", keep="first").copy()
+        enrich_cols = [c for c in [
+            "cusip", "issuer", "sector", "primary_type", "maturity", "coupon", "lien", "election",
+            "series", "secondary_credit", "term", "par_amount", "outstanding_amount", "call_date",
+            "call_price", "fed_tax", "amt"
+        ] if c in enrich.columns]
+        if len(enrich_cols) > 1:
+            market_df = market_df.merge(enrich[enrich_cols], on="cusip", how="left", suffixes=("", "_bondref"))
+            for col in ["sector", "primary_type", "maturity", "coupon", "issuer"]:
+                ref_col = f"{col}_bondref"
+                if ref_col in market_df.columns:
+                    if col in ["issuer"]:
+                        # Keep trade description / mapping issuer as the primary truth; only fill missing issuer.
+                        missing = market_df[col].isna() | (market_df[col].astype(str).str.strip() == "") | (market_df[col].astype(str).str.lower() == "unknown")
+                        market_df.loc[missing, col] = market_df.loc[missing, ref_col]
+                    else:
+                        market_df[col] = market_df[col].combine_first(market_df[ref_col])
+                    market_df = market_df.drop(columns=[ref_col])
+
+    issuer_master = _build_issuer_master_from_trades(market_df, issuer_mapping_df)
+
+    if not issuer_master.empty and "issuer" in market_df.columns:
+        map_cols = [c for c in ["issuer", "sector", "primary_type"] if c in issuer_master.columns]
+        market_df = market_df.drop(columns=[c for c in ["sector", "primary_type"] if c in market_df.columns], errors="ignore")
+        market_df = market_df.merge(issuer_master[map_cols], on="issuer", how="left")
+        market_df["sector"] = market_df.get("sector", pd.Series(index=market_df.index, dtype="object")).fillna("Unknown")
+
+    bonds_df = _build_security_reference_from_trades(market_df, optional_bonds_df)
 
     mmd_df = pd.DataFrame()
     if mmd_payload is not None:
@@ -1300,7 +1511,7 @@ def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
 
 with st.sidebar:
     st.header("1. Upload Data")
-    bond_file = st.file_uploader("Bond Master File — required", type=["csv", "xlsx", "xls"])
+    bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
     trade_files = st.file_uploader("Trade History File(s) — required", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
     issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
     mmd_file = st.file_uploader("MMD Curve File — optional", type=["csv", "xlsx", "xls"])
@@ -1309,7 +1520,7 @@ with st.sidebar:
     st.caption("Tip: Keep proprietary raw exports out of public GitHub. Upload them only during your own session.")
 
     with st.expander("Download blank templates"):
-        template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Bond template CSV", "bond_master_template.csv")
+        template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Optional bond reference template CSV", "bond_reference_template.csv")
         template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
         template_download_button(CURVE_TEMPLATE_COLUMNS, "Benchmark curve template CSV", "benchmark_curve_template.csv")
 
@@ -1344,14 +1555,14 @@ with st.sidebar:
 <a href="#security-screener">16. Security Screener</a><br>
 <a href="#watchlist">17. Watchlist / Saved Candidates</a><br><br>
 
-<b>Bond-Level Drilldown</b><br>
+<b>Security-Level Drilldown</b><br>
 <a href="#spread-movement">18. Spread Movement</a><br>
 <a href="#cusip-drilldown">19. CUSIP Opportunity Drilldown</a><br>
 <a href="#rv-positioning">20. RV Positioning Map</a><br>
 <a href="#liquidity">21. Liquidity Analysis</a><br><br>
 
 <b>Reference / Admin / Outputs</b><br>
-<a href="#bond-master">22. Bond Master</a><br>
+<a href="#bond-master">22. Security Reference</a><br>
 <a href="#trade-detail">23. Trade Detail</a><br>
 <a href="#report-export-center">24. Report Export Center</a><br>
 <a href="#export-summary">25. Export Summary</a><br>
@@ -1379,16 +1590,16 @@ Recent additions:
             """
         )
 
-if bond_file is None or not trade_files:
-    st.info("Upload a bond master file and at least one trade-history file to generate the dashboard.")
+if not trade_files:
+    st.info("Upload at least one MuniPro trade-history file to generate the dashboard. Bond reference data is optional enrichment.")
     with st.expander("Expected file logic"):
         st.write(
-            "The app standardizes CUSIP fields, merges trades to bonds, infers issuer from the bond master when possible, "
-            "and falls back to the trade filename as an issuer guess when no bond match exists."
+            "The app now uses a trade-first workflow: it standardizes CUSIP fields, infers issuer from trade descriptions, "
+            "builds maturity buckets from trade maturity dates, and optionally enriches static fields from a bond reference file when provided."
         )
     st.stop()
 
-bond_bytes = bond_file.getvalue()
+bond_payload = (bond_file.name, bond_file.getvalue()) if bond_file else None
 trade_payloads = [(f.name, f.getvalue()) for f in trade_files]
 issuer_mapping_payload = (issuer_mapping_file.name, issuer_mapping_file.getvalue()) if issuer_mapping_file else None
 mmd_payload = (mmd_file.name, mmd_file.getvalue()) if mmd_file else None
@@ -1397,10 +1608,14 @@ mmd_payload = (mmd_file.name, mmd_file.getvalue()) if mmd_file else None
 # File-readiness gate: inspect the uploaded files before running full analytics.
 # -----------------------------------------------------------------------------
 section_anchor("file-readiness", "File Readiness Check")
-raw_bonds_preview = read_uploaded_file(io.BytesIO(bond_bytes), bond_file.name)
-bond_report = validate_dataset(raw_bonds_preview, bond_file.name, BOND_REQUIRED, BOND_RECOMMENDED, BOND_OPTIONAL)
-bond_warnings = validate_basic_values(raw_bonds_preview, bond_report["mapping"], dataset_type="bond")
-display_validation_report("Bond Master File", bond_report, bond_warnings)
+if bond_payload is not None:
+    raw_bonds_preview = read_uploaded_file(io.BytesIO(bond_payload[1]), bond_payload[0])
+    bond_report = validate_dataset(raw_bonds_preview, bond_payload[0], ["cusip"], BOND_RECOMMENDED, BOND_OPTIONAL)
+    bond_warnings = validate_basic_values(raw_bonds_preview, bond_report["mapping"], dataset_type="bond")
+    display_validation_report("Optional Bond Reference File", bond_report, bond_warnings)
+else:
+    bond_report = {"can_run": True}
+    st.info("No bond reference file uploaded. Running in trade-only mode; static bond metadata will be inferred from the trade tape where possible.")
 
 trade_reports = []
 trade_blocking_failures = []
@@ -1417,9 +1632,9 @@ for trade_name, trade_bytes in trade_payloads:
         st.error(f"Could not read trade file {trade_name}: {exc}")
         trade_blocking_failures.append(trade_name)
 
-if not bond_report["can_run"] or trade_blocking_failures:
+if trade_blocking_failures:
     st.error(
-        "The dashboard cannot run yet because at least one required file is missing minimum fields. "
+        "The dashboard cannot run yet because at least one required trade file is missing minimum fields. "
         "Use the readiness tables above to rename/add columns, then upload again."
     )
     st.stop()
@@ -1439,9 +1654,9 @@ with st.expander("Methodology: how the app decides whether a file is usable", ex
     st.markdown(
         """
 - **Required fields** are the minimum fields needed for the dashboard to run.
-- **Recommended fields** improve liquidity, callable-bond, tax, and relative-value analysis, but missing them should not break the app.
+- **Recommended fields** improve liquidity, benchmark, tax, and relative-value analysis, but missing them should not break the app.
 - **Column aliases** let the app recognize variants like `CUSIP9`, `Cusip`, or `CUSIP` as the same internal `cusip` field.
-- **Warnings** flag data-quality issues, but the app only stops when a required field is missing.
+- **Warnings** flag data-quality issues, but the app only stops when a required trade field is missing.
         """
     )
 
@@ -1454,11 +1669,10 @@ with st.expander("Methodology: how the app decides whether a file is usable", ex
     failed_files,
     duplicates_removed,
 ) = process_uploads(
-    bond_bytes=bond_bytes,
-    bond_name=bond_file.name,
     trade_payloads=trade_payloads,
     issuer_mapping_payload=issuer_mapping_payload,
     mmd_payload=mmd_payload,
+    bond_payload=bond_payload,
 )
 
 # Normalize legacy tenor-style bucket labels into presentation-friendly curve sectors.
@@ -1472,10 +1686,6 @@ if failed_files:
     with st.warning("Some trade files failed to process."):
         st.write(failed_files)
 
-if bonds_df.empty:
-    st.error("No usable bonds found. Please check that your bond master includes CUSIP and maturity fields.")
-    st.stop()
-
 if market_df.empty:
     st.error("No usable trade rows found. Please check that trade files include CUSIP and trade date fields.")
     st.stop()
@@ -1483,11 +1693,11 @@ if market_df.empty:
 uploaded_issuers = sorted(market_df["issuer"].dropna().astype(str).unique().tolist())
 
 if not uploaded_issuers:
-    st.error("No issuer names were detected from the uploaded files. Please check the issuer field in the bond master or trade filenames.")
+    st.error("No issuer names were detected from the uploaded trade files. Please check Description, issuer mapping, or trade filenames.")
     st.stop()
 
 st.success(
-    f"Processed {len(bonds_df):,} bonds and {len(market_df):,} merged trade rows "
+    f"Processed {len(market_df):,} trade rows and built {len(bonds_df):,} security-reference rows "
     f"from {len(trade_files):,} trade file(s). Detected {len(uploaded_issuers):,} issuer(s)."
 )
 
@@ -1516,18 +1726,15 @@ with st.sidebar:
 
     total_rows = len(market_df)
     if total_rows > 0 and "cusip" in market_df.columns:
-        bond_cusips = set(bonds_df["cusip"].dropna().astype(str).str.upper()) if "cusip" in bonds_df.columns else set()
-        trade_cusips = market_df["cusip"].dropna().astype(str).str.upper()
-        matched_cusips_count = trade_cusips.isin(bond_cusips).sum() if bond_cusips else 0
-        match_rate = matched_cusips_count / total_rows * 100
+        valid_cusip_count = market_df["cusip"].notna().sum()
+        valid_cusip_rate = valid_cusip_count / total_rows * 100
     else:
-        matched_cusips_count = 0
-        match_rate = 0
+        valid_cusip_rate = 0
 
-    match_icon = "🟢" if match_rate >= 95 else "🟡" if match_rate >= 80 else "🔴"
+    cusip_icon = "🟢" if valid_cusip_rate >= 95 else "🟡" if valid_cusip_rate >= 80 else "🔴"
     st.caption(
-        f"{match_icon} CUSIP Match Rate:\n"
-        f"{match_rate:.1f}%"
+        f"{cusip_icon} Valid CUSIP Rate:\n"
+        f"{valid_cusip_rate:.1f}%"
     )
 
     missing_issuers = market_df["issuer"].isna().sum() if "issuer" in market_df.columns else total_rows
@@ -1547,9 +1754,9 @@ with st.sidebar:
         st.markdown(
             """
 - **Data Coverage** uses the earliest and latest valid trade dates after standardization.
-- **Trades Loaded** counts merged trade rows available for analytics.
-- **CUSIP Match Rate** is the share of merged trade rows whose CUSIP appears in the uploaded bond master.
-- **Missing Issuers** counts rows without an issuer after the bond/trade merge and issuer-mapping logic.
+- **Trades Loaded** counts trade rows available for analytics.
+- **Valid CUSIP Rate** is the share of trade rows with a usable CUSIP identifier.
+- **Missing Issuers** counts rows without an issuer after trade-description inference and issuer-mapping logic.
 - **Duplicate Trades Removed** counts exact duplicate standardized trade rows removed before analytics.
             """
         )
@@ -1729,7 +1936,7 @@ Used for:
         "Show Raw Tables",
         value=False,
         help="""
-Display underlying trade-level and bond-level data tables.
+Display underlying trade-level and security-reference data tables.
 
 Useful for:
 - Audit review
@@ -1769,11 +1976,11 @@ This section evaluates whether the uploaded data is reliable enough for secondar
 
 **Scorecard components:**
 
-- **CUSIP match rate**: share of merged trade rows whose CUSIP appears in the uploaded bond master.
+- **Valid CUSIP rate**: share of trade rows with a usable CUSIP identifier.
 - **Valid trade date rate**: share of rows with parseable trade dates.
 - **Known maturity bucket rate**: share of rows assigned to Short / 10Y / 20Y / 30Y.
 - **Positive trade amount rate**: share of rows with positive par/trade amount.
-- **Issuer coverage rate**: share of rows with an issuer after merge / mapping.
+- **Issuer coverage rate**: share of rows with an issuer after trade-description inference and optional mapping.
 - **Duplicate rows removed**: exact duplicate standardized trade rows removed before analytics.
 
 The score is a practical reliability indicator, not a guarantee of correctness.
@@ -1787,9 +1994,8 @@ def dq_pct(numer, denom):
     return (numer / denom * 100) if denom and denom > 0 else 0
 
 if dq_total > 0:
-    bond_cusips = set(bonds_df["cusip"].dropna().astype(str).str.upper()) if "cusip" in bonds_df.columns else set()
-    trade_cusips = market_df["cusip"].dropna().astype(str).str.upper() if "cusip" in market_df.columns else pd.Series(dtype=str)
-    cusip_match_rate = dq_pct(trade_cusips.isin(bond_cusips).sum(), dq_total) if bond_cusips else 0
+    valid_cusips = market_df["cusip"].notna().sum() if "cusip" in market_df.columns else 0
+    cusip_match_rate = dq_pct(valid_cusips, dq_total)
 
     valid_trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").notna().sum() if "trade_date" in market_df.columns else 0
     valid_trade_date_rate = dq_pct(valid_trade_dates, dq_total)
@@ -1813,7 +2019,7 @@ if dq_total > 0:
     )
 
     dq_rows = [
-        {"Metric": "CUSIP Match Rate", "Value": cusip_match_rate, "Weight": "30%", "Interpretation": "Trade CUSIPs found in bond master"},
+        {"Metric": "Valid CUSIP Rate", "Value": cusip_match_rate, "Weight": "30%", "Interpretation": "Trade rows with usable CUSIP identifiers"},
         {"Metric": "Valid Trade Date Rate", "Value": valid_trade_date_rate, "Weight": "20%", "Interpretation": "Rows with parseable trade dates"},
         {"Metric": "Known Maturity Bucket Rate", "Value": known_bucket_rate, "Weight": "20%", "Interpretation": "Rows mapped to Short / Intermediate / Long / Extended Long"},
         {"Metric": "Issuer Coverage Rate", "Value": issuer_coverage_rate, "Weight": "15%", "Interpretation": "Rows with issuer after merge/mapping"},
@@ -1822,7 +2028,7 @@ if dq_total > 0:
 
     dq1, dq2, dq3, dq4 = st.columns(4)
     dq1.metric("Data Quality Score", f"{data_quality_score:.1f}/100")
-    dq2.metric("CUSIP Match Rate", f"{cusip_match_rate:.1f}%")
+    dq2.metric("Valid CUSIP Rate", f"{cusip_match_rate:.1f}%")
     dq3.metric("Known Bucket Rate", f"{known_bucket_rate:.1f}%")
     dq4.metric("Duplicates Removed", f"{duplicates_removed:,}")
 
@@ -1841,8 +2047,8 @@ if dq_total > 0:
         issue_cols = []
         issue_df = market_df.copy()
         if "cusip" in issue_df.columns:
-            issue_df["cusip_matches_bond_master"] = issue_df["cusip"].astype(str).str.upper().isin(bond_cusips)
-            issue_cols.append("cusip_matches_bond_master")
+            issue_df["valid_cusip"] = issue_df["cusip"].notna()
+            issue_cols.append("valid_cusip")
         if "maturity_bucket" in issue_df.columns:
             issue_df["known_maturity_bucket"] = issue_df["maturity_bucket"].isin(valid_buckets)
             issue_cols.append("known_maturity_bucket")
@@ -1877,7 +2083,7 @@ with snap_col1:
 with snap_col2:
     clean_metric_card("Issuer", selected_issuer, size="large")
 with snap_col3:
-    clean_metric_card("Bonds", f"{len(issuer_bonds):,}", size="small")
+    clean_metric_card("Securities", f"{len(issuer_bonds):,}", size="small")
 with snap_col4:
     clean_metric_card("Trades", f"{len(issuer_trades):,}", size="small")
 with snap_col5:
@@ -3332,7 +3538,7 @@ This module is intentionally **optional**. It only becomes fully useful when the
 
 if len(uploaded_issuers) < 2:
     st.info(
-        "Peer comparison is unavailable. Upload bond/trade data for at least two issuers "
+        "Peer comparison is unavailable. Upload trade data for at least two issuers "
         "to compare relative value across peers."
     )
 elif mmd_df.empty:
@@ -5520,7 +5726,7 @@ ai_context = {
     "period": ai_period,
     "analytics_as_of": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
     "executive_snapshot": {
-        "bonds": len(issuer_bonds),
+        "securities": len(issuer_bonds),
         "trades_current_filter": len(issuer_trades),
         "latest_trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else None,
     },
@@ -7158,9 +7364,9 @@ This is useful because trade count alone can overstate liquidity when most activ
     ]
     st.dataframe(liq[[c for c in display_cols if c in liq.columns]], use_container_width=True, height=500)
 
-section_anchor("bond-master", "Bond Master / Security Reference")
+section_anchor("bond-master", "Security Reference / Optional Bond Enrichment")
 bond_cols = ["issuer", "sector", "primary_type", "election", "series", "cusip", "secondary_credit", "term", "maturity", "par_amount", "outstanding_amount", "coupon", "call_date", "call_price", "fed_tax", "amt"]
-st.dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].sort_values(["maturity", "cusip"]), use_container_width=True)
+st.dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].sort_values([c for c in ["maturity", "cusip"] if c in issuer_bonds.columns]), use_container_width=True)
 
 section_anchor("trade-detail", "Underlying Trade Detail")
 trade_cols = ["trade_datetime", "cusip", "description", "maturity_trade", "maturity_bond", "maturity_bucket", "coupon_trade", "yield", "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"]
@@ -7328,7 +7534,7 @@ export_meta = {
     "Generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
     "Selected Issuer": selected_issuer,
     "Sector": selected_sector,
-    "Bonds": f"{len(issuer_bonds):,}",
+    "Securities": f"{len(issuer_bonds):,}",
     "Trades in Current Filter": f"{len(issuer_trades):,}",
     "Latest Trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades",
 }
@@ -7546,7 +7752,7 @@ summary_lines = [
     f"**Generated:** {summary_timestamp}",
     f"**Selected Issuer:** {selected_issuer}",
     f"**Sector:** {selected_sector}",
-    f"**Bonds:** {len(issuer_bonds):,}",
+    f"**Securities:** {len(issuer_bonds):,}",
     f"**Trades in Current Filter:** {len(issuer_trades):,}",
     f"**Latest Trade:** {latest_trade_text}",
     "",
@@ -7571,7 +7777,7 @@ if "data_quality_score" in locals():
         "",
         "## Data Quality",
         f"- Data Quality Score: {data_quality_score:.1f}/100",
-        f"- CUSIP Match Rate: {cusip_match_rate:.1f}%",
+        f"- Valid CUSIP Rate: {cusip_match_rate:.1f}%",
         f"- Known Maturity Bucket Rate: {known_bucket_rate:.1f}%",
         f"- Duplicates Removed: {duplicates_removed:,}",
     ])
@@ -7656,13 +7862,13 @@ with d1:
 with d2:
     dataframe_download_button(issuer_master, "Download Issuer Master CSV", "issuer_master.csv")
 with d3:
-    dataframe_download_button(bonds_df, "Download Cleaned Bonds CSV", "cleaned_bonds.csv")
+    dataframe_download_button(bonds_df, "Download Security Reference CSV", "security_reference.csv")
 
 if show_raw_tables:
     st.header("Raw / Processed Tables")
     st.subheader("Issuer Master")
     st.dataframe(issuer_master, use_container_width=True)
-    st.subheader("All Bonds")
+    st.subheader("Security Reference")
     st.dataframe(bonds_df, use_container_width=True)
     st.subheader("All Trades")
     st.dataframe(trades_df.head(20000), use_container_width=True)
