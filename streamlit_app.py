@@ -2710,8 +2710,9 @@ This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... 
                 st.caption(f"Active period: {_start_ts:%m/%d/%Y} → {_max_ts:%m/%d/%Y}")
     else:
         st.caption("Snapshot period unavailable until trade dates are loaded.")
-    # Keep legacy variable available for older downstream chart blocks.
+    # Keep legacy variables available for older downstream chart blocks.
     maturity_bucket = selected_maturity_year
+    trade_date_range = selected_trade_date_range
 
     # -----------------------------------------------------------------------------
     # Raw Table Toggle
