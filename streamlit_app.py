@@ -620,6 +620,321 @@ def safe_plotly_chart(fig, *args, **kwargs):
     return st.plotly_chart(fig, *args, **kwargs)
 
 
+# -----------------------------------------------------------------------------
+# Analyst read-through engine: numeric, slide-ready commentary from model factors
+# -----------------------------------------------------------------------------
+def _fmt_bps(x, digits: int = 1) -> str:
+    try:
+        if pd.isna(x):
+            return "N/A"
+        return f"{float(x):+.{digits}f} bp"
+    except Exception:
+        return "N/A"
+
+
+def _fmt_num(x, digits: int = 1) -> str:
+    try:
+        if pd.isna(x):
+            return "N/A"
+        return f"{float(x):,.{digits}f}"
+    except Exception:
+        return "N/A"
+
+
+def _fmt_pct(x, digits: int = 1) -> str:
+    try:
+        if pd.isna(x):
+            return "N/A"
+        return f"{float(x):.{digits}f}%"
+    except Exception:
+        return "N/A"
+
+
+def _fmt_mm(x, digits: int = 1) -> str:
+    try:
+        if pd.isna(x):
+            return "N/A"
+        return f"${float(x) / 1_000_000:,.{digits}f}M"
+    except Exception:
+        return "N/A"
+
+
+def _fmt_month(x) -> str:
+    try:
+        return pd.to_datetime(x).strftime("%b %Y")
+    except Exception:
+        return str(x)
+
+
+def _fmt_date(x) -> str:
+    try:
+        return pd.to_datetime(x).strftime("%m/%d/%Y")
+    except Exception:
+        return str(x)
+
+
+def _first_existing_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    if not isinstance(df, pd.DataFrame):
+        return None
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _render_slide_quote(title: str, quote: str, evidence: list[str] | None = None, expanded: bool = False):
+    """Render a compact slide-ready quote plus optional calculation evidence."""
+    if not quote:
+        return
+    st.markdown(f"**Analyst read-through — {title}**")
+    st.info(f"Slide-ready quote: {quote}")
+    if evidence:
+        with st.expander("Evidence / calculation details", expanded=expanded):
+            for item in evidence:
+                st.markdown(f"- {item}")
+
+
+def render_spread_trend_readthrough(df: pd.DataFrame, primary_issuer: str, compare_issuers: list[str] | None = None):
+    """Spread trend commentary built from daily median spread factors."""
+    if df is None or df.empty:
+        return
+    date_col = _first_existing_col(df, ["trade_date", "date"])
+    issuer_col = _first_existing_col(df, ["issuer", "line_item", "volume_group"])
+    spread_col = _first_existing_col(df, ["spread_bps", "spread_to_benchmark_bps", "spread"])
+    if not all([date_col, issuer_col, spread_col]):
+        return
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[spread_col] = pd.to_numeric(d[spread_col], errors="coerce")
+    if spread_col == "spread" and d[spread_col].abs().median(skipna=True) < 5:
+        d[spread_col] = d[spread_col] * 100
+    d = d.dropna(subset=[date_col, issuer_col, spread_col])
+    if d.empty:
+        return
+    daily = d.groupby([pd.Grouper(key=date_col, freq="D"), issuer_col], as_index=False).agg(
+        spread_bps=(spread_col, "median"), trade_count=(spread_col, "count")
+    ).sort_values(date_col)
+    primary = daily[daily[issuer_col].astype(str) == str(primary_issuer)]
+    if primary.empty:
+        return
+    start, end = primary.iloc[0], primary.iloc[-1]
+    chg = end["spread_bps"] - start["spread_bps"]
+    max_row = primary.loc[primary["spread_bps"].idxmax()]
+    min_row = primary.loc[primary["spread_bps"].idxmin()]
+    direction = "widened" if chg > 0 else "tightened" if chg < 0 else "was largely unchanged"
+    peer_text = ""
+    peers = [x for x in (compare_issuers or []) if str(x) != str(primary_issuer)]
+    evidence = [
+        f"{primary_issuer}: {_fmt_bps(start['spread_bps'])} on {_fmt_date(start[date_col])} to {_fmt_bps(end['spread_bps'])} on {_fmt_date(end[date_col])}.",
+        f"Peak / trough in selected window: {_fmt_bps(max_row['spread_bps'])} on {_fmt_date(max_row[date_col])}; {_fmt_bps(min_row['spread_bps'])} on {_fmt_date(min_row[date_col])}.",
+    ]
+    if peers:
+        peer_df = daily[daily[issuer_col].astype(str).isin([str(p) for p in peers])]
+        if not peer_df.empty:
+            peer_moves = []
+            for p, g in peer_df.groupby(issuer_col):
+                g = g.sort_values(date_col)
+                if len(g) >= 2:
+                    peer_moves.append(g.iloc[-1]["spread_bps"] - g.iloc[0]["spread_bps"])
+            if peer_moves:
+                peer_med = float(np.nanmedian(peer_moves))
+                peer_text = f" versus a peer median move of {_fmt_bps(peer_med)}"
+                evidence.append(f"Peer median move across selected comparison issuers: {_fmt_bps(peer_med)}.")
+    quote = (
+        f"{primary_issuer} spreads {direction} by {_fmt_bps(chg).replace('+','')} over the selected window, "
+        f"moving from {_fmt_bps(start['spread_bps'])} to {_fmt_bps(end['spread_bps'])}{peer_text}."
+    )
+    _render_slide_quote("spread trend", quote, evidence)
+
+
+def render_volume_readthrough(df: pd.DataFrame, primary_issuer: str):
+    """Trading volume commentary from monthly par/volume and primary issuer share."""
+    if df is None or df.empty:
+        return
+    date_col = _first_existing_col(df, ["trade_date", "date", "month"])
+    issuer_col = _first_existing_col(df, ["issuer", "volume_group"])
+    amt_col = _first_existing_col(df, ["trade_amount", "monthly_volume", "total_trade_amount"])
+    if not all([date_col, issuer_col, amt_col]):
+        return
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[amt_col] = pd.to_numeric(d[amt_col], errors="coerce")
+    d = d.dropna(subset=[date_col, issuer_col, amt_col])
+    if d.empty:
+        return
+    d["_month"] = d[date_col].dt.to_period("M").dt.to_timestamp()
+    monthly = d.groupby(["_month", issuer_col], as_index=False).agg(volume=(amt_col, "sum"), trades=(amt_col, "count"))
+    totals = monthly.groupby("_month", as_index=False).agg(total_volume=("volume", "sum"))
+    primary = monthly[monthly[issuer_col].astype(str) == str(primary_issuer)].groupby("_month", as_index=False).agg(primary_volume=("volume", "sum"))
+    share = totals.merge(primary, on="_month", how="left").fillna({"primary_volume": 0})
+    share["primary_share"] = np.where(share["total_volume"] > 0, share["primary_volume"] / share["total_volume"] * 100, np.nan)
+    if share.empty:
+        return
+    peak_share = share.loc[share["primary_share"].idxmax()]
+    avg_share = share["primary_share"].mean()
+    latest = share.sort_values("_month").iloc[-1]
+    peak_vol = share.loc[share["primary_volume"].idxmax()]
+    quote = (
+        f"{primary_issuer} represented an average {_fmt_pct(avg_share)} of selected secondary-market volume, "
+        f"peaking at {_fmt_pct(peak_share['primary_share'])} in {_fmt_month(peak_share['_month'])}; "
+        f"latest-month volume was {_fmt_mm(latest['primary_volume'])}."
+    )
+    evidence = [
+        f"Peak issuer share: {_fmt_pct(peak_share['primary_share'])} in {_fmt_month(peak_share['_month'])}.",
+        f"Peak issuer volume: {_fmt_mm(peak_vol['primary_volume'])} in {_fmt_month(peak_vol['_month'])}.",
+        f"Latest month: {_fmt_mm(latest['primary_volume'])} and {_fmt_pct(latest['primary_share'])} of selected volume.",
+    ]
+    _render_slide_quote("trading volume", quote, evidence)
+
+
+def render_monthly_activity_readthrough(monthly: pd.DataFrame):
+    if monthly is None or monthly.empty or "trade_count" not in monthly.columns:
+        return
+    date_col = _first_existing_col(monthly, ["trade_month", "month", "_month"])
+    if not date_col:
+        return
+    d = monthly.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d["trade_count"] = pd.to_numeric(d["trade_count"], errors="coerce")
+    d = d.dropna(subset=[date_col, "trade_count"]).sort_values(date_col)
+    if d.empty:
+        return
+    latest = d.iloc[-1]
+    avg = d["trade_count"].mean()
+    peak = d.loc[d["trade_count"].idxmax()]
+    q = f"Trading activity ended at {latest['trade_count']:,.0f} trades in {_fmt_month(latest[date_col])}, versus an average of {avg:,.0f}; the peak month was {_fmt_month(peak[date_col])} with {peak['trade_count']:,.0f} trades."
+    _render_slide_quote("market activity", q, [f"Average monthly trade count: {avg:,.0f}.", f"Peak month: {_fmt_month(peak[date_col])}, {peak['trade_count']:,.0f} trades."])
+
+
+def render_trade_size_readthrough(size_summary: pd.DataFrame):
+    if size_summary is None or size_summary.empty:
+        return
+    if not {"trade_size_bucket", "trade_count_share", "amount_share"}.issubset(size_summary.columns):
+        return
+    d = size_summary.copy()
+    d["trade_count_share"] = pd.to_numeric(d["trade_count_share"], errors="coerce") * 100
+    d["amount_share"] = pd.to_numeric(d["amount_share"], errors="coerce") * 100
+    count_leader = d.loc[d["trade_count_share"].idxmax()]
+    amt_leader = d.loc[d["amount_share"].idxmax()]
+    quote = (
+        f"Trade count is concentrated in {count_leader['trade_size_bucket']} trades ({_fmt_pct(count_leader['trade_count_share'])} of tickets), "
+        f"while par traded is concentrated in {amt_leader['trade_size_bucket']} blocks ({_fmt_pct(amt_leader['amount_share'])} of volume)."
+    )
+    _render_slide_quote("trade-size mix", quote, [
+        f"Largest share by ticket count: {count_leader['trade_size_bucket']} at {_fmt_pct(count_leader['trade_count_share'])}.",
+        f"Largest share by par amount: {amt_leader['trade_size_bucket']} at {_fmt_pct(amt_leader['amount_share'])}.",
+    ])
+
+
+def render_liquidity_readthrough(liq: pd.DataFrame):
+    if liq is None or liq.empty:
+        return
+    d = liq.copy()
+    tier_col = _first_existing_col(d, ["liquidity_tier"])
+    score_col = _first_existing_col(d, ["liquidity_score"])
+    stale_col = _first_existing_col(d, ["days_since_last_trade"])
+    cusip_col = _first_existing_col(d, ["cusip"])
+    if score_col:
+        d[score_col] = pd.to_numeric(d[score_col], errors="coerce")
+    if stale_col:
+        d[stale_col] = pd.to_numeric(d[stale_col], errors="coerce")
+    top = d.sort_values(score_col, ascending=False).iloc[0] if score_col and d[score_col].notna().any() else None
+    high_share = None
+    if tier_col:
+        high_share = (d[tier_col].astype(str).str.contains("High", case=False, na=False).mean() * 100)
+    stale_share = (d[stale_col].gt(30).mean() * 100) if stale_col else None
+    parts = []
+    evidence = []
+    if top is not None and cusip_col:
+        parts.append(f"the most liquid CUSIP is {top[cusip_col]} with a liquidity score of {_fmt_num(top[score_col])}")
+        evidence.append(f"Top liquidity score: {top[cusip_col]} at {_fmt_num(top[score_col])}.")
+    if high_share is not None:
+        parts.append(f"{_fmt_pct(high_share)} of securities screen as high liquidity")
+        evidence.append(f"High-liquidity share: {_fmt_pct(high_share)}.")
+    if stale_share is not None:
+        parts.append(f"{_fmt_pct(stale_share)} have not traded in more than 30 days")
+        evidence.append(f"Staleness share >30 days: {_fmt_pct(stale_share)}.")
+    if parts:
+        quote = "Liquidity screen indicates " + "; ".join(parts) + "."
+        _render_slide_quote("liquidity", quote, evidence)
+
+
+def render_ladder_readthrough(df: pd.DataFrame, value_col: str, label_col: str | None = None, title: str = "ranking"):
+    if df is None or df.empty or value_col not in df.columns:
+        return
+    d = df.copy()
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d.dropna(subset=[value_col])
+    if d.empty:
+        return
+    if label_col is None or label_col not in d.columns:
+        label_col = _first_existing_col(d, ["security_label", "security_bucket", "maturity_bucket", "maturity_zone", "cusip", "issuer"])
+    if label_col is None:
+        return
+    wide = d.loc[d[value_col].idxmax()]
+    rich = d.loc[d[value_col].idxmin()]
+    quote = (
+        f"The widest/richest dispersion in the {title} is {wide[label_col]} at {_fmt_bps(wide[value_col])}, "
+        f"versus {rich[label_col]} at {_fmt_bps(rich[value_col])}."
+    )
+    _render_slide_quote(title, quote, [
+        f"Widest / cheapest point: {wide[label_col]}, {_fmt_bps(wide[value_col])}.",
+        f"Richest / tightest point: {rich[label_col]}, {_fmt_bps(rich[value_col])}.",
+    ])
+
+
+def render_security_detail_readthrough(sec_daily: pd.DataFrame, cusip: str, benchmark_label: str = "benchmark"):
+    if sec_daily is None or sec_daily.empty:
+        return
+    date_col = _first_existing_col(sec_daily, ["trade_date", "date"])
+    y_col = _first_existing_col(sec_daily, ["avg_yield", "yield"])
+    s_col = _first_existing_col(sec_daily, ["spread_to_benchmark_bps", "current_spread_bps"])
+    if not date_col:
+        return
+    d = sec_daily.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d = d.dropna(subset=[date_col]).sort_values(date_col)
+    if len(d) < 2:
+        return
+    evidence = []
+    components = []
+    if y_col:
+        d[y_col] = pd.to_numeric(d[y_col], errors="coerce")
+        dy = d[y_col].iloc[-1] - d[y_col].iloc[0]
+        components.append(f"yield moved {_fmt_bps(dy * 100).replace(' bp',' bps')}")
+        evidence.append(f"Yield: {_fmt_num(d[y_col].iloc[0], 2)}% to {_fmt_num(d[y_col].iloc[-1], 2)}%.")
+    if s_col:
+        d[s_col] = pd.to_numeric(d[s_col], errors="coerce")
+        ds = d[s_col].iloc[-1] - d[s_col].iloc[0]
+        components.append(f"spread to {benchmark_label} moved {_fmt_bps(ds).replace(' bp',' bps')}")
+        evidence.append(f"Spread: {_fmt_bps(d[s_col].iloc[0])} to {_fmt_bps(d[s_col].iloc[-1])}.")
+    if components:
+        q = f"CUSIP {cusip} traded from {_fmt_date(d[date_col].iloc[0])} to {_fmt_date(d[date_col].iloc[-1])}; " + " and ".join(components) + "."
+        _render_slide_quote("CUSIP detail", q, evidence)
+
+
+def render_analyst_pack(market_df: pd.DataFrame, selected_issuer: str):
+    """A compact end-of-report commentary pack generated from model factors, not chart pixels."""
+    st.markdown("### Automated Analyst Commentary Pack")
+    st.caption("Python-generated, factor-based bullets designed to be copied into slides. These use uploaded trade / benchmark fields rather than image-level interpretation.")
+    try:
+        if market_df is not None and not market_df.empty:
+            tmp = market_df.copy()
+            if "issuer" in tmp.columns:
+                tmp = tmp[tmp["issuer"].astype(str) == str(selected_issuer)]
+            if not tmp.empty:
+                if "spread" in tmp.columns:
+                    tmp["_spread_bps"] = pd.to_numeric(tmp["spread"], errors="coerce") * 100
+                elif {"yield", "index_rate"}.issubset(tmp.columns):
+                    tmp["_spread_bps"] = (pd.to_numeric(tmp["yield"], errors="coerce") - pd.to_numeric(tmp["index_rate"], errors="coerce")) * 100
+                if {"trade_date", "_spread_bps"}.issubset(tmp.columns):
+                    render_spread_trend_readthrough(tmp.rename(columns={"_spread_bps":"spread_bps"}), selected_issuer, [])
+                if {"trade_date", "trade_amount", "issuer"}.issubset(market_df.columns):
+                    render_volume_readthrough(market_df, selected_issuer)
+    except Exception as e:
+        st.caption(f"Commentary pack skipped safely: {e}")
+
+
 def compact_ladder_table_for_display(table: pd.DataFrame, max_rows: int | None = None) -> pd.DataFrame:
     """Limit ladder rows to the most informative non-empty maturity rows.
 
@@ -3080,6 +3395,7 @@ with st.container():
             )
             fig_spread_snapshot.update_xaxes(tickformat="%m/%d/%Y")
             safe_plotly_chart(fig_spread_snapshot, width="stretch")
+            render_spread_trend_readthrough(spread_universe, selected_issuer, snapshot_issuers)
         else:
             st.info("No usable spread or index-rate data for the selected spread lines.")
     else:
@@ -3175,6 +3491,7 @@ with st.container():
             fig_vol_snapshot.update_yaxes(title_text="Secondary Market Volume ($MM)", secondary_y=False)
             fig_vol_snapshot.update_yaxes(title_text=f"{selected_issuer} % of Total", ticksuffix="%", secondary_y=True)
             safe_plotly_chart(fig_vol_snapshot, width="stretch")
+            render_volume_readthrough(vol_universe, selected_issuer)
         else:
             st.info("No usable trade amount data for monthly volume.")
     else:
@@ -3702,6 +4019,7 @@ else:
     monthly = liq_base.groupby("trade_month", as_index=False).agg(trade_count=("trade_date", "count"), total_trade_amount=("trade_amount", "sum"), avg_yield=("yield", "mean"))
     st.subheader("1. Market Activity Over Time")
     safe_plotly_chart(px.line(monthly, x="trade_month", y="trade_count", markers=True, title="Monthly Trade Count"), width="stretch")
+    render_monthly_activity_readthrough(monthly)
 
     st.subheader("2. Trade Size Distribution")
     with st.expander("Methodology: trade size distribution", expanded=False):
@@ -3800,6 +4118,7 @@ This is useful because trade count alone can overstate liquidity when most activ
             )
             amount_fig.update_layout(height=430)
             safe_plotly_chart(amount_fig, width="stretch")
+            render_trade_size_readthrough(size_summary)
 
             retail_trade_share = size_summary.loc[
                 size_summary["trade_size_bucket"] == "< $100k", "trade_count_share"
@@ -3842,6 +4161,7 @@ This is useful because trade count alone can overstate liquidity when most activ
 
     st.subheader("4. Trade Recency / Staleness")
     safe_plotly_chart(px.histogram(liq, x="days_since_last_trade", nbins=30, color="liquidity_tier", title="Distribution of Days Since Last Trade"), width="stretch")
+    render_liquidity_readthrough(liq)
 
     st.subheader("5. Liquidity Ranking Table")
     display_cols = [
@@ -4171,6 +4491,7 @@ else:
                                             )
                                             sec_spread_fig.update_layout(height=380)
                                             safe_plotly_chart(sec_spread_fig, width="stretch")
+                                            render_security_detail_readthrough(sec_daily, selected_cusip, dd_rating)
                                         else:
                                             sec_amt_fig = px.bar(
                                                 sec_daily,
@@ -4479,6 +4800,7 @@ else:
                         )
                         if screener_fig is not None:
                             safe_plotly_chart(screener_fig, width="stretch")
+                            render_ladder_readthrough(candidates_labeled, "spread_to_benchmark_bps", "security_label", "top cheap / wide bonds vs benchmark")
 
                         # Secondary read-through table: cheap + liquid / rich / review buckets.
                         quadrant = candidates_labeled.copy()
@@ -4760,6 +5082,7 @@ else:
                                 peer_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.45)
                                 peer_curve_fig.update_layout(height=520, hovermode="x unified")
                                 safe_plotly_chart(peer_curve_fig, width="stretch")
+                                render_ladder_readthrough(peer_summary, "spread_to_benchmark_bps", "issuer", "peer spread curve comparison")
 
                                 st.subheader("2. Peer Spread Ladder")
                                 peer_ladder = peer_summary.copy()
@@ -4789,6 +5112,7 @@ else:
                                     peer_ladder_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
                                     peer_ladder_fig.update_layout(height=max(420, 28 * len(peer_ladder) + 160), legend_title_text="Issuer")
                                     safe_plotly_chart(peer_ladder_fig, width="stretch")
+                                    render_ladder_readthrough(peer_ladder, "spread_to_benchmark_bps", "security_bucket", "peer spread ladder")
 
                                 st.subheader("3. Peer Ranking Table")
 
@@ -5222,6 +5546,7 @@ else:
                                         gap_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
                                         gap_fig.update_layout(height=max(420, 28 * len(gap_ladder) + 160), legend_title_text="Issuer")
                                         safe_plotly_chart(gap_fig, width="stretch")
+                                        render_ladder_readthrough(gap_ladder, "peer_gap_bps", "issuer_bucket", "peer gap ladder")
 
                                     st.subheader("2. Cross-Issuer RV Ranking")
                                     ranking = xrv_summary.sort_values("x_issuer_rv_score", ascending=False, na_position="last").copy()
@@ -5289,6 +5614,7 @@ else:
                                     )
                                     if xrv_bar is not None:
                                         safe_plotly_chart(xrv_bar, width="stretch")
+                                        render_ladder_readthrough(ranking_labeled, "peer_gap_bps", "issuer_bucket", "cross-issuer opportunity ranking")
 
                                     st.subheader("Cross-Issuer Decision Table")
                                     decision_cols = [
@@ -5447,6 +5773,7 @@ else:
                 level_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.5)
                 level_curve_fig.update_layout(hovermode="x unified")
                 safe_plotly_chart(level_curve_fig, width="stretch")
+                render_ladder_readthrough(curve_long, "spread_to_benchmark_bps", "maturity_bucket", "current spread curve")
 
             # 2) Spread level ladder: maturity year x benchmark rating, shown as ranked bars instead of a ladder.
             st.subheader("2. Current Spread Level Ladder")
@@ -5483,6 +5810,7 @@ else:
                 level_ladder_fig.add_vline(x=0, line_dash="dash", opacity=0.45)
                 level_ladder_fig.update_layout(height=max(420, 28 * len(level_ladder) + 160), legend_title_text="Benchmark")
                 safe_plotly_chart(level_ladder_fig, width="stretch")
+                render_ladder_readthrough(level_ladder, "spread_to_benchmark_bps", "security_bucket", "current spread level ladder")
 
             # 3) Quick signal: identify the cheapest bucket vs the first selected benchmark.
             primary_rating = level_ratings[0]
