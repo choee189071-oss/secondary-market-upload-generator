@@ -553,7 +553,7 @@ RATING_SPREADS: dict[str, dict[str, float]] = {
 }
 
 # ----------------------------------------------------------------------------‑
-# Professional maturity bucket labels
+# Professional maturity year labels
 # ----------------------------------------------------------------------------‑
 # The original prototype used tenor-style labels (10Y / 20Y / 30Y) for broad
 # maturity ranges. For presentation clarity, the app now uses descriptive curve
@@ -566,24 +566,40 @@ RATING_SPREADS: dict[str, dict[str, float]] = {
 #
 # The benchmark tenor mapping still uses the closest MMD tenor for each bucket.
 
-MATURITY_BUCKET_ORDER = ["Short", "Intermediate", "Long", "Extended Long"]
+# Annual maturity-year buckets used throughout the dashboard.
+# A trade with 4.3 years to maturity is assigned to 5Y via ceil(years_to_maturity).
+MAX_MATURITY_YEAR = 40
+MATURITY_BUCKET_ORDER = [f"{y}Y" for y in range(1, MAX_MATURITY_YEAR + 1)]
 MATURITY_BUCKET_OPTIONS = ["All"] + MATURITY_BUCKET_ORDER
 
-# Backward compatibility: data_utils or older uploaded processed data may still
-# create legacy labels. Normalize them immediately after processing.
+# Backward compatibility for any older processed data that still contains broad buckets.
+# New trade-only processing writes maturity_bucket as annual labels like 1Y, 2Y, ..., 40Y.
 MATURITY_BUCKET_RENAME = {
-    "10Y": "Intermediate",
-    "20Y": "Long",
-    "30Y": "Extended Long",
-}
-
-MMD_BUCKET_MAP = {
     "Short": "5Y",
     "Intermediate": "10Y",
     "Long": "20Y",
     "Extended Long": "30Y",
-    "All": "10Y",
+    "10Y": "10Y",
+    "20Y": "20Y",
+    "30Y": "30Y",
 }
+
+
+def _nearest_benchmark_tenor(year: int) -> str:
+    """Map an annual maturity year to the closest available benchmark tenor."""
+    if year <= 2:
+        return f"{year}Y"
+    if year <= 7:
+        return "5Y"
+    if year <= 15:
+        return "10Y"
+    if year <= 25:
+        return "20Y"
+    return "30Y"
+
+
+MMD_BUCKET_MAP = {f"{y}Y": _nearest_benchmark_tenor(y) for y in range(1, MAX_MATURITY_YEAR + 1)}
+MMD_BUCKET_MAP["All"] = "10Y"
 BENCHMARK_RATINGS = list(RATING_SPREADS.keys())
 
 
@@ -707,11 +723,11 @@ def _detect_mmd_date_column(mmd_df: pd.DataFrame) -> str | None:
 
 
 def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
-    """Convert MMD wide curve data into long benchmark data by maturity bucket.
+    """Convert MMD wide curve data into long benchmark data by maturity year.
 
     Output columns:
     - trade_date: normalized MMD date
-    - maturity_bucket: Short / Intermediate / Long / Extended Long
+    - maturity_bucket: 1Y / 2Y / 3Y / ...
     - benchmark_rating
     - mmd_tenor
     - benchmark_yield
@@ -759,7 +775,7 @@ def build_spread_observations(
     issuer: str,
     rating: str,
 ) -> pd.DataFrame:
-    """Build daily issuer spread observations by maturity bucket.
+    """Build daily issuer spread observations by maturity year.
 
     Spread is calculated in basis points:
     (average issuer trade yield - synthetic benchmark yield) * 100.
@@ -810,7 +826,7 @@ def build_spread_movement_heatmap_data(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return heatmap matrix and audit table for spread movement.
 
-    For each maturity bucket and lookback window:
+    For each maturity year and lookback window:
     Spread movement = latest available spread - historical spread at/before target date.
 
     Positive value means widening; negative value means tightening.
@@ -887,7 +903,7 @@ def build_spread_level_data(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return current spread level matrix and audit table.
 
-    Matrix rows are maturity buckets; columns are benchmark ratings.
+    Matrix rows are maturity years; columns are benchmark ratings.
     Each cell is the latest available issuer spread to that benchmark, in bps:
         (Average Issuer Trade Yield - Synthetic Benchmark Yield) * 100
 
@@ -955,7 +971,7 @@ def build_spread_level_data(
                     "source_column": latest.get("source_column"),
                     "trade_count": latest.get("trade_count"),
                     "total_trade_amount": latest.get("total_trade_amount"),
-                    "note": "Latest available spread observation for maturity bucket and benchmark",
+                    "note": "Latest available spread observation for maturity year and benchmark",
                 }
             )
 
@@ -971,15 +987,15 @@ def build_issuer_curve_snapshot(
     lookback_days: int,
     aggregation_method: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build issuer yield curve vs benchmark curves by maturity bucket.
+    """Build issuer yield curve vs benchmark curves by maturity year.
 
     This is a cross-sectional curve snapshot, not a time-series chart.
 
     Issuer curve logic:
-    - Average Last N Days: average uploaded trade yield by maturity bucket over the
+    - Average Last N Days: average uploaded trade yield by maturity year over the
       lookback window ending on the selected as-of date.
     - Latest Trade Per Bucket: latest available trade observation at or before the
-      selected as-of date for each maturity bucket.
+      selected as-of date for each maturity year.
 
     Benchmark curve logic:
     - Use uploaded rating curve columns when available.
@@ -1372,15 +1388,13 @@ def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
         out["maturity_year"] = pd.Series(np.ceil(y_for_year), index=out.index).where(y_for_year.notna())
         out["maturity_year"] = out["maturity_year"].astype("Int64")
 
-    # Broad maturity_bucket is retained only for legacy charts / methodology sections.
-    if "maturity_bucket" not in out.columns and "years_to_maturity" in out.columns:
-        y = pd.to_numeric(out["years_to_maturity"], errors="coerce")
-        out["maturity_bucket"] = pd.cut(
-            y,
-            bins=[-float("inf"), 7, 15, 25, float("inf")],
-            labels=["Short", "Intermediate", "Long", "Extended Long"],
-        ).astype("object")
-    if "maturity_bucket" in out.columns:
+    # Dashboard-wide maturity grouping: annual maturity labels (1Y, 2Y, ...).
+    # We keep the column name `maturity_bucket` for backward compatibility with existing chart code,
+    # but its values are now maturity-year labels rather than broad ranges.
+    if "maturity_year" in out.columns:
+        _yy = pd.to_numeric(out["maturity_year"], errors="coerce")
+        out["maturity_bucket"] = _yy.apply(lambda v: f"{int(v)}Y" if pd.notna(v) and int(v) >= 1 and int(v) <= MAX_MATURITY_YEAR else "Unknown")
+    elif "maturity_bucket" in out.columns:
         out["maturity_bucket"] = out["maturity_bucket"].replace(MATURITY_BUCKET_RENAME).fillna("Unknown")
 
     if "sector" not in out.columns:
@@ -1400,13 +1414,9 @@ def _parse_trade_index_tenor(index_value: object) -> str | None:
     if not m:
         return None
     year = int(m.group(1))
-    if year <= 5:
-        return "5Y"
-    if year <= 10:
-        return "10Y"
-    if year <= 20:
-        return "20Y"
-    return "30Y"
+    if year < 1:
+        return None
+    return f"{min(year, MAX_MATURITY_YEAR)}Y"
 
 
 def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataFrame:
@@ -1432,7 +1442,7 @@ def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataF
     wide = wide.rename(columns={"trade_date": "Date"})
 
     # Existing benchmark functions understand plain AAA/MMD tenors and rating-specific columns.
-    for tenor in ["5Y", "10Y", "20Y", "30Y"]:
+    for tenor in [f"{y}Y" for y in range(1, MAX_MATURITY_YEAR + 1)]:
         if tenor in wide.columns:
             wide[f"AAA_{tenor}"] = wide[tenor]
 
@@ -1818,7 +1828,7 @@ The dashboard now groups securities by **integer years to maturity** instead of 
 
 - We use `ceil(years_to_maturity)` for the displayed maturity year.
 - Example: 4.3 years to maturity → **5Y**.
-- This is closer to curve-tenor convention than broad buckets like Short / Long.
+- This is closer to curve-tenor convention than broad buckets like 1Y / 30Y.
 
 This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... securities directly.
             """
@@ -1834,7 +1844,7 @@ This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... 
             .unique()
             .tolist()
         )
-    maturity_year_options = ["All"] + [f"{int(y)}Y" for y in issuer_year_values if int(y) >= 0]
+    maturity_year_options = ["All"] + [f"{int(y)}Y" for y in issuer_year_values if int(y) >= 1]
     selected_maturity_year = st.selectbox(
         "Maturity Year",
         maturity_year_options,
@@ -1863,7 +1873,7 @@ This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... 
                 help="Filters by trade date, not maturity date.",
             )
     # Keep legacy variable available for older downstream chart blocks.
-    maturity_bucket = "All"
+    maturity_bucket = selected_maturity_year
 
     # -----------------------------------------------------------------------------
     # Raw Table Toggle
@@ -2096,7 +2106,7 @@ This section groups uploaded trade rows by **trade date** and **issuer**, then p
 issuer_choices = uploaded_issuers
 default_compare = [selected_issuer] if selected_issuer in issuer_choices else issuer_choices[:1]
 compare_issuers = st.multiselect("Compare Issuers", issuer_choices, default=default_compare)
-compare_bucket = st.selectbox("Comparison Maturity Bucket", MATURITY_BUCKET_OPTIONS, key="compare_bucket")
+compare_bucket = st.selectbox("Comparison Maturity Year", MATURITY_BUCKET_OPTIONS, key="compare_bucket")
 benchmark_ratings = st.multiselect(
     "Benchmark Curve(s)",
     BENCHMARK_RATINGS,
@@ -2238,13 +2248,13 @@ section_anchor("issuer-curve", "Issuer Curve vs Benchmark Curve")
 with st.expander("Methodology: issuer curve vs benchmark curve", expanded=False):
     st.markdown(
         """
-This chart shows a **cross-sectional yield curve** by maturity bucket, rather than a time-series trend.
+This chart shows a **cross-sectional yield curve** by maturity year, rather than a time-series trend.
 
 **Issuer curve logic:**
 
-- The issuer curve is built from uploaded trade yields by maturity bucket: **Short / 10Y / 20Y / 30Y**.
+- The issuer curve is built from uploaded trade yields by maturity year: **1Y / 2Y / 3Y / ...**.
 - Default aggregation uses **average yield over the latest selected window** ending on the curve date. This reduces noise from sparse municipal trading.
-- You can also use **latest trade per bucket** when you want the most recent observation in each maturity bucket.
+- You can also use **latest trade per bucket** when you want the most recent observation in each maturity year.
 
 **Benchmark curve logic:**
 
@@ -2338,7 +2348,7 @@ else:
                     hover_data=["curve_type", "trade_count", "issuer_observation_date"],
                     title=f"{selected_issuer} Issuer Curve vs Benchmark Curve(s)",
                     labels={
-                        "maturity_bucket": "Maturity Bucket",
+                        "maturity_bucket": "Maturity Year",
                         "yield_value": "Yield (%)",
                         "curve": "Curve",
                     },
@@ -2382,10 +2392,10 @@ This section turns the issuer curve into **curve mathematics**, similar to what 
 
 **Metrics:**
 
-- **5s10s Slope** = 10Y yield − Short/5Y yield
+- **5s10s Slope** = 10Y yield − 5Y yield
 - **10s30s Slope** = 30Y yield − 10Y yield
-- **5s30s Slope** = 30Y yield − Short/5Y yield
-- **5s10s30s Butterfly** = 10Y yield − average(Short/5Y yield, 30Y yield)
+- **5s30s Slope** = 30Y yield − 5Y yield
+- **5s10s30s Butterfly** = 10Y yield − average(5Y yield, 30Y yield)
 
 **How to read it:**
 
@@ -2521,7 +2531,7 @@ else:
                                 ],
                                 title=f"{selected_issuer} {cs_curve_basis} Shape",
                                 labels={
-                                    "maturity_bucket": "Maturity Bucket",
+                                    "maturity_bucket": "Maturity Year",
                                     metric_col: metric_label,
                                 },
                             )
@@ -2538,7 +2548,7 @@ else:
                                 value = curve_values.get(bucket)
                                 return value if pd.notna(value) else pd.NA
 
-                            v_short = get_curve_value("Short")
+                            v_short = get_curve_value("5Y")
                             v_10 = get_curve_value("10Y")
                             v_20 = get_curve_value("20Y")
                             v_30 = get_curve_value("30Y")
@@ -2550,7 +2560,7 @@ else:
                             missing_points = []
 
                             for bucket_name, bucket_value in {
-                                "Short": v_short,
+                                "5Y": v_short,
                                 "10Y": v_10,
                                 "20Y": v_20,
                                 "30Y": v_30,
@@ -2591,13 +2601,13 @@ else:
                                 analytics_status.append({
                                     "Analytics": "5s10s Slope",
                                     "Status": "Available",
-                                    "Requirement": "Short + 10Y",
+                                    "Requirement": "5Y + 10Y",
                                 })
                             else:
                                 analytics_status.append({
                                     "Analytics": "5s10s Slope",
                                     "Status": "Missing Required Points",
-                                    "Requirement": "Short + 10Y",
+                                    "Requirement": "5Y + 10Y",
                                 })
 
                             # 10s30s
@@ -2627,13 +2637,13 @@ else:
                                 analytics_status.append({
                                     "Analytics": "5s30s Slope",
                                     "Status": "Available",
-                                    "Requirement": "Short + 30Y",
+                                    "Requirement": "5Y + 30Y",
                                 })
                             else:
                                 analytics_status.append({
                                     "Analytics": "5s30s Slope",
                                     "Status": "Missing Required Points",
-                                    "Requirement": "Short + 30Y",
+                                    "Requirement": "5Y + 30Y",
                                 })
 
                             # Butterfly
@@ -2645,13 +2655,13 @@ else:
                                 analytics_status.append({
                                     "Analytics": "5s10s30s Butterfly",
                                     "Status": "Available",
-                                    "Requirement": "Short + 10Y + 30Y",
+                                    "Requirement": "5Y + 10Y + 30Y",
                                 })
                             else:
                                 analytics_status.append({
                                     "Analytics": "5s10s30s Butterfly",
                                     "Status": "Missing Required Points",
-                                    "Requirement": "Short + 10Y + 30Y",
+                                    "Requirement": "5Y + 10Y + 30Y",
                                 })
 
                             # Steepness score
@@ -2667,13 +2677,13 @@ else:
                                 analytics_status.append({
                                     "Analytics": "Steepness Score",
                                     "Status": "Available",
-                                    "Requirement": "Short + 10Y + 20Y + 30Y",
+                                    "Requirement": "5Y + 10Y + 20Y + 30Y",
                                 })
                             else:
                                 analytics_status.append({
                                     "Analytics": "Steepness Score",
                                     "Status": "Missing Required Points",
-                                    "Requirement": "Short + 10Y + 20Y + 30Y",
+                                    "Requirement": "5Y + 10Y + 20Y + 30Y",
                                 })
 
                             analytics_status_df = pd.DataFrame(analytics_status)
@@ -2767,7 +2777,7 @@ Where:
 
 - **Positive spread**: issuer yield is above the selected benchmark curve; the issuer/bucket is trading cheaper than that benchmark.
 - **Negative spread**: issuer yield is below the selected benchmark curve; the issuer/bucket is trading richer than that benchmark.
-- Rows are maturity buckets. Columns are benchmark curves.
+- Rows are maturity years. Columns are benchmark curves.
 - This is a **level** view, not a movement view. Level answers: *is it cheap or rich right now?* Movement answers: *did it widen or tighten recently?*
         """
     )
@@ -2829,7 +2839,7 @@ else:
                 markers=True,
                 title=f"{selected_issuer} Current Spread Curve vs Selected Benchmarks",
                 labels={
-                    "maturity_bucket": "Maturity Bucket",
+                    "maturity_bucket": "Maturity Year",
                     "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
                     "benchmark_rating": "Benchmark Curve",
                 },
@@ -2838,7 +2848,7 @@ else:
             level_curve_fig.update_layout(hovermode="x unified")
             st.plotly_chart(level_curve_fig, use_container_width=True)
 
-            # 2) Spread level heatmap: maturity bucket x benchmark rating.
+            # 2) Spread level heatmap: maturity year x benchmark rating.
             st.subheader("2. Current Spread Level Heatmap")
             level_heatmap_fig = px.imshow(
                 level_matrix.astype(float),
@@ -2848,7 +2858,7 @@ else:
                 color_continuous_midpoint=0,
                 aspect="auto",
                 title=f"{selected_issuer} Current Spread Level vs Benchmark Curves",
-                labels={"x": "Benchmark Curve", "y": "Maturity Bucket", "color": "Current Spread (bps)"},
+                labels={"x": "Benchmark Curve", "y": "Maturity Year", "color": "Current Spread (bps)"},
             )
             level_heatmap_fig.update_traces(
                 text=level_text.values,
@@ -2911,10 +2921,10 @@ else:
     wf_col1, wf_col2, wf_col3 = st.columns([1, 1, 1])
     with wf_col1:
         wf_bucket = st.selectbox(
-            "Waterfall Maturity Bucket",
+            "Waterfall Maturity Year",
             MATURITY_BUCKET_ORDER,
             index=1,
-            help="The issuer spread will be attributed for this maturity bucket.",
+            help="The issuer spread will be attributed for this maturity year.",
         )
     with wf_col2:
         wf_rating = st.selectbox(
@@ -3134,7 +3144,7 @@ else:
                                 audit_df = pd.DataFrame(
                                     [
                                         {"Metric": "Selected issuer", "Value": selected_issuer},
-                                        {"Metric": "Maturity bucket", "Value": wf_bucket},
+                                        {"Metric": "Maturity year", "Value": wf_bucket},
                                         {"Metric": "MMD tenor", "Value": wf_tenor},
                                         {"Metric": "Latest issuer trade date", "Value": wf_latest_trade_date.strftime("%Y-%m-%d")},
                                         {"Metric": "Benchmark curve date", "Value": wf_benchmark_date.strftime("%Y-%m-%d")},
@@ -3677,7 +3687,7 @@ else:
                         bench_df = pd.DataFrame(bench_rows)
 
                         if bench_df.empty:
-                            st.warning("Selected benchmark curve could not be built for any maturity bucket.")
+                            st.warning("Selected benchmark curve could not be built for any maturity year.")
                         else:
                             peer_summary = peer_summary.merge(bench_df, on="maturity_bucket", how="left")
                             peer_summary["spread_to_benchmark_bps"] = (
@@ -3714,7 +3724,7 @@ else:
                                     ],
                                     title=f"Peer Spread Curve Comparison vs {peer_rating} Benchmark",
                                     labels={
-                                        "maturity_bucket": "Maturity Bucket",
+                                        "maturity_bucket": "Maturity Year",
                                         "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
                                         "issuer": "Issuer",
                                     },
@@ -3741,7 +3751,7 @@ else:
                                     aspect="auto",
                                     title=f"Peer Spread Heatmap vs {peer_rating}",
                                     labels={
-                                        "x": "Maturity Bucket",
+                                        "x": "Maturity Year",
                                         "y": "Issuer",
                                         "color": "Spread (bps)",
                                     },
@@ -3836,7 +3846,7 @@ This table ranks issuers by **weighted average spread-to-benchmark**, measured i
 
 - Benchmark rating selected: **{peer_rating}**
 - Lookback window selected: **{peer_window_label}**
-- Maturity buckets included: selected peer maturity scope shown in this section
+- Maturity years included: selected peer maturity scope shown in this section
 - Issuers are ranked from **widest** to **tightest** based on `weighted_avg_spread_bps`
 - If trade amount is unavailable or zero, the dashboard falls back to the simple average spread
 
@@ -3927,7 +3937,7 @@ This section upgrades peer comparison from **visual comparison** into a systemat
 
 **Core purpose:**
 
-- Identify which issuer / maturity bucket screens cheap or rich versus the uploaded peer group.
+- Identify which issuer / maturity year screens cheap or rich versus the uploaded peer group.
 - Convert peer spreads into **peer gaps**, **z-scores**, and **relative value scores**.
 - Keep the module optional: it only becomes meaningful when at least two issuers are uploaded.
 
@@ -3935,7 +3945,7 @@ This section upgrades peer comparison from **visual comparison** into a systemat
 
 `Issuer Spread = (Average Issuer Yield - Benchmark Yield) × 100`
 
-`Peer Gap = Issuer Spread - Peer Median Spread within the same maturity bucket`
+`Peer Gap = Issuer Spread - Peer Median Spread within the same maturity year`
 
 `Peer Z-Score = (Issuer Spread - Bucket Mean Spread) / Bucket Spread Std`
 
@@ -4108,7 +4118,7 @@ else:
                                 if xrv_summary.empty:
                                     st.info("No issuer-bucket observations had usable benchmark spreads.")
                                 else:
-                                    # Peer-relative metrics by maturity bucket.
+                                    # Peer-relative metrics by maturity year.
                                     xrv_summary["bucket_peer_median_bps"] = (
                                         xrv_summary.groupby("maturity_bucket")["spread_to_benchmark_bps"].transform("median")
                                     )
@@ -4177,7 +4187,7 @@ else:
                                         aspect="auto",
                                         title=f"Peer Gap Matrix vs {xrv_rating} Benchmark",
                                         labels={
-                                            "x": "Maturity Bucket",
+                                            "x": "Maturity Year",
                                             "y": "Issuer",
                                             "color": "Peer Gap (bps)",
                                         },
@@ -4246,7 +4256,7 @@ else:
                                         labels={
                                             "liquidity_score": "Liquidity Score",
                                             "peer_gap_bps": "Peer Gap (bps)",
-                                            "maturity_bucket": "Maturity Bucket",
+                                            "maturity_bucket": "Maturity Year",
                                         },
                                     )
                                     xrv_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
@@ -4339,7 +4349,7 @@ else:
     hist_col1, hist_col2, hist_col3, hist_col4 = st.columns([1, 1, 1, 1])
     with hist_col1:
         hist_bucket = st.selectbox(
-            "Historical Maturity Bucket",
+            "Historical Maturity Year",
             MATURITY_BUCKET_ORDER,
             index=1,
             key="hist_spread_bucket",
@@ -4602,7 +4612,7 @@ else:
         )
     with dealer_col2:
         dealer_bucket = st.selectbox(
-            "Dealer Proxy Maturity Bucket",
+            "Dealer Proxy Maturity Year",
             MATURITY_BUCKET_OPTIONS,
             index=0,
             key="dealer_proxy_bucket",
@@ -4784,7 +4794,7 @@ Screen uploaded bonds/trades for securities that are both relatively cheap and s
 
 **Core fields used:**
 
-- Sector / issuer / maturity bucket
+- Sector / issuer / maturity year
 - Spread to benchmark
 - Liquidity score
 - Trade count
@@ -4812,7 +4822,7 @@ else:
         screen_sector = st.selectbox("Screener Sector", screen_sector_options, index=0, key="screen_sector")
     with screen_col2:
         screen_bucket = st.selectbox(
-            "Screener Maturity Bucket",
+            "Screener Maturity Year",
             MATURITY_BUCKET_OPTIONS,
             index=0,
             key="screen_bucket",
@@ -4890,7 +4900,7 @@ else:
             .reset_index()
         )
 
-        # Latest benchmark by maturity bucket.
+        # Latest benchmark by maturity year.
         screen_date_col = _detect_mmd_date_column(mmd_df)
         if screen_date_col is None:
             st.warning("Security screener cannot calculate spreads because the benchmark file has no usable date column.")
@@ -5040,7 +5050,7 @@ else:
                             labels={
                                 "liquidity_score": "Liquidity Score",
                                 "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
-                                "maturity_bucket": "Maturity Bucket",
+                                "maturity_bucket": "Maturity Year",
                             },
                         )
                         screener_fig.add_vline(x=min_liquidity, line_dash="dash", opacity=0.45)
@@ -5185,7 +5195,7 @@ It is intentionally not an AI black box. Each phrase is triggered by a transpare
 
 **Signals used when available:**
 
-- **Spread movement:** whether the selected maturity bucket widened/tightened over the chosen lookback window.
+- **Spread movement:** whether the selected maturity year widened/tightened over the chosen lookback window.
 - **Historical percentile:** whether the current spread is wide/tight versus its own history.
 - **Liquidity:** whether the bucket remains tradable based on trade count, amount traded, and recency.
 - **Peer comparison:** whether the selected issuer screens wide/tight versus uploaded peers.
@@ -5213,7 +5223,7 @@ else:
     rec_col1, rec_col2, rec_col3 = st.columns([1, 1, 1])
     with rec_col1:
         rec_bucket = st.selectbox(
-            "Narrative Maturity Bucket",
+            "Narrative Maturity Year",
             MATURITY_BUCKET_ORDER,
             index=3,
             key="rec_bucket",
@@ -5875,7 +5885,7 @@ try:
         ai_curve_window = ai_curve[ai_curve["trade_date"] >= ai_curve_latest - pd.Timedelta(days=30)]
         ai_curve_summary = ai_curve_window.groupby("maturity_bucket")["yield"].mean().to_dict()
         ai_context["signals"]["curve_shape"] = {
-            "short_yield": ai_curve_summary.get("Short"),
+            "short_yield": ai_curve_summary.get("5Y"),
             "ten_yield": ai_curve_summary.get("10Y"),
             "twenty_yield": ai_curve_summary.get("20Y"),
             "thirty_yield": ai_curve_summary.get("30Y"),
@@ -6007,7 +6017,7 @@ This section estimates how the selected issuer or uploaded securities may react 
 **Purpose:**
 
 - Estimate approximate price impact under rate shocks.
-- Identify which maturity buckets or CUSIPs are most exposed to parallel moves, steepening, or flattening.
+- Identify which maturity years or CUSIPs are most exposed to parallel moves, steepening, or flattening.
 - Provide a first-pass risk lens for secondary trading and pitchbook discussion.
 
 **Version 1 approximation:**
@@ -6020,18 +6030,15 @@ Core formula:
 
 Where:
 
-- Duration is proxied by maturity bucket unless a duration field is uploaded.
+- Duration is proxied by maturity year unless a duration field is uploaded.
 - Yield shock is expressed in decimal form. Example: `+25 bp = +0.0025`.
 - Price impact is an approximate percentage price move.
 
 **Default proxy durations:**
 
-| Bucket | Proxy Duration |
-|---|---:|
-| Short | 2.0 |
-| 10Y | 8.0 |
-| 20Y | 13.0 |
-| 30Y | 18.0 |
+The model now assigns proxy duration by annual maturity year. As a simple first-pass approximation, duration is capped at 18 years:
+
+`proxy_duration = min(maturity_year, 18)`
 
 **Important limitations:**
 
@@ -6041,20 +6048,15 @@ Where:
         """
     )
 
-DURATION_PROXY = {
-    "Short": 2.0,
-    "10Y": 8.0,
-    "20Y": 13.0,
-    "30Y": 18.0,
-}
+DURATION_PROXY = {f"{y}Y": min(float(y), 18.0) for y in range(1, MAX_MATURITY_YEAR + 1)}
 
 SHOCK_SCENARIOS_BPS = {
-    "+25bp Parallel": {"Short": 25, "10Y": 25, "20Y": 25, "30Y": 25},
-    "+50bp Parallel": {"Short": 50, "10Y": 50, "20Y": 50, "30Y": 50},
-    "-25bp Parallel": {"Short": -25, "10Y": -25, "20Y": -25, "30Y": -25},
-    "Bear Steepening": {"Short": 5, "10Y": 15, "20Y": 25, "30Y": 35},
-    "Bull Flattening": {"Short": -25, "10Y": -20, "20Y": -10, "30Y": -5},
-    "Front-End Selloff": {"Short": 35, "10Y": 20, "20Y": 10, "30Y": 5},
+    "+25bp Parallel": {f"{y}Y": 25 for y in range(1, MAX_MATURITY_YEAR + 1)},
+    "+50bp Parallel": {f"{y}Y": 50 for y in range(1, MAX_MATURITY_YEAR + 1)},
+    "-25bp Parallel": {f"{y}Y": -25 for y in range(1, MAX_MATURITY_YEAR + 1)},
+    "Bear Steepening": {f"{y}Y": min(5 + y, 35) for y in range(1, MAX_MATURITY_YEAR + 1)},
+    "Bull Flattening": {f"{y}Y": max(-25 + int(y / 3), -5) for y in range(1, MAX_MATURITY_YEAR + 1)},
+    "Front-End Selloff": {f"{y}Y": max(35 - y, 5) for y in range(1, MAX_MATURITY_YEAR + 1)},
 }
 
 shock_col1, shock_col2, shock_col3 = st.columns([1, 1, 1])
@@ -6075,7 +6077,7 @@ with shock_col2:
 with shock_col3:
     shock_view = st.selectbox(
         "Shock View",
-        ["Maturity bucket summary", "CUSIP-level detail"],
+        ["Maturity year summary", "CUSIP-level detail"],
         index=0,
         key="shock_view",
     )
@@ -6083,19 +6085,29 @@ with shock_col3:
 if shock_scenario == "Custom":
     custom_col1, custom_col2, custom_col3, custom_col4 = st.columns(4)
     with custom_col1:
-        shock_short = st.number_input("Short Shock (bp)", value=25.0, step=5.0, key="shock_short")
+        shock_1 = st.number_input("1Y Shock (bp)", value=25.0, step=5.0, key="shock_1")
     with custom_col2:
-        shock_10 = st.number_input("10Y Shock (bp)", value=25.0, step=5.0, key="shock_10")
+        shock_5 = st.number_input("5Y Shock (bp)", value=25.0, step=5.0, key="shock_5")
     with custom_col3:
-        shock_20 = st.number_input("20Y Shock (bp)", value=25.0, step=5.0, key="shock_20")
+        shock_10 = st.number_input("10Y Shock (bp)", value=25.0, step=5.0, key="shock_10")
     with custom_col4:
         shock_30 = st.number_input("30Y Shock (bp)", value=25.0, step=5.0, key="shock_30")
-    selected_shocks = {
-        "Short": float(shock_short),
-        "10Y": float(shock_10),
-        "20Y": float(shock_20),
-        "30Y": float(shock_30),
-    }
+    # Interpolate a simple custom shock path across annual maturity years.
+    selected_shocks = {}
+    anchor_points = [(1, float(shock_1)), (5, float(shock_5)), (10, float(shock_10)), (30, float(shock_30))]
+    for y in range(1, MAX_MATURITY_YEAR + 1):
+        if y <= 1:
+            val = anchor_points[0][1]
+        elif y >= 30:
+            val = anchor_points[-1][1]
+        else:
+            left, right = anchor_points[0], anchor_points[-1]
+            for a, b in zip(anchor_points, anchor_points[1:]):
+                if a[0] <= y <= b[0]:
+                    left, right = a, b
+                    break
+            val = left[1] + (right[1] - left[1]) * (y - left[0]) / (right[0] - left[0])
+        selected_shocks[f"{y}Y"] = float(val)
 else:
     selected_shocks = SHOCK_SCENARIOS_BPS[shock_scenario]
 
@@ -6121,7 +6133,7 @@ else:
     shock_base = shock_base[shock_base["maturity_bucket"].isin(MATURITY_BUCKET_ORDER)].copy()
 
     if shock_base.empty:
-        st.warning("No usable rows with maturity buckets were available for scenario shock analysis.")
+        st.warning("No usable rows with maturity years were available for scenario shock analysis.")
     else:
         # Build bucket summary from latest available selected-scope data.
         latest_shock_date = shock_base["trade_date"].max()
@@ -6170,7 +6182,7 @@ else:
             f"This is based on proxy duration and should be treated as a first-pass risk estimate."
         )
 
-        st.subheader("1. Shock Impact by Maturity Bucket")
+        st.subheader("1. Shock Impact by Maturity Year")
         shock_bar = px.bar(
             bucket_summary,
             x="maturity_bucket",
@@ -6185,7 +6197,7 @@ else:
             },
             title=f"Approximate Price Impact by Bucket — {shock_scenario}",
             labels={
-                "maturity_bucket": "Maturity Bucket",
+                "maturity_bucket": "Maturity Year",
                 "approx_price_impact_pct": "Approximate Price Impact (%)",
                 "avg_yield": "Current Avg Yield",
                 "shocked_yield": "Shocked Yield",
@@ -6285,7 +6297,7 @@ else:
                 labels={
                     "proxy_duration": "Proxy Duration",
                     "approx_price_impact_pct": "Approx Price Impact (%)",
-                    "maturity_bucket": "Maturity Bucket",
+                    "maturity_bucket": "Maturity Year",
                 },
             )
             shock_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
@@ -6296,7 +6308,7 @@ else:
             shock_assumption_df = pd.DataFrame(
                 [
                     {
-                        "Maturity Bucket": bucket,
+                        "Maturity Year": bucket,
                         "Shock (bp)": selected_shocks.get(bucket),
                         "Proxy Duration": DURATION_PROXY.get(bucket),
                         "Formula": "Approx Price Impact ≈ -Duration × Shock",
@@ -6330,7 +6342,7 @@ This heatmap shows whether the selected issuer has become richer or cheaper vers
 
 - **Positive / red = widening**: issuer spread increased versus the benchmark; the issuer/bucket became cheaper or underperformed.
 - **Negative / green = tightening**: issuer spread decreased versus the benchmark; the issuer/bucket became richer or outperformed.
-- Rows are maturity buckets. Columns are lookback windows.
+- Rows are maturity years. Columns are lookback windows.
 - Because municipal bonds can trade sparsely, the historical value uses the latest available observation at or before the lookback target date.
         """
     )
@@ -6377,7 +6389,7 @@ else:
                 color_continuous_midpoint=0,
                 aspect="auto",
                 title=f"{selected_issuer} Spread Movement vs {heatmap_rating} Curve",
-                labels={"x": "Lookback Window", "y": "Maturity Bucket", "color": "Spread Movement (bps)"},
+                labels={"x": "Lookback Window", "y": "Maturity Year", "color": "Spread Movement (bps)"},
             )
             heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
             heatmap_fig.update_layout(height=420)
@@ -6410,7 +6422,7 @@ This section moves from issuer-level signals into **specific bond-level candidat
 
 **Purpose:**
 
-- Identify which CUSIPs are driving a maturity bucket's relative-value signal.
+- Identify which CUSIPs are driving a maturity year's relative-value signal.
 - Compare current CUSIP-level spread, recent movement, trade count, and liquidity.
 - Help the team move from: *"30Y widened"* to *"which 30Y bonds should we look at?"*
 
@@ -6438,10 +6450,10 @@ else:
     dd_col1, dd_col2, dd_col3, dd_col4 = st.columns([1, 1, 1, 1])
     with dd_col1:
         dd_bucket = st.selectbox(
-            "Drilldown Maturity Bucket",
+            "Drilldown Maturity Year",
             MATURITY_BUCKET_ORDER,
             index=3,
-            help="Focus the drilldown on one maturity bucket.",
+            help="Focus the drilldown on one maturity year.",
         )
     with dd_col2:
         dd_rating = st.selectbox(
@@ -6772,7 +6784,7 @@ This scatter plot maps individual CUSIPs by **tradability** and **relative value
 - **X-axis = Liquidity Score**: higher means more actively traded, larger traded amount, more recent activity, and less staleness.
 - **Y-axis = Spread to Benchmark**: higher means the bond is trading cheaper versus the selected benchmark curve.
 - **Bubble size = Total Trade Amount**: larger dots indicate more secondary-market trading volume.
-- **Color = Maturity Bucket**: Short / Intermediate / Long / Extended Long.
+- **Color = Maturity Year**: 1Y / 2Y / 3Y / ....
 
 **Quadrants:**
 
@@ -6894,7 +6906,7 @@ else:
 
         rv_summary = rv_summary[rv_summary["trade_count"] >= rv_min_trades].copy()
 
-        # Add benchmark spread at each CUSIP's latest trade date and maturity bucket.
+        # Add benchmark spread at each CUSIP's latest trade date and maturity year.
         if rv_y_axis == "Spread to Benchmark (bps)":
             if mmd_df.empty:
                 st.info("Upload an MMD / benchmark curve file to use Spread to Benchmark. Showing Average Yield instead.")
@@ -6957,7 +6969,7 @@ else:
             #
             # We handle this in two steps:
             #   1) Clean numeric plotting inputs so the chart does not crash.
-            #   2) Split known maturity buckets from unknown maturity buckets so
+            #   2) Split known maturity years from unknown maturity years so
             #      "Unknown" does not dominate or pollute the main positioning map.
             rv_plot = rv_summary.copy()
 
@@ -6969,7 +6981,7 @@ else:
             required_plot_cols = ["liquidity_score", rv_y_axis_col]
             rv_plot = rv_plot.dropna(subset=[c for c in required_plot_cols if c in rv_plot.columns])
 
-            # Resolve maturity bucket from common merge variants. If the bucket still
+            # Resolve maturity year from common merge variants. If the bucket still
             # cannot be determined, keep the row for audit but exclude it from the
             # main scatter chart.
             valid_buckets = MATURITY_BUCKET_ORDER
@@ -7030,7 +7042,7 @@ else:
 
             elif rv_known.empty:
                 st.warning(
-                    "No bonds with known maturity buckets were available for the main positioning map. "
+                    "No bonds with known maturity years were available for the main positioning map. "
                     "Unknown-maturity bonds are listed below for audit."
                 )
                 rv_summary = rv_known
@@ -7053,7 +7065,7 @@ else:
                         labels={
                             "liquidity_score": "Liquidity Score",
                             rv_y_axis_col: rv_y_axis_label,
-                            "maturity_bucket": "Maturity Bucket",
+                            "maturity_bucket": "Maturity Year",
                             size_col: rv_size_by if size_col != "point_size" else "Fixed Point Size",
                         },
                     )
@@ -7077,18 +7089,18 @@ else:
                 # Use the cleaned known-bucket plotting data for quadrant/read-through logic.
                 rv_summary = rv_known
 
-            # Unknown maturity bucket audit ------------------------------------------
+            # Unknown maturity year audit ------------------------------------------
             # These rows are not bad data; they are simply excluded from the main map
-            # because the maturity bucket could not be determined from the uploaded
+            # because the maturity year could not be determined from the uploaded
             # bond/trade data. Keeping them visible makes the dashboard transparent
             # without letting Unknown dominate the legend.
             if not rv_unknown.empty:
                 with st.expander(
-                    f"Unknown maturity bucket bonds excluded from main map ({len(rv_unknown):,})",
+                    f"Unknown maturity year bonds excluded from main map ({len(rv_unknown):,})",
                     expanded=False,
                 ):
                     st.caption(
-                        "These CUSIPs were excluded from the main positioning map because their maturity bucket "
+                        "These CUSIPs were excluded from the main positioning map because their maturity year "
                         "could not be determined from the uploaded bond/trade data. They are retained here for audit."
                     )
                     unknown_display_cols = [
@@ -7445,7 +7457,7 @@ try:
             y="avg_yield",
             markers=True,
             title=f"{selected_issuer} Issuer Curve — Latest 30D Average",
-            labels={"maturity_bucket": "Maturity Bucket", "avg_yield": "Average Yield (%)"},
+            labels={"maturity_bucket": "Maturity Year", "avg_yield": "Average Yield (%)"},
         )
         add_export_chart("issuer_curve_latest_30d", export_curve_fig, export_curve_summary)
 except Exception:
@@ -7470,7 +7482,7 @@ try:
                 color_continuous_midpoint=0,
                 aspect="auto",
                 title=f"{selected_issuer} Current Spread Level",
-                labels={"x": "Benchmark Curve", "y": "Maturity Bucket", "color": "Spread (bps)"},
+                labels={"x": "Benchmark Curve", "y": "Maturity Year", "color": "Spread (bps)"},
             )
             export_level_fig.update_traces(text=export_level_text.values, texttemplate="%{text}")
             add_export_chart("current_spread_level_heatmap", export_level_fig, export_level_audit)
@@ -7810,7 +7822,7 @@ Combines spread percentile, liquidity percentile, and trade activity percentile 
 Only enabled when trade side/type data exists. It estimates buy/sell imbalance but does not represent true dealer inventory.
 
 ### Scenario Shock
-Uses duration proxies by maturity bucket. It does not model full cash flows, convexity, OAS, tax status, or callable optionality.
+Uses duration proxies by maturity year. It does not model full cash flows, convexity, OAS, tax status, or callable optionality.
 
 ### Recommendation Narrative
 Rule-based and explainable. Each phrase is triggered by spread movement, historical percentile, liquidity, peer gap, or flow proxy thresholds.
@@ -7822,12 +7834,7 @@ with st.expander("Rating spread assumptions", expanded=False):
 
 with st.expander("Duration proxy assumptions", expanded=False):
     duration_proxy_df = pd.DataFrame(
-        [
-            {"Maturity Bucket": "Short", "Proxy Duration": 2.0},
-            {"Maturity Bucket": "Intermediate", "Proxy Duration": 8.0},
-            {"Maturity Bucket": "Long", "Proxy Duration": 13.0},
-            {"Maturity Bucket": "Extended Long", "Proxy Duration": 18.0},
-        ]
+        [{"Maturity Year": f"{y}Y", "Proxy Duration": DURATION_PROXY[f"{y}Y"]} for y in range(1, MAX_MATURITY_YEAR + 1)]
     )
     st.dataframe(duration_proxy_df, use_container_width=True, hide_index=True)
 
