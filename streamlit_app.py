@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -446,8 +447,8 @@ The dashboard automatically detects issuer names from trade descriptions, issuer
 <li>Select one of the detected issuers from the trade tape</li>
 <li>Apply optional filters:
     <ul style='margin-top:2px; margin-bottom:2px;'>
-        <li>Maturity Bucket</li>
-        <li>Time Window</li>
+        <li>Maturity Year</li>
+        <li>Optional Trade Date Filter</li>
         <li>Relative Value Comparison</li>
     </ul>
 </li>
@@ -1360,10 +1361,18 @@ def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
 
     out["issuer"] = out["issuer"].fillna("Unknown").astype(str).str.strip()
 
-    # Years to maturity and bucket are derived directly from trade maturity.
+    # Years to maturity are derived directly from trade maturity.
     if "years_to_maturity" not in out.columns and {"maturity", "trade_date"}.issubset(out.columns):
         out["years_to_maturity"] = (out["maturity"] - out["trade_date"]).dt.days / 365.25
 
+    # User-facing maturity grouping: integer maturity year buckets (1Y, 2Y, ...).
+    # We use ceiling so a 4.3Y bond is treated as 5Y, which is closer to curve-tenor convention.
+    if "maturity_year" not in out.columns and "years_to_maturity" in out.columns:
+        y_for_year = pd.to_numeric(out["years_to_maturity"], errors="coerce")
+        out["maturity_year"] = pd.Series(np.ceil(y_for_year), index=out.index).where(y_for_year.notna())
+        out["maturity_year"] = out["maturity_year"].astype("Int64")
+
+    # Broad maturity_bucket is retained only for legacy charts / methodology sections.
     if "maturity_bucket" not in out.columns and "years_to_maturity" in out.columns:
         y = pd.to_numeric(out["years_to_maturity"], errors="coerce")
         out["maturity_bucket"] = pd.cut(
@@ -1606,29 +1615,35 @@ def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
 
 
 with st.sidebar:
-    st.header("1. Upload Data")
-    trade_files = st.file_uploader("Trade History File(s) — required", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
-    bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
-    issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
-    mmd_file = st.file_uploader("MMD Curve File — optional fallback", type=["csv", "xlsx", "xls"])
+    st.header("1. Trading Data")
+    trade_files = st.file_uploader(
+        "Trade History File(s) — required",
+        type=["csv", "xlsx", "xls"],
+        accept_multiple_files=True,
+        help="Required. Name each trade file after its issuer, e.g. State_of_California_Trade.csv or LADWP_Trade.xlsx.",
+    )
 
-    st.markdown("---")
+    st.caption("Name each trade file after its issuer, e.g. `State_of_California_Trade.csv` or `LADWP_Trade.xlsx`. The app will use the filename as the issuer name.")
     st.caption("Tip: Keep proprietary raw exports out of public GitHub. Upload them only during your own session.")
 
-    with st.expander("Download blank templates"):
-        template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Optional bond reference template CSV", "bond_reference_template.csv")
-        template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
-        template_download_button(CURVE_TEMPLATE_COLUMNS, "Fallback MMD curve template CSV", "benchmark_curve_template.csv")
-
     st.markdown("---")
-    st.caption("Name each trade file after its issuer, e.g. `State_of_California_Trade.csv` or `LADWP_Trade.xlsx`. The app will use the filename as the issuer name.")
+    st.header("Optional Reference Files")
+    with st.expander("Optional Bond / Issuer / MMD files", expanded=False):
+        bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
+        issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
+        mmd_file = st.file_uploader("MMD Curve File — optional fallback", type=["csv", "xlsx", "xls"])
+
+    with st.expander("Download blank templates", expanded=False):
+        template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
+        template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Optional bond reference template CSV", "bond_reference_template.csv")
+        template_download_button(CURVE_TEMPLATE_COLUMNS, "Fallback MMD curve template CSV", "benchmark_curve_template.csv")
 
 if not trade_files:
     st.info("Upload at least one MuniPro trade-history file to generate the dashboard. Bond reference data is optional enrichment.")
     with st.expander("Expected file logic"):
         st.write(
             "The app now uses a trade-first workflow: it standardizes CUSIP fields, uses each trade file name as the issuer name, "
-            "builds maturity buckets from trade maturity dates, and optionally enriches static fields from a bond reference file when provided."
+            "builds maturity-year fields from trade maturity dates, and optionally enriches static fields from a bond reference file when provided."
         )
     st.stop()
 
@@ -1714,6 +1729,9 @@ with st.expander("Methodology: how the app decides whether a file is usable", ex
 for _df in [bonds_df, trades_df, market_df]:
     if isinstance(_df, pd.DataFrame) and "maturity_bucket" in _df.columns:
         _df["maturity_bucket"] = _df["maturity_bucket"].replace(MATURITY_BUCKET_RENAME)
+    if isinstance(_df, pd.DataFrame) and "maturity_year" not in _df.columns and "years_to_maturity" in _df.columns:
+        _y = pd.to_numeric(_df["years_to_maturity"], errors="coerce")
+        _df["maturity_year"] = pd.Series(np.ceil(_y), index=_df.index).where(_y.notna()).astype("Int64")
 
 if failed_files:
     with st.warning("Some trade files failed to process."):
@@ -1783,165 +1801,69 @@ with st.sidebar:
             st.success(f"Applied: {selected_issuer} → {final_sector_input}")
 
     # -----------------------------------------------------------------------------
-    # Maturity Bucket Methodology
+    # Maturity Year Selector
     # -----------------------------------------------------------------------------
-    # Institutional-style maturity segmentation used for:
-    # - Relative Value Analysis
-    # - Yield Curve Positioning
-    # - Spread Analysis
-    # - Liquidity & Secondary Market Trend Review
-    #
-    # IMPORTANT:
-    # Bucket labels are approximate maturity sectors,
-    # NOT exact maturity tenors.
-    #
-    # Definitions:
-    # Short          = <= 7 Years
-    # Intermediate  = 7–15 Years
-    # Long          = 15–25 Years
-    # Extended Long = 25+ Years
-    # -----------------------------------------------------------------------------
-
-    with st.expander("Maturity Bucket Methodology", expanded=False):
+    with st.expander("Maturity Year Methodology", expanded=False):
         st.markdown(
             """
-<style>
-.bucket-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.86rem;
-}
+### Maturity Year Definition
 
-.bucket-table th,
-.bucket-table td {
-    border: 1px solid #d9dce3;
-    padding: 8px 10px;
-    vertical-align: middle;
-    text-align: left;
-}
+The dashboard now groups securities by **integer years to maturity** instead of broad ranges.
 
-.bucket-table th {
-    font-weight: 700;
-    background-color: #f6f7fb;
-}
+**Formula:**
 
-.bucket-col {
-    width: 26%;
-    white-space: nowrap;
-    font-weight: 600;
-}
+`years_to_maturity = (maturity_date - trade_date) / 365.25`
 
-.years-col {
-    width: 24%;
-    white-space: nowrap;
-}
+**Bucket rule:**
 
-.interp-col {
-    width: 50%;
-}
-</style>
+- We use `ceil(years_to_maturity)` for the displayed maturity year.
+- Example: 4.3 years to maturity → **5Y**.
+- This is closer to curve-tenor convention than broad buckets like Short / Long.
 
-### Bucket Definitions
-
-<table class="bucket-table">
-  <tr>
-    <th>Bucket</th>
-    <th>Years to Maturity</th>
-    <th>Interpretation</th>
-  </tr>
-  <tr>
-    <td class="bucket-col">All</td>
-    <td class="years-col">All maturities</td>
-    <td class="interp-col">Full uploaded trade universe</td>
-  </tr>
-  <tr>
-    <td class="bucket-col">Short</td>
-    <td class="years-col">≤ 7Y</td>
-    <td class="interp-col">Front-end / lower-duration bonds</td>
-  </tr>
-  <tr>
-    <td class="bucket-col">Intermediate</td>
-    <td class="years-col">7–15Y</td>
-    <td class="interp-col">Intermediate curve sector</td>
-  </tr>
-  <tr>
-    <td class="bucket-col">Long</td>
-    <td class="years-col">15–25Y</td>
-    <td class="interp-col">Long-duration municipal sector</td>
-  </tr>
-  <tr>
-    <td class="bucket-col">Extended Long</td>
-    <td class="years-col">25Y+</td>
-    <td class="interp-col">Long-end institutional duration sector</td>
-  </tr>
-</table>
-
-<br>
-
-### Why This Matters
-
-These maturity buckets are used to:
-
-- Compare issuer spreads across the municipal curve
-- Analyze relative value positioning
-- Evaluate duration sensitivity
-- Review liquidity and trading activity by curve sector
-- Standardize secondary-market analytics
-
-### Important Notes
-
-- Bucket labels represent practical curve sectors, not exact maturity points.
-- The benchmark mapping uses the closest MMD tenor: Short → 5Y, Intermediate → 10Y, Long → 20Y, Extended Long → 30Y.
-- The framework supports relative-value, curve, and liquidity analysis.
-            """,
-            unsafe_allow_html=True,
+This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... securities directly.
+            """
         )
 
-    # -----------------------------------------------------------------------------
-    # Maturity Bucket Selector
-    # -----------------------------------------------------------------------------
-    maturity_bucket = st.selectbox(
-        "Maturity Bucket",
-        MATURITY_BUCKET_OPTIONS,
-        help="""
-Bucket Definitions
-
-• All = All available maturities
-• Short = ≤ 7 Years
-• Intermediate = 7–15 Years
-• Long = 15–25 Years
-• Extended Long = 25+ Years
-
-Used for:
-- Relative Value Analysis
-- Yield Curve Positioning
-- Secondary Market Trend Analysis
-
-Buckets represent maturity ranges,
-NOT exact maturity tenors.
-"""
+    issuer_year_values = []
+    if "maturity_year" in market_df.columns:
+        issuer_year_values = (
+            market_df.loc[market_df["issuer"] == selected_issuer, "maturity_year"]
+            .dropna()
+            .astype(int)
+            .sort_values()
+            .unique()
+            .tolist()
+        )
+    maturity_year_options = ["All"] + [f"{int(y)}Y" for y in issuer_year_values if int(y) >= 0]
+    selected_maturity_year = st.selectbox(
+        "Maturity Year",
+        maturity_year_options,
+        help="Filter securities by integer years to maturity. Example: 4.3 years to maturity is grouped as 5Y.",
     )
 
     # -----------------------------------------------------------------------------
-    # Time Window Selector
+    # Optional Trade Date Filter
     # -----------------------------------------------------------------------------
-    time_window = st.selectbox(
-        "Time Window",
-        ["All", "1Y", "3Y", "5Y"],
-        help="""
-Historical time range used for trend analysis.
-
-• 1Y = Last 1 Year
-• 3Y = Last 3 Years
-• 5Y = Last 5 Years
-• All = Entire uploaded dataset
-
-Used for:
-- Yield trend analysis
-- Spread movement review
-- Historical relative value comparison
-"""
+    trade_date_filter_enabled = st.checkbox(
+        "Apply Trade Date Filter",
+        value=False,
+        help="Optional. Leave off when your uploaded trade file is already limited to the target period, such as 2024–2026.",
     )
+    selected_trade_date_range = None
+    if trade_date_filter_enabled and "trade_date" in market_df.columns:
+        _trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
+        if not _trade_dates.empty:
+            _min_date = _trade_dates.min().date()
+            _max_date = _trade_dates.max().date()
+            selected_trade_date_range = st.date_input(
+                "Trade Date Range",
+                value=(_min_date, _max_date),
+                min_value=_min_date,
+                max_value=_max_date,
+                help="Filters by trade date, not maturity date.",
+            )
+    # Keep legacy variable available for older downstream chart blocks.
+    maturity_bucket = "All"
 
     # -----------------------------------------------------------------------------
     # Raw Table Toggle
@@ -2116,13 +2038,17 @@ elif "sector" in issuer_master.columns:
     if sector_values:
         selected_sector = sector_values[0]
 
-if not issuer_trades.empty and maturity_bucket != "All":
-    issuer_trades = issuer_trades[issuer_trades["maturity_bucket"] == maturity_bucket].copy()
+if not issuer_trades.empty and selected_maturity_year != "All" and "maturity_year" in issuer_trades.columns:
+    _selected_year = int(str(selected_maturity_year).replace("Y", ""))
+    issuer_trades = issuer_trades[issuer_trades["maturity_year"] == _selected_year].copy()
 
-if not issuer_trades.empty and time_window != "All":
-    latest_date = issuer_trades["trade_date"].max()
-    years = {"1Y": 1, "3Y": 3, "5Y": 5}[time_window]
-    issuer_trades = issuer_trades[issuer_trades["trade_date"] >= latest_date - pd.DateOffset(years=years)].copy()
+if not issuer_trades.empty and trade_date_filter_enabled and selected_trade_date_range:
+    if isinstance(selected_trade_date_range, (tuple, list)) and len(selected_trade_date_range) == 2:
+        _start_date, _end_date = selected_trade_date_range
+        issuer_trades = issuer_trades[
+            (pd.to_datetime(issuer_trades["trade_date"], errors="coerce").dt.date >= _start_date)
+            & (pd.to_datetime(issuer_trades["trade_date"], errors="coerce").dt.date <= _end_date)
+        ].copy()
 
 
 # Data Quality Scorecard removed for trade-only workflow.
@@ -7838,7 +7764,7 @@ if "data_quality_score" in locals():
         "## Data Quality",
         f"- Data Quality Score: {data_quality_score:.1f}/100",
         f"- Valid CUSIP Rate: {cusip_match_rate:.1f}%",
-        f"- Known Maturity Bucket Rate: {known_bucket_rate:.1f}%",
+        f"- Known Maturity Year Rate: {known_bucket_rate:.1f}%",
         f"- Duplicates Removed: {duplicates_removed:,}",
     ])
 
