@@ -572,6 +572,48 @@ MAX_MATURITY_YEAR = 40
 MATURITY_BUCKET_ORDER = [f"{y}Y" for y in range(1, MAX_MATURITY_YEAR + 1)]
 MATURITY_BUCKET_OPTIONS = ["All"] + MATURITY_BUCKET_ORDER
 
+
+def maturity_year_sort_key(value: object) -> int:
+    """Sort labels like 1Y, 10Y, 30Y numerically instead of alphabetically."""
+    try:
+        text = str(value).strip().upper().replace("Y", "")
+        return int(float(text))
+    except Exception:
+        return 9999
+
+
+def observed_maturity_years(
+    df: pd.DataFrame,
+    bucket_col: str = "maturity_bucket",
+    min_observations: int = 1,
+) -> list[str]:
+    """Return only maturity years that actually exist in the data.
+
+    This prevents heatmaps/charts from showing empty 1Y..40Y rows.
+    Set min_observations > 1 when a chart should suppress noisy one-off tenors.
+    """
+    if df is None or df.empty or bucket_col not in df.columns:
+        return []
+
+    counts = (
+        df.dropna(subset=[bucket_col])
+        .assign(**{bucket_col: lambda x: x[bucket_col].astype(str)})
+        .groupby(bucket_col)
+        .size()
+    )
+    valid = [b for b, n in counts.items() if n >= min_observations and b in MATURITY_BUCKET_ORDER]
+    return sorted(valid, key=maturity_year_sort_key)
+
+
+def compact_maturity_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
+    """Drop all-empty maturity rows and sort annual maturity labels numerically."""
+    if matrix is None or matrix.empty:
+        return matrix
+    out = matrix.dropna(how="all")
+    if out.empty:
+        return out
+    return out.loc[sorted(out.index, key=maturity_year_sort_key)]
+
 # Backward compatibility for any older processed data that still contains broad buckets.
 # New trade-only processing writes maturity_bucket as annual labels like 1Y, 2Y, ..., 40Y.
 MATURITY_BUCKET_RENAME = {
@@ -834,16 +876,17 @@ def build_spread_movement_heatmap_data(
     if windows is None:
         windows = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
 
-    maturity_order = MATURITY_BUCKET_ORDER
-    matrix = pd.DataFrame(index=maturity_order, columns=list(windows.keys()), dtype="float")
     audit_rows = []
 
     if spread_obs.empty:
-        return matrix, pd.DataFrame(audit_rows)
+        return pd.DataFrame(columns=list(windows.keys()), dtype="float"), pd.DataFrame(audit_rows)
 
     obs = spread_obs.copy()
     obs["trade_date"] = pd.to_datetime(obs["trade_date"], errors="coerce").dt.normalize()
-    obs = obs.dropna(subset=["trade_date", "spread_to_benchmark_bps"])
+    obs = obs.dropna(subset=["trade_date", "spread_to_benchmark_bps", "maturity_bucket"])
+
+    maturity_order = observed_maturity_years(obs, min_observations=1)
+    matrix = pd.DataFrame(index=maturity_order, columns=list(windows.keys()), dtype="float")
 
     for bucket in maturity_order:
         bucket_obs = obs[obs["maturity_bucket"] == bucket].sort_values("trade_date")
@@ -892,7 +935,7 @@ def build_spread_movement_heatmap_data(
                 }
             )
 
-    return matrix, pd.DataFrame(audit_rows)
+    return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
 def build_spread_level_data(
@@ -910,7 +953,7 @@ def build_spread_level_data(
     This is different from spread movement. Spread level answers "where is
     the issuer trading now?" Movement answers "how much did it change?"
     """
-    maturity_order = MATURITY_BUCKET_ORDER
+    maturity_order = observed_maturity_years(market_df, min_observations=1) or MATURITY_BUCKET_ORDER
     clean_ratings = [r for r in ratings if r in BENCHMARK_RATINGS]
     matrix = pd.DataFrame(index=maturity_order, columns=clean_ratings, dtype="float")
     audit_rows: list[dict] = []
@@ -975,7 +1018,7 @@ def build_spread_level_data(
                 }
             )
 
-    return matrix, pd.DataFrame(audit_rows)
+    return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
 def build_issuer_curve_snapshot(
@@ -6377,7 +6420,7 @@ else:
         )
     else:
         heatmap_matrix, heatmap_audit = build_spread_movement_heatmap_data(heatmap_spread_obs)
-        if heatmap_matrix.isna().all().all():
+        if heatmap_matrix.empty or heatmap_matrix.isna().all().all():
             st.info("Not enough historical spread observations to calculate movement across the selected windows yet.")
         else:
             heatmap_text = heatmap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
@@ -6392,7 +6435,8 @@ else:
                 labels={"x": "Lookback Window", "y": "Maturity Year", "color": "Spread Movement (bps)"},
             )
             heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
-            heatmap_fig.update_layout(height=420)
+            heatmap_height = max(320, min(760, 110 + 38 * len(heatmap_matrix.index)))
+            heatmap_fig.update_layout(height=heatmap_height)
             st.plotly_chart(heatmap_fig, use_container_width=True)
 
             latest_obs_date = heatmap_spread_obs["trade_date"].max()
@@ -6852,26 +6896,37 @@ else:
     else:
         today_rv = pd.Timestamp.today().normalize()
         rv_base["trade_month"] = rv_base["trade_date"].dt.to_period("M").astype(str)
+        rv_agg_dict = {
+            "avg_yield": ("yield", "mean"),
+            "latest_yield": ("yield", "last"),
+            "avg_price": ("price", "mean"),
+            "trade_count": ("trade_date", "count"),
+            "first_trade": ("trade_date", "min"),
+            "latest_trade": ("trade_date", "max"),
+            "active_months": ("trade_month", "nunique"),
+            "total_trade_amount": ("trade_amount", "sum"),
+            "avg_trade_amount": ("trade_amount", "mean"),
+        }
+        optional_first_cols = {
+            "maturity_bucket": "maturity_bucket",
+            "maturity": "maturity_bond",
+            "coupon": "coupon_bond",
+            "outstanding_amount": "outstanding_amount",
+            "description": "description",
+        }
+        for output_col, source_col in optional_first_cols.items():
+            if source_col in rv_base.columns:
+                rv_agg_dict[output_col] = (source_col, "first")
+
         rv_summary = (
             rv_base.groupby("cusip", dropna=False)
-            .agg(
-                avg_yield=("yield", "mean"),
-                latest_yield=("yield", "last"),
-                avg_price=("price", "mean"),
-                trade_count=("trade_date", "count"),
-                first_trade=("trade_date", "min"),
-                latest_trade=("trade_date", "max"),
-                active_months=("trade_month", "nunique"),
-                total_trade_amount=("trade_amount", "sum"),
-                avg_trade_amount=("trade_amount", "mean"),
-                maturity_bucket=("maturity_bucket", "first"),
-                maturity=("maturity_bond", "first"),
-                coupon=("coupon_bond", "first"),
-                outstanding_amount=("outstanding_amount", "first"),
-                description=("description", "first") if "description" in rv_base.columns else ("yield", "count"),
-            )
+            .agg(**rv_agg_dict)
             .reset_index()
         )
+
+        for required_col in ["maturity_bucket", "maturity", "coupon", "outstanding_amount", "description"]:
+            if required_col not in rv_summary.columns:
+                rv_summary[required_col] = pd.NA
         rv_summary["days_since_last_trade"] = (today_rv - rv_summary["latest_trade"]).dt.days
         rv_summary["trading_period_days"] = (rv_summary["latest_trade"] - rv_summary["first_trade"]).dt.days.clip(lower=1)
         rv_summary["avg_days_between_trades"] = rv_summary["trading_period_days"] / rv_summary["trade_count"].clip(lower=1)
