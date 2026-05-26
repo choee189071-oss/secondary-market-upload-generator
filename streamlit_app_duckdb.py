@@ -381,8 +381,6 @@ def section_directory():
             unsafe_allow_html=True,
         )
 
-section_directory()
-
 
 with st.expander("Instructions", expanded=False):
     st.markdown(
@@ -1894,6 +1892,58 @@ def save_manual_issuer_merge_mapping(
     return updated
 
 
+def upsert_single_issuer_reference(
+    reference_data_dir: Path,
+    issuer: str,
+    sector: str = "Unknown",
+    primary_type: str = "Unknown",
+) -> pd.DataFrame:
+    """Persist a sector / primary-type correction for one selected issuer.
+
+    This is the lightweight human-in-the-loop override used from the sidebar.
+    It writes to data/processed/issuers.csv so the correction survives reruns
+    and becomes part of the reference dataset.
+    """
+    mapping_path = Path(reference_data_dir) / "issuers.csv"
+    return save_manual_issuer_merge_mapping(
+        mapping_path=mapping_path,
+        selected_names=[issuer],
+        canonical_issuer=issuer,
+        sector=sector,
+        primary_type=primary_type,
+    )
+
+
+def infer_selected_issuer_sector(
+    issuer: str,
+    market_df: pd.DataFrame,
+    issuer_master: pd.DataFrame,
+) -> str:
+    """Return the best available sector for the selected issuer."""
+    selected_sector = "Unknown"
+    if market_df is not None and not market_df.empty and "issuer" in market_df.columns and "sector" in market_df.columns:
+        sector_values = (
+            market_df.loc[market_df["issuer"].astype(str) == str(issuer), "sector"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        sector_values = [x for x in sector_values.unique().tolist() if x and x.lower() != "nan"]
+        if sector_values:
+            selected_sector = sector_values[0]
+    elif issuer_master is not None and not issuer_master.empty and "issuer" in issuer_master.columns and "sector" in issuer_master.columns:
+        sector_values = (
+            issuer_master.loc[issuer_master["issuer"].astype(str) == str(issuer), "sector"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        sector_values = [x for x in sector_values.unique().tolist() if x and x.lower() != "nan"]
+        if sector_values:
+            selected_sector = sector_values[0]
+    return selected_sector or "Unknown"
+
+
 def render_manual_issuer_merge_tool(
     market_df: pd.DataFrame,
     reference_data_dir: Path,
@@ -2337,108 +2387,20 @@ def process_local_desktop_data(
     return bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files, duplicates_removed, data_source_summary
 
 
-with st.sidebar:
-    st.header("1. Project Data Source")
-    st.caption("This version reads project data files from data/processed instead of using upload boxes.")
 
-    trade_output_path_input = st.text_input(
-        "Combined Trade Output CSV",
-        value=str(DEFAULT_TRADE_OUTPUT_PATH),
-        help="Default: data/processed/Trade_Output_Sample.csv. This combined file can contain both security metadata and trade-history fields.",
-    )
+# Sidebar Project Data Source controls are rendered at the bottom of the sidebar
+# after issuer selection. Values are initialized here so the data pipeline can
+# run before those controls are visually displayed.
+if "trade_output_path_input" not in st.session_state:
+    st.session_state["trade_output_path_input"] = str(DEFAULT_TRADE_OUTPUT_PATH)
+if "reference_data_dir_input" not in st.session_state:
+    st.session_state["reference_data_dir_input"] = str(DEFAULT_REFERENCE_DATA_DIR)
+if "duckdb_path_input" not in st.session_state:
+    st.session_state["duckdb_path_input"] = str(DEFAULT_DUCKDB_PATH)
 
-    reference_data_dir_input = st.text_input(
-        "Reference Data Folder",
-        value=str(DEFAULT_REFERENCE_DATA_DIR),
-        help="Default: data/processed. Put issuers.csv and mmd.csv here.",
-    )
-
-    duckdb_path_input = st.text_input(
-        "DuckDB Database Path",
-        value=str(DEFAULT_DUCKDB_PATH),
-        help="The app refreshes a local DuckDB table named trade_output from your combined CSV.",
-    )
-
-    st.markdown("---")
-    st.caption("Tip: for large/company data, keep the same folder structure locally or on a shared drive and do not commit real data to GitHub.")
-
-    with st.expander("Expected local files"):
-        st.markdown(
-            """
-**Required**
-- `data/processed/Trade_Output_Sample.csv`
-
-**Optional reference files** inside `data/processed/`
-- `issuers.csv` or `issuer_mapping.csv`
-- `mmd.csv` or `mmd_curve.csv`
-
-The combined trade-output file is used as both the bond/security source and the trade-history source.
-            """
-        )
-
-    st.markdown("---")
-    st.subheader("Contents")
-    st.markdown(
-        """
-<div class="sidebar-nav-small">
-<b>Data & Setup</b><br>
-<a href="#file-readiness">1. Project Data Readiness</a><br>
-<a href="#data-quality-scorecard">2. Data Quality Scorecard</a><br>
-<a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
-
-<b>Benchmark / Spread Framework</b><br>
-<a href="#yield-relative-value">4. Yield & Relative Value</a><br>
-<a href="#issuer-curve">5. Issuer Curve vs Benchmark</a><br>
-<a href="#spread-level">6. Current Spread Level</a><br>
-<a href="#spread-attribution">7. Spread Attribution</a><br><br>
-
-<b>Relative Value Signals</b><br>
-<a href="#market-narrative">8. Market Narrative & Opportunity Map</a><br>
-<a href="#peer-rv">9. Peer RV Comparison</a><br>
-<a href="#cross-issuer-rv">10. Cross-Issuer RV Analytics</a><br>
-<a href="#historical-spread">11. Historical Spread Percentile</a><br>
-<a href="#recommendation-engine">12. Rule-Based Recommendation</a><br>
-<a href="#ai-commentary-studio">13. AI Commentary Studio</a><br><br>
-
-<b>Risk / Flow / Screening</b><br>
-<a href="#curve-shape">13. Curve Shape Analytics</a><br>
-<a href="#scenario-shock">14. Scenario Shock Analysis</a><br>
-<a href="#dealer-proxy">15. Dealer Behavior Proxy</a><br>
-<a href="#security-screener">16. Security Screener</a><br>
-<a href="#watchlist">17. Watchlist / Saved Candidates</a><br><br>
-
-<b>Bond-Level Drilldown</b><br>
-<a href="#spread-movement">18. Spread Movement</a><br>
-<a href="#cusip-drilldown">19. CUSIP Opportunity Drilldown</a><br>
-<a href="#rv-positioning">20. RV Positioning Map</a><br>
-<a href="#liquidity">21. Liquidity Analysis</a><br><br>
-
-<b>Reference / Admin / Outputs</b><br>
-<a href="#bond-master">22. Bond Master</a><br>
-<a href="#trade-detail">23. Trade Detail</a><br>
-<a href="#report-export-center">24. Report Export Center</a><br>
-<a href="#export-summary">25. Export Summary</a><br>
-<a href="#admin-methodology">26. Admin Methodology</a><br>
-<a href="#version-changelog">27. Version / Change Log</a><br>
-<a href="#downloads">28. Downloads</a>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Version / Change Log", expanded=False):
-        st.markdown(
-            """
-**Current Version:** `v1.1-local-duckdb-desktop`
-
-Recent additions:
-- project data source mode
-- Combined Trade_Output_Sample.csv as unified bond/trade source
-- Optional issuer and MMD reference files from Intern_Muni_Data
-- Local DuckDB refresh for trade_output table
-- Manual Issuer Merge Tool for persistent issuer mapping overrides
-            """
-        )
+trade_output_path_input = st.session_state["trade_output_path_input"]
+reference_data_dir_input = st.session_state["reference_data_dir_input"]
+duckdb_path_input = st.session_state["duckdb_path_input"]
 
 # -----------------------------------------------------------------------------
 # Local-readiness gate
@@ -2611,96 +2573,169 @@ st.success(
     f"from project data. Detected {len(uploaded_issuers):,} issuer(s)."
 )
 
-with st.sidebar:
-    st.markdown("---")
-    st.header("Data Health")
 
-    if not market_df.empty and "trade_date" in market_df.columns:
-        trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
-        if not trade_dates.empty:
-            earliest_trade = trade_dates.min()
-            latest_trade = trade_dates.max()
-            st.caption(
-                f"📅 Data Coverage:\n"
-                f"{earliest_trade:%Y-%m-%d} → {latest_trade:%Y-%m-%d}"
-            )
-        else:
-            st.caption("📅 Data Coverage:\nNo valid trade dates detected")
+# -----------------------------------------------------------------------------
+# Main-page guidance and data health
+# -----------------------------------------------------------------------------
+section_anchor("dashboard-contents", "Contents")
+st.markdown(
+    """
+<div class="nav-card">
+<b>Data & Setup</b><br>
+<a href="#file-readiness">1. Project Data Readiness</a><br>
+<a href="#data-quality-scorecard">2. Data Quality Scorecard</a><br>
+<a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
+
+<b>Benchmark / Spread Framework</b><br>
+<a href="#yield-relative-value">4. Yield & Relative Value</a><br>
+<a href="#issuer-curve">5. Issuer Curve vs Benchmark</a><br>
+<a href="#spread-level">6. Current Spread Level</a><br>
+<a href="#spread-attribution">7. Spread Attribution</a><br><br>
+
+<b>Relative Value Signals</b><br>
+<a href="#market-narrative">8. Market Narrative & Opportunity Map</a><br>
+<a href="#peer-rv">9. Peer RV Comparison</a><br>
+<a href="#cross-issuer-rv">10. Cross-Issuer RV Analytics</a><br>
+<a href="#historical-spread">11. Historical Spread Percentile</a><br>
+<a href="#recommendation-engine">12. Rule-Based Recommendation</a><br>
+<a href="#ai-commentary-studio">13. AI Commentary Studio</a><br><br>
+
+<b>Risk / Flow / Screening</b><br>
+<a href="#curve-shape">14. Curve Shape Analytics</a><br>
+<a href="#scenario-shock">15. Scenario Shock Analysis</a><br>
+<a href="#dealer-proxy">16. Dealer Behavior Proxy</a><br>
+<a href="#security-screener">17. Security Screener</a><br>
+<a href="#watchlist">18. Watchlist / Saved Candidates</a><br><br>
+
+<b>Bond-Level Drilldown</b><br>
+<a href="#spread-movement">19. Spread Movement</a><br>
+<a href="#cusip-drilldown">20. CUSIP Opportunity Drilldown</a><br>
+<a href="#rv-positioning">21. RV Positioning Map</a><br>
+<a href="#liquidity">22. Liquidity Analysis</a><br><br>
+
+<b>Reference / Admin / Outputs</b><br>
+<a href="#bond-master">23. Bond Master</a><br>
+<a href="#trade-detail">24. Trade Detail</a><br>
+<a href="#report-export-center">25. Report Export Center</a><br>
+<a href="#export-summary">26. Export Summary</a><br>
+<a href="#admin-methodology">27. Admin Methodology</a><br>
+<a href="#version-changelog">28. Version / Change Log</a><br>
+<a href="#downloads">29. Downloads</a>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+section_anchor("data-health-overview", "Data Health")
+if not market_df.empty and "trade_date" in market_df.columns:
+    trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
+    if not trade_dates.empty:
+        earliest_trade = trade_dates.min()
+        latest_trade = trade_dates.max()
+        data_coverage_text = f"{earliest_trade:%Y-%m-%d} → {latest_trade:%Y-%m-%d}"
     else:
-        st.caption("📅 Data Coverage:\nNo trade data loaded")
+        data_coverage_text = "No valid trade dates detected"
+else:
+    data_coverage_text = "No trade data loaded"
 
-    st.caption(
-        f"📊 Trades Loaded:\n"
-        f"{len(market_df):,}"
-    )
+total_rows = len(market_df)
+if total_rows > 0 and "cusip" in market_df.columns:
+    bond_cusips = set(bonds_df["cusip"].dropna().astype(str).str.upper()) if "cusip" in bonds_df.columns else set()
+    trade_cusips = market_df["cusip"].dropna().astype(str).str.upper()
+    matched_cusips_count = trade_cusips.isin(bond_cusips).sum() if bond_cusips else 0
+    match_rate = matched_cusips_count / total_rows * 100
+else:
+    matched_cusips_count = 0
+    match_rate = 0
 
-    total_rows = len(market_df)
-    if total_rows > 0 and "cusip" in market_df.columns:
-        bond_cusips = set(bonds_df["cusip"].dropna().astype(str).str.upper()) if "cusip" in bonds_df.columns else set()
-        trade_cusips = market_df["cusip"].dropna().astype(str).str.upper()
-        matched_cusips_count = trade_cusips.isin(bond_cusips).sum() if bond_cusips else 0
-        match_rate = matched_cusips_count / total_rows * 100
-    else:
-        matched_cusips_count = 0
-        match_rate = 0
+missing_issuers = market_df["issuer"].isna().sum() if "issuer" in market_df.columns else total_rows
+missing_issuer_rate = missing_issuers / total_rows * 100 if total_rows > 0 else 0
 
-    match_icon = "🟢" if match_rate >= 95 else "🟡" if match_rate >= 80 else "🔴"
-    st.caption(
-        f"{match_icon} CUSIP Match Rate:\n"
-        f"{match_rate:.1f}%"
-    )
+health_cols = st.columns(5)
+health_cols[0].metric("Data Coverage", data_coverage_text)
+health_cols[1].metric("Trades Loaded", f"{len(market_df):,}")
+health_cols[2].metric("CUSIP Match Rate", f"{match_rate:.1f}%")
+health_cols[3].metric("Missing Issuers", f"{missing_issuers:,}")
+health_cols[4].metric("Duplicate Trades Removed", f"{duplicates_removed:,}")
 
-    missing_issuers = market_df["issuer"].isna().sum() if "issuer" in market_df.columns else total_rows
-    missing_issuer_rate = missing_issuers / total_rows * 100 if total_rows > 0 else 0
-    missing_icon = "🟢" if missing_issuers == 0 else "🟡" if missing_issuer_rate <= 5 else "🔴"
-    st.caption(
-        f"{missing_icon} Missing Issuers:\n"
-        f"{missing_issuers:,}"
-    )
-
-    st.caption(
-        f"🧹 Duplicate Trades Removed:\n"
-        f"{duplicates_removed:,}"
-    )
-
-    with st.expander("Data Health methodology", expanded=False):
-        st.markdown(
-            """
+with st.expander("Data Health methodology", expanded=False):
+    st.markdown(
+        """
 - **Data Coverage** uses the earliest and latest valid trade dates after standardization.
 - **Trades Loaded** counts merged trade rows available for analytics.
 - **CUSIP Match Rate** is the share of merged trade rows whose CUSIP appears in the uploaded bond master.
 - **Missing Issuers** counts rows without an issuer after the bond/trade merge and issuer-mapping logic.
 - **Duplicate Trades Removed** counts exact duplicate standardized trade rows removed before analytics.
-            """
-        )
+        """
+    )
 
-    st.markdown("---")
-    st.header("2. Select From Uploaded Issuers")
+# -----------------------------------------------------------------------------
+# Sidebar issuer-first workflow
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.header("Select From Uploaded Issuers")
     selected_issuer = st.selectbox(
         "Issuer detected from uploaded files",
         uploaded_issuers,
-        help="This list is generated only from the files you uploaded in Section 1."
+        help="This list is generated from the processed project files."
     )
+
+    selected_sector_sidebar = infer_selected_issuer_sector(selected_issuer, market_df, issuer_master)
+    available_sectors = ["Unknown"] + _unique_text_values(market_df, "sector")
+    default_sector_options = [
+        "Education",
+        "School District",
+        "Utilities",
+        "Water / Sewer",
+        "Transportation",
+        "Airport",
+        "Healthcare",
+        "Housing",
+        "General Government",
+        "Local Government",
+        "Public Finance Authority",
+        "Other",
+    ]
+    sector_options = list(dict.fromkeys(available_sectors + default_sector_options))
+    if selected_sector_sidebar not in sector_options:
+        sector_options.insert(1, selected_sector_sidebar)
+
+    with st.expander("Issuer Sector Override", expanded=(selected_sector_sidebar == "Unknown")):
+        st.caption("Use this when the issuer sector is Unknown or classified incorrectly. The correction is saved to issuers.csv.")
+        sector_choice = st.selectbox(
+            "Issuer Sector",
+            sector_options,
+            index=sector_options.index(selected_sector_sidebar) if selected_sector_sidebar in sector_options else 0,
+        )
+        custom_sector = st.text_input(
+            "Custom Sector",
+            value="" if sector_choice != "Other" else selected_sector_sidebar,
+            placeholder="Enter a sector if Other is selected",
+        )
+        primary_type_choice = st.text_input(
+            "Primary Type",
+            value="Unknown",
+            help="Optional reference field. Leave Unknown if you do not need it yet.",
+        )
+        final_sector_choice = custom_sector.strip() if sector_choice == "Other" and custom_sector.strip() else sector_choice
+
+        if st.button("Save Sector to issuers.csv", type="primary"):
+            try:
+                upsert_single_issuer_reference(
+                    reference_data_dir=reference_data_dir,
+                    issuer=selected_issuer,
+                    sector=final_sector_choice,
+                    primary_type=primary_type_choice,
+                )
+                st.success(f"Saved: {selected_issuer} → {final_sector_choice}")
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save issuer sector override: {exc}")
+
     # -----------------------------------------------------------------------------
     # Maturity Bucket Methodology
     # -----------------------------------------------------------------------------
-    # Institutional-style maturity segmentation used for:
-    # - Relative Value Analysis
-    # - Yield Curve Positioning
-    # - Spread Analysis
-    # - Liquidity & Secondary Market Trend Review
-    #
-    # IMPORTANT:
-    # Bucket labels are approximate maturity sectors,
-    # NOT exact maturity tenors.
-    #
-    # Definitions:
-    # Short          = <= 7 Years
-    # Intermediate  = 7–15 Years
-    # Long          = 15–25 Years
-    # Extended Long = 25+ Years
-    # -----------------------------------------------------------------------------
-
     with st.expander("Maturity Bucket Methodology", expanded=False):
         st.markdown(
             """
@@ -2796,9 +2831,6 @@ These maturity buckets are used to:
             unsafe_allow_html=True,
         )
 
-    # -----------------------------------------------------------------------------
-    # Maturity Bucket Selector
-    # -----------------------------------------------------------------------------
     maturity_bucket = st.selectbox(
         "Maturity Bucket",
         MATURITY_BUCKET_OPTIONS,
@@ -2821,9 +2853,6 @@ NOT exact maturity tenors.
 """
     )
 
-    # -----------------------------------------------------------------------------
-    # Time Window Selector
-    # -----------------------------------------------------------------------------
     time_window = st.selectbox(
         "Time Window",
         ["All", "1Y", "3Y", "5Y"],
@@ -2842,9 +2871,6 @@ Used for:
 """
     )
 
-    # -----------------------------------------------------------------------------
-    # Raw Table Toggle
-    # -----------------------------------------------------------------------------
     show_raw_tables = st.checkbox(
         "Show Raw Tables",
         value=False,
@@ -2858,6 +2884,57 @@ Useful for:
 - CUSIP drilldowns
 """
     )
+
+    st.markdown("---")
+    st.header("Project Data Source")
+    st.caption("This version reads project data files from data/processed instead of using upload boxes.")
+
+    trade_output_path_input = st.text_input(
+        "Combined Trade Output CSV",
+        key="trade_output_path_input",
+        help="Default: data/processed/Trade_Output_Sample.csv. This combined file can contain both security metadata and trade-history fields.",
+    )
+
+    reference_data_dir_input = st.text_input(
+        "Reference Data Folder",
+        key="reference_data_dir_input",
+        help="Default: data/processed. Put issuers.csv and mmd.csv here.",
+    )
+
+    duckdb_path_input = st.text_input(
+        "DuckDB Database Path",
+        key="duckdb_path_input",
+        help="The app refreshes a local DuckDB table named trade_output from your combined CSV.",
+    )
+
+    st.caption("Tip: for large/company data, keep the same folder structure locally or on a shared drive and do not commit real data to GitHub.")
+
+    with st.expander("Expected local files"):
+        st.markdown(
+            """
+**Required**
+- `data/processed/Trade_Output_Sample.csv`
+
+**Optional reference files** inside `data/processed/`
+- `issuers.csv` or `issuer_mapping.csv`
+- `mmd.csv` or `mmd_curve.csv`
+
+The combined trade-output file is used as both the bond/security source and the trade-history source.
+            """
+        )
+
+    with st.expander("Version / Change Log", expanded=False):
+        st.markdown(
+            """
+**Current Version:** `v1.2-issuer-first-sector-override`
+
+Recent additions:
+- issuer selection moved to the top of the sidebar
+- project data source controls moved to the bottom of the sidebar
+- contents and data health moved into the main dashboard body
+- issuer sector override saves corrections to issuers.csv
+            """
+        )
 
 issuer_bonds = bonds_df[bonds_df["issuer"] == selected_issuer].copy()
 issuer_trades = market_df[market_df["issuer"] == selected_issuer].copy()
