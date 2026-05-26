@@ -345,7 +345,6 @@ def section_directory():
 
 <b>1. Data readiness</b><br>
 <a href="#file-readiness">File Readiness</a> ·
-<a href="#data-quality-scorecard">Data Quality Scorecard</a> ·
 <a href="#executive-snapshot">Executive Snapshot</a><br><br>
 
 <b>2. Benchmark & spread framework</b><br>
@@ -1383,6 +1382,55 @@ def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _parse_trade_index_tenor(index_value: object) -> str | None:
+    """Parse MuniPro Index labels such as AAA-5, AAA-10, AAA-20 into dashboard tenor columns."""
+    if pd.isna(index_value):
+        return None
+    text = str(index_value).upper().strip()
+    m = re.search(r"(\d{1,2})\s*Y?$", text)
+    if not m:
+        return None
+    year = int(m.group(1))
+    if year <= 5:
+        return "5Y"
+    if year <= 10:
+        return "10Y"
+    if year <= 20:
+        return "20Y"
+    return "30Y"
+
+
+def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataFrame:
+    """Build a benchmark curve table directly from trade-file Index / Index Rate columns.
+
+    This makes the MuniPro trade tape the primary benchmark source. Uploaded MMD
+    files become fallback only when trade exports do not include usable Index Rate.
+    """
+    required = {"trade_date", "index", "index_rate"}
+    if market_df is None or market_df.empty or not required.issubset(set(market_df.columns)):
+        return pd.DataFrame()
+
+    tmp = market_df[list(required)].copy()
+    tmp["trade_date"] = pd.to_datetime(tmp["trade_date"], errors="coerce").dt.normalize()
+    tmp["index_rate"] = pd.to_numeric(tmp["index_rate"], errors="coerce")
+    tmp["tenor"] = tmp["index"].apply(_parse_trade_index_tenor)
+    tmp = tmp.dropna(subset=["trade_date", "index_rate", "tenor"])
+    if tmp.empty:
+        return pd.DataFrame()
+
+    daily = tmp.groupby(["trade_date", "tenor"], as_index=False)["index_rate"].median()
+    wide = daily.pivot(index="trade_date", columns="tenor", values="index_rate").reset_index()
+    wide = wide.rename(columns={"trade_date": "Date"})
+
+    # Existing benchmark functions understand plain AAA/MMD tenors and rating-specific columns.
+    for tenor in ["5Y", "10Y", "20Y", "30Y"]:
+        if tenor in wide.columns:
+            wide[f"AAA_{tenor}"] = wide[tenor]
+
+    wide.attrs["benchmark_source_mode"] = "Trade Index / Index Rate"
+    return wide.sort_values("Date").reset_index(drop=True)
+
+
 def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build issuer / sector reference from trades and optional mapping."""
     if market_df is None or market_df.empty or "issuer" not in market_df.columns:
@@ -1531,11 +1579,21 @@ def process_uploads(
 
     bonds_df = _build_security_reference_from_trades(market_df, optional_bonds_df)
 
-    mmd_df = pd.DataFrame()
+    uploaded_mmd_df = pd.DataFrame()
     if mmd_payload is not None:
         name, payload = mmd_payload
         raw_mmd = read_uploaded_file(io.BytesIO(payload), name)
-        mmd_df = standardize_mmd(raw_mmd)
+        uploaded_mmd_df = standardize_mmd(raw_mmd)
+
+    trade_index_curve_df = _build_benchmark_curve_from_trade_index(market_df)
+    if not trade_index_curve_df.empty:
+        # Primary benchmark source: the trade tape already supplies Index / Index Rate.
+        mmd_df = trade_index_curve_df
+    else:
+        # Fallback benchmark source: user-uploaded MMD sheet.
+        mmd_df = uploaded_mmd_df
+        if not mmd_df.empty:
+            mmd_df.attrs["benchmark_source_mode"] = "Uploaded MMD fallback"
 
     return bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files, duplicates_removed
 
@@ -1552,7 +1610,7 @@ with st.sidebar:
     trade_files = st.file_uploader("Trade History File(s) — required", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
     bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
     issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
-    mmd_file = st.file_uploader("MMD Curve File — optional", type=["csv", "xlsx", "xls"])
+    mmd_file = st.file_uploader("MMD Curve File — optional fallback", type=["csv", "xlsx", "xls"])
 
     st.markdown("---")
     st.caption("Tip: Keep proprietary raw exports out of public GitHub. Upload them only during your own session.")
@@ -1560,7 +1618,7 @@ with st.sidebar:
     with st.expander("Download blank templates"):
         template_download_button(BOND_REQUIRED + BOND_RECOMMENDED + BOND_OPTIONAL, "Optional bond reference template CSV", "bond_reference_template.csv")
         template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
-        template_download_button(CURVE_TEMPLATE_COLUMNS, "Benchmark curve template CSV", "benchmark_curve_template.csv")
+        template_download_button(CURVE_TEMPLATE_COLUMNS, "Fallback MMD curve template CSV", "benchmark_curve_template.csv")
 
     st.markdown("---")
     st.caption("Name each trade file after its issuer, e.g. `State_of_California_Trade.csv` or `LADWP_Trade.xlsx`. The app will use the filename as the issuer name.")
@@ -1676,14 +1734,54 @@ st.success(
     f"from {len(trade_files):,} trade file(s). Detected {len(uploaded_issuers):,} issuer(s)."
 )
 
+benchmark_source_mode = mmd_df.attrs.get("benchmark_source_mode", "Trade Index / Index Rate" if not mmd_df.empty else "None")
+if benchmark_source_mode == "Trade Index / Index Rate":
+    st.info("Benchmark source: using Index / Index Rate from the uploaded trade file as the primary curve source. Uploaded MMD is only needed as fallback.")
+elif benchmark_source_mode == "Uploaded MMD fallback":
+    st.info("Benchmark source: using uploaded MMD file as fallback because the trade file did not contain usable Index / Index Rate data.")
+else:
+    st.warning("No benchmark source detected. Upload trades with Index / Index Rate or provide an MMD file for benchmark analytics.")
+
 with st.sidebar:
     st.markdown("---")
     st.header("2. Select From Uploaded Issuers")
     selected_issuer = st.selectbox(
         "Issuer detected from uploaded files",
         uploaded_issuers,
-        help="This list is generated only from the files you uploaded in Section 1."
+        help="This list is generated from your uploaded trade files. Rename each trade file with the issuer name for best results."
     )
+
+    # -----------------------------------------------------------------------------
+    # Manual issuer sector override
+    # -----------------------------------------------------------------------------
+    sector_options = [
+        "Unknown", "General Government", "State GO", "Local Government",
+        "Utilities", "Water / Sewer", "Power", "Transportation", "Airport",
+        "Education", "School District", "Healthcare", "Housing",
+        "Public Finance Authority", "Other",
+    ]
+
+    current_sector_sidebar = "Unknown"
+    if "sector" in market_df.columns:
+        vals = market_df.loc[market_df["issuer"] == selected_issuer, "sector"].dropna().astype(str).unique().tolist()
+        vals = [v for v in vals if v and v.lower() != "nan"]
+        if vals:
+            current_sector_sidebar = vals[0]
+
+    with st.expander("Issuer Sector Override", expanded=(current_sector_sidebar == "Unknown")):
+        st.caption("Use this when the trade file has no sector field, or when the inferred sector is Unknown / wrong.")
+        default_idx = sector_options.index(current_sector_sidebar) if current_sector_sidebar in sector_options else 0
+        selected_sector_input = st.selectbox("Sector", sector_options, index=default_idx, key=f"sector_select_{selected_issuer}")
+        custom_sector_input = st.text_input(
+            "Custom sector",
+            value="" if selected_sector_input != "Other" else current_sector_sidebar,
+            key=f"sector_custom_{selected_issuer}",
+        )
+        final_sector_input = custom_sector_input.strip() if selected_sector_input == "Other" and custom_sector_input.strip() else selected_sector_input
+        if st.button("Apply Sector to Current Issuer", key=f"apply_sector_{selected_issuer}"):
+            st.session_state.setdefault("issuer_sector_overrides", {})[selected_issuer] = final_sector_input
+            st.success(f"Applied: {selected_issuer} → {final_sector_input}")
+
     # -----------------------------------------------------------------------------
     # Maturity Bucket Methodology
     # -----------------------------------------------------------------------------
@@ -1869,7 +1967,6 @@ Useful for:
 <div class="sidebar-nav-small">
 <b>Data & Setup</b><br>
 <a href="#file-readiness">1. File Readiness Check</a><br>
-<a href="#data-quality-scorecard">2. Data Quality Scorecard</a><br>
 <a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
 
 <b>Benchmark / Spread Framework</b><br>
@@ -1921,7 +2018,6 @@ Recent additions:
 - Cross-Issuer RV Analytics
 - Scenario Shock Analysis
 - Recommendation Narrative Engine
-- Data Quality Scorecard
 - Export Summary Package
 - Watchlist / Saved Candidates
 - Admin Methodology Page
@@ -1987,8 +2083,28 @@ Recent additions:
         )
 
 
+# Apply manual sector overrides selected in the sidebar.
+issuer_sector_overrides = st.session_state.get("issuer_sector_overrides", {})
+if issuer_sector_overrides and "issuer" in market_df.columns:
+    for _issuer_name, _sector_value in issuer_sector_overrides.items():
+        market_df.loc[market_df["issuer"] == _issuer_name, "sector"] = _sector_value
+        if "issuer" in issuer_master.columns:
+            issuer_master.loc[issuer_master["issuer"] == _issuer_name, "sector"] = _sector_value
+
 issuer_bonds = bonds_df[bonds_df["issuer"] == selected_issuer].copy()
 issuer_trades = market_df[market_df["issuer"] == selected_issuer].copy()
+
+if issuer_sector_overrides:
+    sector_download_df = pd.DataFrame(
+        [{"issuer": k, "sector": v, "primary_type": pd.NA} for k, v in issuer_sector_overrides.items()]
+    )
+    with st.sidebar.expander("Download sector overrides", expanded=False):
+        st.download_button(
+            "Download issuer_sector_overrides.csv",
+            data=sector_download_df.to_csv(index=False).encode("utf-8"),
+            file_name="issuer_sector_overrides.csv",
+            mime="text/csv",
+        )
 
 selected_sector = "Unknown"
 if "sector" in market_df.columns:
@@ -2009,105 +2125,8 @@ if not issuer_trades.empty and time_window != "All":
     issuer_trades = issuer_trades[issuer_trades["trade_date"] >= latest_date - pd.DateOffset(years=years)].copy()
 
 
-section_anchor("data-quality-scorecard", "Data Quality Scorecard")
-with st.expander("Methodology: data quality scorecard", expanded=False):
-    st.markdown(
-        """
-This section evaluates whether the uploaded data is reliable enough for secondary-market analytics.
-
-**Scorecard components:**
-
-- **Valid CUSIP rate**: share of trade rows with a usable CUSIP identifier.
-- **Valid trade date rate**: share of rows with parseable trade dates.
-- **Known maturity bucket rate**: share of rows assigned to Short / 10Y / 20Y / 30Y.
-- **Positive trade amount rate**: share of rows with positive par/trade amount.
-- **Issuer coverage rate**: share of rows with an issuer after trade-description inference and optional mapping.
-- **Duplicate rows removed**: exact duplicate standardized trade rows removed before analytics.
-
-The score is a practical reliability indicator, not a guarantee of correctness.
-        """
-    )
-
-dq_rows = []
-dq_total = len(market_df)
-
-def dq_pct(numer, denom):
-    return (numer / denom * 100) if denom and denom > 0 else 0
-
-if dq_total > 0:
-    valid_cusips = market_df["cusip"].notna().sum() if "cusip" in market_df.columns else 0
-    cusip_match_rate = dq_pct(valid_cusips, dq_total)
-
-    valid_trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").notna().sum() if "trade_date" in market_df.columns else 0
-    valid_trade_date_rate = dq_pct(valid_trade_dates, dq_total)
-
-    valid_buckets = MATURITY_BUCKET_ORDER
-    known_bucket_rate = dq_pct(market_df["maturity_bucket"].isin(valid_buckets).sum(), dq_total) if "maturity_bucket" in market_df.columns else 0
-
-    positive_amount_rate = (
-        dq_pct((pd.to_numeric(market_df["trade_amount"], errors="coerce") > 0).sum(), dq_total)
-        if "trade_amount" in market_df.columns else 0
-    )
-
-    issuer_coverage_rate = dq_pct(market_df["issuer"].notna().sum(), dq_total) if "issuer" in market_df.columns else 0
-
-    data_quality_score = (
-        0.30 * cusip_match_rate
-        + 0.20 * valid_trade_date_rate
-        + 0.20 * known_bucket_rate
-        + 0.15 * issuer_coverage_rate
-        + 0.15 * positive_amount_rate
-    )
-
-    dq_rows = [
-        {"Metric": "Valid CUSIP Rate", "Value": cusip_match_rate, "Weight": "30%", "Interpretation": "Trade rows with usable CUSIP identifiers"},
-        {"Metric": "Valid Trade Date Rate", "Value": valid_trade_date_rate, "Weight": "20%", "Interpretation": "Rows with parseable trade dates"},
-        {"Metric": "Known Maturity Bucket Rate", "Value": known_bucket_rate, "Weight": "20%", "Interpretation": "Rows mapped to Short / Intermediate / Long / Extended Long"},
-        {"Metric": "Issuer Coverage Rate", "Value": issuer_coverage_rate, "Weight": "15%", "Interpretation": "Rows with issuer after merge/mapping"},
-        {"Metric": "Positive Trade Amount Rate", "Value": positive_amount_rate, "Weight": "15%", "Interpretation": "Rows with positive trade amount"},
-    ]
-
-    dq1, dq2, dq3, dq4 = st.columns(4)
-    dq1.metric("Data Quality Score", f"{data_quality_score:.1f}/100")
-    dq2.metric("Valid CUSIP Rate", f"{cusip_match_rate:.1f}%")
-    dq3.metric("Known Bucket Rate", f"{known_bucket_rate:.1f}%")
-    dq4.metric("Duplicates Removed", f"{duplicates_removed:,}")
-
-    if data_quality_score >= 90:
-        st.success("Data quality looks strong for dashboard-level analytics.")
-    elif data_quality_score >= 75:
-        st.warning("Data quality is usable, but some analytics may be affected by missing fields.")
-    else:
-        st.error("Data quality is weak. Review missing CUSIPs, maturity dates, issuer mapping, and trade amount fields before relying on analytics.")
-
-    dq_display = pd.DataFrame(dq_rows)
-    dq_display["Value"] = dq_display["Value"].map(lambda x: f"{x:.1f}%")
-    st.dataframe(dq_display, use_container_width=True, hide_index=True)
-
-    with st.expander("Data quality issue drilldown", expanded=False):
-        issue_cols = []
-        issue_df = market_df.copy()
-        if "cusip" in issue_df.columns:
-            issue_df["valid_cusip"] = issue_df["cusip"].notna()
-            issue_cols.append("valid_cusip")
-        if "maturity_bucket" in issue_df.columns:
-            issue_df["known_maturity_bucket"] = issue_df["maturity_bucket"].isin(valid_buckets)
-            issue_cols.append("known_maturity_bucket")
-        if "trade_amount" in issue_df.columns:
-            issue_df["positive_trade_amount"] = pd.to_numeric(issue_df["trade_amount"], errors="coerce") > 0
-            issue_cols.append("positive_trade_amount")
-        if "issuer" in issue_df.columns:
-            issue_df["issuer_present"] = issue_df["issuer"].notna()
-            issue_cols.append("issuer_present")
-
-        display_issue_cols = [
-            c for c in ["issuer", "cusip", "trade_date", "maturity_bucket", "yield", "trade_amount"] + issue_cols
-            if c in issue_df.columns
-        ]
-        st.dataframe(issue_df[display_issue_cols].head(5000), use_container_width=True, hide_index=True)
-else:
-    st.info("Data quality scorecard will appear after market data is processed.")
-
+# Data Quality Scorecard removed for trade-only workflow.
+# The dashboard now relies on the File Readiness Check and Data Health sidebar metrics.
 
 section_anchor("executive-snapshot", "Executive Snapshot")
 
