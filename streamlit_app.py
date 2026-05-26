@@ -2106,6 +2106,34 @@ if issuer_sector_overrides and "issuer" in market_df.columns:
 issuer_bonds = bonds_df[bonds_df["issuer"] == selected_issuer].copy()
 issuer_trades = market_df[market_df["issuer"] == selected_issuer].copy()
 
+# -----------------------------------------------------------------------------
+# Trade-only compatibility guard
+# -----------------------------------------------------------------------------
+# In trade-only mode, several downstream analytics sections may reference
+# optional bond/security enrichment fields. Those fields should enhance the
+# analysis when available, but they must never break the dashboard when absent.
+OPTIONAL_SECURITY_FIELDS = {
+    "maturity_bond": pd.NaT,
+    "coupon_bond": pd.NA,
+    "outstanding_amount": pd.NA,
+    "call_date": pd.NaT,
+    "call_price": pd.NA,
+    "lien": pd.NA,
+    "fed_tax": pd.NA,
+    "amt": pd.NA,
+    "secondary_credit": pd.NA,
+    "description": pd.NA,
+    "price": pd.NA,
+    "trade_amount": 0,
+}
+
+for _df in [market_df, issuer_trades]:
+    if isinstance(_df, pd.DataFrame):
+        for _col, _default in OPTIONAL_SECURITY_FIELDS.items():
+            if _col not in _df.columns:
+                _df[_col] = _default
+
+
 if issuer_sector_overrides:
     sector_download_df = pd.DataFrame(
         [{"issuer": k, "sector": v, "primary_type": pd.NA} for k, v in issuer_sector_overrides.items()]
@@ -7259,26 +7287,68 @@ else:
     today = pd.Timestamp.today().normalize()
     liq_base = issuer_trades.copy()
     liq_base["trade_month"] = liq_base["trade_date"].dt.to_period("M").astype(str)
+    # Build aggregation dynamically so optional bond/security enrichment
+    # columns do not trigger KeyError in trade-only mode.
+    liquidity_agg = {
+        "trade_count": ("trade_date", "count"),
+        "first_trade": ("trade_date", "min"),
+        "latest_trade": ("trade_date", "max"),
+        "active_months": ("trade_month", "nunique"),
+    }
+
+    if "yield" in liq_base.columns:
+        liquidity_agg.update({
+            "avg_yield": ("yield", "mean"),
+            "min_yield": ("yield", "min"),
+            "max_yield": ("yield", "max"),
+        })
+
+    if "price" in liq_base.columns:
+        liquidity_agg["avg_price"] = ("price", "mean")
+
+    if "trade_amount" in liq_base.columns:
+        liquidity_agg.update({
+            "total_trade_amount": ("trade_amount", "sum"),
+            "avg_trade_amount": ("trade_amount", "mean"),
+            "median_trade_amount": ("trade_amount", "median"),
+        })
+
+    if "maturity_bond" in liq_base.columns:
+        liquidity_agg["maturity"] = ("maturity_bond", "first")
+    elif "maturity" in liq_base.columns:
+        liquidity_agg["maturity"] = ("maturity", "first")
+
+    if "coupon_bond" in liq_base.columns:
+        liquidity_agg["coupon"] = ("coupon_bond", "first")
+    elif "coupon" in liq_base.columns:
+        liquidity_agg["coupon"] = ("coupon", "first")
+
+    if "outstanding_amount" in liq_base.columns:
+        liquidity_agg["outstanding_amount"] = ("outstanding_amount", "first")
+
     liq = (
         liq_base.groupby("cusip", dropna=False)
-        .agg(
-            trade_count=("trade_date", "count"),
-            first_trade=("trade_date", "min"),
-            latest_trade=("trade_date", "max"),
-            active_months=("trade_month", "nunique"),
-            avg_yield=("yield", "mean"),
-            min_yield=("yield", "min"),
-            max_yield=("yield", "max"),
-            avg_price=("price", "mean"),
-            total_trade_amount=("trade_amount", "sum"),
-            avg_trade_amount=("trade_amount", "mean"),
-            median_trade_amount=("trade_amount", "median"),
-            maturity=("maturity_bond", "first"),
-            coupon=("coupon_bond", "first"),
-            outstanding_amount=("outstanding_amount", "first"),
-        )
+        .agg(**liquidity_agg)
         .reset_index()
     )
+
+    # Ensure downstream formulas have safe defaults when optional columns are absent.
+    if "total_trade_amount" not in liq.columns:
+        liq["total_trade_amount"] = 0
+    if "avg_trade_amount" not in liq.columns:
+        liq["avg_trade_amount"] = pd.NA
+    if "median_trade_amount" not in liq.columns:
+        liq["median_trade_amount"] = pd.NA
+    if "outstanding_amount" not in liq.columns:
+        liq["outstanding_amount"] = pd.NA
+    if "avg_yield" not in liq.columns:
+        liq["avg_yield"] = pd.NA
+    if "min_yield" not in liq.columns:
+        liq["min_yield"] = pd.NA
+    if "max_yield" not in liq.columns:
+        liq["max_yield"] = pd.NA
+    if "avg_price" not in liq.columns:
+        liq["avg_price"] = pd.NA
     liq["days_since_last_trade"] = (today - liq["latest_trade"]).dt.days
     liq["trading_period_days"] = (liq["latest_trade"] - liq["first_trade"]).dt.days.clip(lower=1)
     liq["avg_days_between_trades"] = liq["trading_period_days"] / liq["trade_count"].clip(lower=1)
@@ -7287,7 +7357,11 @@ else:
     recent = liq_base[liq_base["trade_date"] >= recent_cutoff].groupby("cusip").agg(recent_90d_trades=("trade_date", "count")).reset_index()
     liq = liq.merge(recent, on="cusip", how="left")
     liq["recent_90d_trades"] = liq["recent_90d_trades"].fillna(0).astype(int)
+    liq["max_yield"] = pd.to_numeric(liq["max_yield"], errors="coerce")
+    liq["min_yield"] = pd.to_numeric(liq["min_yield"], errors="coerce")
     liq["yield_range"] = liq["max_yield"] - liq["min_yield"]
+    liq["total_trade_amount"] = pd.to_numeric(liq["total_trade_amount"], errors="coerce").fillna(0)
+    liq["outstanding_amount"] = pd.to_numeric(liq["outstanding_amount"], errors="coerce")
     liq["turnover_ratio"] = liq["total_trade_amount"] / liq["outstanding_amount"].replace({0: pd.NA})
     liq["liquidity_score"] = (
         liq["trade_count"].rank(pct=True) * 35
