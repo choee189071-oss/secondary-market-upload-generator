@@ -2475,9 +2475,8 @@ if trade_date_filter_enabled and isinstance(trade_date_range, tuple) and len(tra
         & (pd.to_datetime(snapshot_base["trade_date"], errors="coerce").dt.date <= trade_date_range[1])
     ].copy()
 
-snap_left, snap_right = st.columns(2)
-
-with snap_left:
+# Stack the two desk snapshot charts vertically so each chart has full page width.
+with st.container():
     st.subheader("Secondary Market Spreads")
     spread_universe = market_df.copy()
     if trade_date_filter_enabled and isinstance(trade_date_range, tuple) and len(trade_date_range) == 2:
@@ -2588,8 +2587,8 @@ with snap_left:
                 title="Multi-Issuer Spread Trend",
                 xaxis_title="Trade Date",
                 yaxis_title="Spread (bps)",
-                height=390,
-                margin=dict(l=20, r=20, t=55, b=30),
+                height=560,
+                margin=dict(l=40, r=40, t=70, b=50),
                 legend_title_text="Line Item",
             )
             fig_spread_snapshot.update_xaxes(tickformat="%m/%d/%Y")
@@ -2599,7 +2598,7 @@ with snap_left:
     else:
         st.info("Upload trades with issuer, trade date, yield, and spread/index-rate fields to build spread trends.")
 
-with snap_right:
+with st.container():
     st.markdown("<a id='trading-volume'></a>", unsafe_allow_html=True)
     st.subheader("Secondary Market Trading Volume")
     if not market_df.empty and {"trade_date", "trade_amount", "issuer"}.issubset(market_df.columns):
@@ -2681,8 +2680,8 @@ with snap_right:
             fig_vol_snapshot.update_layout(
                 title="Monthly Trading Volume + Primary Issuer Share",
                 barmode="stack",
-                height=390,
-                margin=dict(l=20, r=20, t=55, b=30),
+                height=560,
+                margin=dict(l=40, r=55, t=70, b=50),
                 legend_title_text="Volume Item",
             )
             fig_vol_snapshot.update_xaxes(title_text="Trade Month", tickformat="%b %Y")
