@@ -440,85 +440,66 @@ def section_directory():
             unsafe_allow_html=True,
         )
 
-section_directory()
+# Dashboard workflow map removed: the app now uses a desk-first sidebar index.
 
 
 with st.expander("Instructions", expanded=False):
     st.markdown(
         """
-<div style='font-size:15px; color:black; line-height:1.4;'>
+<div style='font-size:15px; color:black; line-height:1.45;'>
 
-<h5 style='margin-bottom:4px;'>Step 1: Upload Required Trade File(s)</h5>
+<h4 style='margin-bottom:6px;'>Desk-First Workflow</h4>
 
+This dashboard is designed to behave like a lightweight secondary-market desk tool. Start with the trade tape, then use optional reference files only when they improve the analysis.
+
+<h5 style='margin-bottom:4px;'>1. Required Input: MuniPro Trade History</h5>
 <div style='padding-left:18px;'>
-
-<b>1. Trade History File(s) — Required</b>
-
 <ul style='margin-top:2px; margin-bottom:6px;'>
-<li>Information can be extracted from MuniPro</li>
-<li>Row 1 must contain column headers</li>
-<li>Actual data should begin from Row 2</li>
-<li>Multiple issuers’ trade data can be uploaded separately or combined into one file</li>
+<li>Upload one or more MuniPro trade-history files.</li>
+<li>Name each file after the issuer, for example <code>LADWP_Trade.xlsx</code> or <code>State_of_California_Trade.csv</code>.</li>
+<li>The app uses the file name as the issuer name. This avoids confusing bond-purpose text like <code>GO Various Purpose</code>, <code>Power</code>, or <code>Water</code> with the issuer.</li>
 </ul>
 
-<b>Minimum Useful Columns:</b><br>Cusip, Maturity<br><br><b>Recommended Columns:</b><br>Issuer, Type, Lien, Election, Series, Secondary Credit, Term, Par Amount, Outstanding Amount, Coupon, Call Date, Call Price, Fed Tax, AMT
+<b>Minimum fields:</b><br>
+CUSIP / CUSIP9, Trade Date, Yield, Maturity Date<br><br>
 
-<div style='height:10px;'></div>
+<b>Recommended fields:</b><br>
+Trade Date/Time, Description, Coupon, Price, Trade Amount, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
+</div>
 
-<b>2. Optional Bond Reference File</b>
-
+<h5 style='margin-top:10px; margin-bottom:4px;'>2. Optional Reference Files</h5>
+<div style='padding-left:18px;'>
 <ul style='margin-top:2px; margin-bottom:6px;'>
-<li>Use only if you want to enrich trades with static bond metadata</li>
-<li>Examples: call date, call price, lien, tax status, outstanding amount</li>
-<li>The dashboard can run without this file</li>
+<li><b>Bond Reference:</b> use only for enrichment such as call date, call price, lien, tax status, and outstanding amount.</li>
+<li><b>Issuer / Sector Mapping:</b> use when you want persistent sector labels instead of manual overrides.</li>
+<li><b>MMD Curve:</b> use as the preferred benchmark only when you upload a clean, small curve file for the research period. Avoid oversized historical files.</li>
 </ul>
+</div>
 
-<b>Minimum Required Columns:</b><br>CUSIP9, Trade Date, Yield<br><br><b>Recommended Columns:</b><br>Trade Date/Time, Description, Maturity Date, Settlement Date, Coupon, Price, Trade Amount, Calculation Date, Calculation Price, Index, Index Rate, Spread, Trade Type, Ratings M/S/F
+<h5 style='margin-top:10px; margin-bottom:4px;'>3. Recommended Reading Order</h5>
+<div style='padding-left:18px;'>
+<ol style='margin-top:2px; margin-bottom:6px;'>
+<li><b>Desk Market Snapshot</b>: spread trend, trading volume, curve snapshot, and top movers.</li>
+<li><b>Issuer Curve vs Benchmark</b>: where the issuer curve sits versus the active benchmark.</li>
+<li><b>Spread Movement Heatmap</b>: use as a drilldown, not the first page.</li>
+<li><b>Liquidity / Trading Frequency</b>: confirm whether the signal is supported by enough trading activity.</li>
+<li><b>CUSIP Drilldown / Screener</b>: investigate specific bonds after the high-level view.</li>
+</ol>
+</div>
 
-<div style='height:8px;'></div>
-
-<b>Important:</b><br>
-CUSIP9 in Trade Files is now the primary security identifier. Bond reference data is optional and only enriches the trade tape when CUSIPs match.
-
-<div style='height:10px;'></div>
-
-<b>3. Optional Files</b>
-
+<h5 style='margin-top:10px; margin-bottom:4px;'>4. Performance Tips</h5>
+<div style='padding-left:18px;'>
 <ul style='margin-top:2px; margin-bottom:2px;'>
-<li>Issuer / Sector Mapping File</li>
-<li>MMD Curve File</li>
-<li>Bond Reference File</li>
+<li>Keep <b>Fast mode</b> on while exploring.</li>
+<li>Do not show full raw tables unless auditing data.</li>
+<li>Use MMD files covering only the years you are researching.</li>
+<li>Use the sidebar index to jump to the most-used desk sections first.</li>
 </ul>
-
-</div>
-
-<h5 style='margin-top:10px; margin-bottom:4px;'>Step 2: Automatic Issuer Detection</h5>
-
-<div style='padding-left:18px;'>
-The dashboard automatically detects issuer names from trade descriptions, issuer mapping, and optional bond reference data.
-</div>
-
-<h5 style='margin-top:10px; margin-bottom:4px;'>Step 3: Select Uploaded Issuer</h5>
-
-<div style='padding-left:18px;'>
-
-<ul style='margin-top:2px; margin-bottom:6px;'>
-<li>Select one of the detected issuers from the trade tape</li>
-<li>Apply optional filters:
-    <ul style='margin-top:2px; margin-bottom:2px;'>
-        <li>Maturity Year</li>
-        <li>Optional Trade Date Filter</li>
-        <li>Relative Value Comparison</li>
-    </ul>
-</li>
-</ul>
-
 </div>
 
 </div>
 """,
-        unsafe_allow_html=True
-
+        unsafe_allow_html=True,
     )
 
 # -----------------------------------------------------------------------------
@@ -2251,49 +2232,39 @@ Useful for:
     st.caption(f"Policy: {benchmark_conflict_policy}")
 
     st.markdown("---")
-    st.subheader("Index")
+    st.subheader("Desk Navigation")
+    st.caption("Most-used desk views are listed first. Heavier research/admin sections are lower priority.")
     st.markdown(
         """
 <div class="sidebar-nav-small">
-<b>Data & Setup</b><br>
-<a href="#file-readiness">1. File Readiness Check</a><br>
-<a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
+<b>Daily Desk Snapshot</b><br>
+<a href="#desk-market-snapshot">1. Desk Market Snapshot</a><br>
+<a href="#yield-relative-value">2. Secondary Market Spreads</a><br>
+<a href="#trading-volume">3. Secondary Market Trading Volume</a><br>
+<a href="#issuer-curve">4. Issuer Curve vs Benchmark</a><br>
+<a href="#spread-movement">5. Spread Movement / Top Movers</a><br><br>
 
-<b>Benchmark / Spread Framework</b><br>
-<a href="#yield-relative-value">4. Yield & Relative Value</a><br>
-<a href="#issuer-curve">5. Issuer Curve vs Benchmark</a><br>
-<a href="#spread-level">6. Current Spread Level</a><br>
-<a href="#spread-attribution">7. Spread Attribution</a><br><br>
+<b>Drilldown Tools</b><br>
+<a href="#liquidity">Liquidity / Trading Frequency</a><br>
+<a href="#cusip-drilldown">CUSIP Opportunity Drilldown</a><br>
+<a href="#security-screener">Security Screener</a><br>
+<a href="#peer-rv">Peer RV Comparison</a><br><br>
 
-<b>Relative Value Signals</b><br>
-<a href="#market-narrative">8. Market Narrative & Opportunity Map</a><br>
-<a href="#peer-rv">9. Peer RV Comparison</a><br>
-<a href="#cross-issuer-rv">10. Cross-Issuer RV Analytics</a><br>
-<a href="#historical-spread">11. Historical Spread Percentile</a><br>
-<a href="#recommendation-engine">12. Rule-Based Recommendation</a><br>
-<a href="#ai-commentary-studio">13. AI Commentary Studio</a><br><br>
+<b>Research / Advanced</b><br>
+<a href="#spread-level">Current Spread Level</a><br>
+<a href="#spread-attribution">Spread Attribution</a><br>
+<a href="#historical-spread">Historical Percentile</a><br>
+<a href="#curve-shape">Curve Shape Analytics</a><br>
+<a href="#scenario-shock">Scenario Shock Analysis</a><br>
+<a href="#dealer-proxy">Dealer Behavior Proxy</a><br>
+<a href="#ai-commentary-studio">AI Commentary Studio</a><br><br>
 
-<b>Risk / Flow / Screening</b><br>
-<a href="#curve-shape">13. Curve Shape Analytics</a><br>
-<a href="#scenario-shock">14. Scenario Shock Analysis</a><br>
-<a href="#dealer-proxy">15. Dealer Behavior Proxy</a><br>
-<a href="#security-screener">16. Security Screener</a><br>
-<a href="#watchlist">17. Watchlist / Saved Candidates</a><br><br>
-
-<b>Security-Level Drilldown</b><br>
-<a href="#spread-movement">18. Spread Movement</a><br>
-<a href="#cusip-drilldown">19. CUSIP Opportunity Drilldown</a><br>
-<a href="#rv-positioning">20. RV Positioning Map</a><br>
-<a href="#liquidity">21. Liquidity Analysis</a><br><br>
-
-<b>Reference / Admin / Outputs</b><br>
-<a href="#bond-master">22. Security Reference</a><br>
-<a href="#trade-detail">23. Trade Detail</a><br>
-<a href="#report-export-center">24. Report Export Center</a><br>
-<a href="#export-summary">25. Export Summary</a><br>
-<a href="#admin-methodology">26. Admin Methodology</a><br>
-<a href="#version-changelog">27. Version / Change Log</a><br>
-<a href="#downloads">28. Downloads</a>
+<b>Data / Admin</b><br>
+<a href="#file-readiness">File Readiness</a><br>
+<a href="#executive-snapshot">Executive Snapshot</a><br>
+<a href="#bond-master">Security Reference</a><br>
+<a href="#trade-detail">Trade Detail</a><br>
+<a href="#downloads">Downloads</a>
 </div>
 """,
         unsafe_allow_html=True,
@@ -2302,15 +2273,15 @@ Useful for:
     with st.expander("Version / Change Log", expanded=False):
         st.markdown(
             """
-**Current Version:** `v1.0-team-ready`
+**Current Version:** `v1.1-desk-first`
 
 Recent additions:
 - Cross-Issuer RV Analytics
 - Scenario Shock Analysis
 - Recommendation Narrative Engine
-- Export Summary Package
-- Watchlist / Saved Candidates
-- Admin Methodology Page
+- Desk-first navigation and market snapshot
+- Faster exploration defaults
+- Optional advanced/admin sections
             """
         )
     st.markdown("---")
@@ -2323,7 +2294,7 @@ Recent additions:
             latest_trade = trade_dates.max()
             st.caption(
                 f"📅 Data Coverage:\n"
-                f"{earliest_trade:%Y-%m-%d} → {latest_trade:%Y-%m-%d}"
+                f"{earliest_trade:%m/%d/%Y} → {latest_trade:%m/%d/%Y}"
             )
         else:
             st.caption("📅 Data Coverage:\nNo valid trade dates detected")
@@ -2450,10 +2421,93 @@ if not issuer_trades.empty and trade_date_filter_enabled and selected_trade_date
 # Data Quality Scorecard removed for trade-only workflow.
 # The dashboard now relies on the File Readiness Check and Data Health sidebar metrics.
 
+
+# -----------------------------------------------------------------------------
+# Desk-first market snapshot
+# -----------------------------------------------------------------------------
+section_anchor("desk-market-snapshot", "Desk Market Snapshot")
+st.caption("Most-used desk views first: spread trend, trading volume, curve context, and top movers.")
+
+snap_left, snap_right = st.columns(2)
+
+with snap_left:
+    st.subheader("Secondary Market Spreads")
+    if not issuer_trades.empty and {"trade_date", "yield"}.issubset(issuer_trades.columns):
+        spread_source_col = "spread" if "spread" in issuer_trades.columns and issuer_trades["spread"].notna().any() else None
+        trend_df = issuer_trades.copy()
+        trend_df["trade_date"] = pd.to_datetime(trend_df["trade_date"], errors="coerce")
+        trend_df = trend_df.dropna(subset=["trade_date", "yield"])
+        if spread_source_col:
+            trend_df["spread_bps"] = pd.to_numeric(trend_df[spread_source_col], errors="coerce") * 100
+        elif "index_rate" in trend_df.columns:
+            trend_df["spread_bps"] = (pd.to_numeric(trend_df["yield"], errors="coerce") - pd.to_numeric(trend_df["index_rate"], errors="coerce")) * 100
+        else:
+            trend_df["spread_bps"] = pd.NA
+        trend_df = trend_df.dropna(subset=["spread_bps"])
+        if not trend_df.empty:
+            spread_daily = (
+                trend_df.groupby(pd.Grouper(key="trade_date", freq="D"), as_index=False)
+                .agg(spread_bps=("spread_bps", "median"), trade_count=("spread_bps", "count"))
+                .dropna(subset=["spread_bps"])
+            )
+            fig_spread_snapshot = px.line(
+                spread_daily,
+                x="trade_date",
+                y="spread_bps",
+                markers=False,
+                title=f"{selected_issuer} Median Spread Trend",
+                labels={"trade_date": "Trade Date", "spread_bps": "Spread (bps)"},
+            )
+            fig_spread_snapshot.update_layout(height=360, margin=dict(l=20, r=20, t=55, b=30))
+            safe_plotly_chart(fig_spread_snapshot, use_container_width=True)
+        else:
+            st.info("No usable spread or index-rate data for the spread trend.")
+    else:
+        st.info("Upload trades with trade date and yield fields to build spread trends.")
+
+with snap_right:
+    st.markdown("<a id='trading-volume'></a>", unsafe_allow_html=True)
+    st.subheader("Secondary Market Trading Volume")
+    if not issuer_trades.empty and {"trade_date", "trade_amount"}.issubset(issuer_trades.columns):
+        vol_df = issuer_trades.copy()
+        vol_df["trade_date"] = pd.to_datetime(vol_df["trade_date"], errors="coerce")
+        vol_df["trade_amount"] = pd.to_numeric(vol_df["trade_amount"], errors="coerce")
+        vol_df = vol_df.dropna(subset=["trade_date", "trade_amount"])
+        if not vol_df.empty:
+            vol_df["month"] = vol_df["trade_date"].dt.to_period("M").dt.to_timestamp()
+            monthly_issuer = vol_df.groupby("month", as_index=False).agg(monthly_volume=("trade_amount", "sum"), trade_count=("trade_amount", "count"))
+            fig_vol_snapshot = px.bar(
+                monthly_issuer,
+                x="month",
+                y="monthly_volume",
+                title=f"{selected_issuer} Monthly Trading Volume",
+                labels={"month": "Trade Month", "monthly_volume": "Trade Volume"},
+            )
+            fig_vol_snapshot.update_layout(height=360, margin=dict(l=20, r=20, t=55, b=30))
+            safe_plotly_chart(fig_vol_snapshot, use_container_width=True)
+        else:
+            st.info("No usable trade amount data for monthly volume.")
+    else:
+        st.info("Upload trades with trade amount to build trading-volume views.")
+
+snap_col_a, snap_col_b = st.columns(2)
+with snap_col_a:
+    if not issuer_trades.empty and "spread" in issuer_trades.columns:
+        _spread_bps = pd.to_numeric(issuer_trades["spread"], errors="coerce") * 100
+        clean_metric_card("Median Spread", "N/A" if _spread_bps.dropna().empty else f"{_spread_bps.median():.1f} bps", size="small")
+    else:
+        clean_metric_card("Median Spread", "N/A", size="small")
+with snap_col_b:
+    if not issuer_trades.empty and "trade_amount" in issuer_trades.columns:
+        _amt = pd.to_numeric(issuer_trades["trade_amount"], errors="coerce").sum()
+        clean_metric_card("Total Trade Volume", f"${_amt/1_000_000:,.1f}M", size="small")
+    else:
+        clean_metric_card("Total Trade Volume", "N/A", size="small")
+
 section_anchor("executive-snapshot", "Executive Snapshot")
 
 latest_trade_display = (
-    issuer_trades["trade_date"].max().strftime("%Y-%m-%d")
+    issuer_trades["trade_date"].max().strftime("%m/%d/%Y")
     if not issuer_trades.empty
     else "No trades"
 )
@@ -6110,7 +6164,7 @@ ai_context = {
     "executive_snapshot": {
         "securities": len(issuer_bonds),
         "trades_current_filter": len(issuer_trades),
-        "latest_trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else None,
+        "latest_trade": issuer_trades["trade_date"].max().strftime("%m/%d/%Y") if not issuer_trades.empty else None,
     },
     "signals": {},
     "market_context_request": {
@@ -7979,7 +8033,7 @@ if ENABLE_REPORT_EXPORTS:
         "Sector": selected_sector,
         "Securities": f"{len(issuer_bonds):,}",
         "Trades in Current Filter": f"{len(issuer_trades):,}",
-        "Latest Trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades",
+        "Latest Trade": issuer_trades["trade_date"].max().strftime("%m/%d/%Y") if not issuer_trades.empty else "No trades",
     }
 
     report_html_parts = [
@@ -8192,7 +8246,7 @@ This avoids adding fragile report-generation dependencies while keeping the work
         """
     )
 
-latest_trade_text = issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades"
+latest_trade_text = issuer_trades["trade_date"].max().strftime("%m/%d/%Y") if not issuer_trades.empty else "No trades"
 summary_timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
 summary_lines = [
     f"# Municipal Secondary Market Dashboard Summary",
