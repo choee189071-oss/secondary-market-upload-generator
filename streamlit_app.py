@@ -650,6 +650,90 @@ def maturity_zone_label(value: object) -> str:
 MATURITY_ZONE_ORDER = ["1-3Y", "4-7Y", "8-12Y", "13-20Y", "21Y+"]
 
 
+def maturity_display_order(values: object) -> list[str]:
+    """Return a stable maturity display order for annual buckets or maturity zones.
+
+    This prevents charts from going blank when a matrix has been aggregated from
+    1Y/2Y/... into 1-3Y/4-7Y/... zones. Previously some charts forced
+    MATURITY_BUCKET_ORDER only, which converted zone labels into NaN categories.
+    """
+    try:
+        vals = pd.Series(list(values)).dropna().astype(str).unique().tolist()
+    except Exception:
+        vals = []
+
+    zone_vals = [z for z in MATURITY_ZONE_ORDER if z in vals]
+    annual_vals = [v for v in vals if re.fullmatch(r"\d{1,2}Y", str(v).strip().upper())]
+    annual_vals = sorted(annual_vals, key=maturity_year_sort_key)
+    other_vals = sorted([v for v in vals if v not in set(zone_vals + annual_vals)])
+    return zone_vals + annual_vals + other_vals
+
+
+def sanitize_curve_long_for_plot(
+    df: pd.DataFrame,
+    x_col: str = "maturity_bucket",
+    y_col: str = "spread_to_benchmark_bps",
+    color_col: str = "benchmark_rating",
+) -> pd.DataFrame:
+    """Coerce curve data into a plot-safe long dataframe.
+
+    The dashboard accepts uploaded data with evolving schemas. This function
+    makes the current spread curve defensive by:
+    - resolving maturity columns through the central data model;
+    - coercing spread values to numeric;
+    - dropping rows with missing x/y values;
+    - preserving maturity-zone labels instead of forcing them into annual buckets.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    out = ensure_model_columns(df).copy()
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+
+    maturity_col = x_col if x_col in out.columns else resolve_model_col(out, "maturity_bucket", required=False)
+    spread_col = y_col if y_col in out.columns else resolve_model_col(out, "spread_bps", required=False)
+
+    if maturity_col is None or spread_col is None:
+        return pd.DataFrame()
+
+    if maturity_col != x_col:
+        out[x_col] = out[maturity_col]
+    if spread_col != y_col:
+        out[y_col] = out[spread_col]
+
+    if color_col not in out.columns:
+        out[color_col] = "Benchmark"
+
+    out[x_col] = out[x_col].apply(coerce_maturity_label).astype("string")
+    out[y_col] = pd.to_numeric(out[y_col], errors="coerce")
+    out = out.dropna(subset=[x_col, y_col, color_col]).copy()
+
+    order = maturity_display_order(out[x_col].tolist())
+    if order:
+        out[x_col] = pd.Categorical(out[x_col].astype(str), categories=order, ordered=True)
+        out = out.sort_values([color_col, x_col])
+
+    return out
+
+
+def curve_data_audit(df: pd.DataFrame, required_cols: list[str] | None = None) -> pd.DataFrame:
+    """Small diagnostic table for empty charts, shown only inside an expander."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame({"check": ["input_rows"], "value": [0]})
+    required_cols = required_cols or ["maturity_bucket", "benchmark_rating", "spread_to_benchmark_bps"]
+    rows = [
+        {"check": "input_rows", "value": len(df)},
+        {"check": "columns", "value": ", ".join(map(str, df.columns[:25])) + ("..." if len(df.columns) > 25 else "")},
+    ]
+    for col in required_cols:
+        if col in df.columns:
+            rows.append({"check": f"{col}_missing", "value": int(df[col].isna().sum())})
+            rows.append({"check": f"{col}_non_missing", "value": int(df[col].notna().sum())})
+        else:
+            rows.append({"check": f"{col}_present", "value": False})
+    return pd.DataFrame(rows)
+
+
 def aggregate_maturity_rows_for_display(matrix: pd.DataFrame, agg: str = "median") -> pd.DataFrame:
     """Aggregate heatmap rows from 1Y..40Y into readable maturity zones."""
     if matrix is None or matrix.empty:
@@ -5288,15 +5372,20 @@ else:
             )
 
             st.subheader("1. Current Spread Curve")
+            curve_long = sanitize_curve_long_for_plot(
+                curve_long,
+                x_col="maturity_bucket",
+                y_col="spread_to_benchmark_bps",
+                color_col="benchmark_rating",
+            )
             if curve_long.empty:
-                st.warning("Current Spread Curve skipped safely: no maturity field or benchmark spread values were available.")
-            else:
-                curve_long["maturity_bucket"] = pd.Categorical(
-                    curve_long["maturity_bucket"],
-                    categories=[b for b in MATURITY_BUCKET_ORDER if b in set(curve_long["maturity_bucket"].astype(str))],
-                    ordered=True,
+                st.warning(
+                    "Current Spread Curve skipped safely: no valid maturity + spread rows were available. "
+                    "This usually means benchmark dates did not overlap with issuer trades, or spread values were all blank after the benchmark merge."
                 )
-                curve_long = curve_long.sort_values(["benchmark_rating", "maturity_bucket"])
+                with st.expander("Debug current spread curve data", expanded=False):
+                    safe_dataframe(curve_data_audit(curve_df), width="stretch")
+            else:
                 level_curve_fig = px.line(
                     curve_long,
                     x="maturity_bucket",
@@ -5305,7 +5394,7 @@ else:
                     markers=True,
                     title=f"{selected_issuer} Current Spread Curve vs Selected Benchmarks",
                     labels={
-                        "maturity_bucket": "Maturity Year",
+                        "maturity_bucket": "Maturity Year / Zone",
                         "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
                         "benchmark_rating": "Benchmark Curve",
                     },
