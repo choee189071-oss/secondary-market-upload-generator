@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -1272,6 +1273,40 @@ def _infer_issuer_from_description(description: object, fallback: str = "Unknown
     return text or fallback or "Unknown"
 
 
+def _issuer_from_source_file(source_file: object) -> str:
+    """Use the uploaded MuniPro trade filename as the issuer name.
+
+    Recommended naming examples:
+    - State_of_California_Trade.csv -> State Of California
+    - LADWP_Trade.xlsx -> LADWP
+
+    This is intentionally preferred over Description-based issuer inference because
+    MuniPro descriptions often contain purpose/sector labels such as GO Various
+    Purpose, Power, Water, or Veterans that are not issuer names.
+    """
+    if pd.isna(source_file):
+        return "Unknown"
+
+    name = Path(str(source_file)).stem.strip()
+    if not name:
+        return "Unknown"
+
+    # Remove common export/file suffixes without touching the actual issuer name.
+    name = re.sub(r"(?i)([_\-\s]+)?(trade|trades|trade[_\-\s]*history|munipro|export|secondary|market|history|data)$", "", name).strip()
+    name = re.sub(r"(?i)([_\-\s]+)?(trade|trades|trade[_\-\s]*history|munipro|export|secondary|market|history|data)$", "", name).strip()
+    name = re.sub(r"[_\-]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip(" -_.,")
+
+    if not name:
+        return "Unknown"
+
+    # Preserve common all-caps short names such as LADWP, SFPUC, MTA.
+    if len(name) <= 8 and name.replace(" ", "").isupper():
+        return name
+
+    return name.title().replace(" Ca ", " CA ").replace(" Usd", " USD ").replace(" Go ", " GO ")
+
+
 def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
     """Make standardized trade exports self-sufficient for dashboard analytics."""
     if trades_df is None or trades_df.empty:
@@ -1308,18 +1343,21 @@ def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
     if "coupon_trade" not in out.columns and "coupon" in out.columns:
         out["coupon_trade"] = out["coupon"]
 
-    # Issuer inference is now trade-tape-first.
-    if "issuer" not in out.columns:
+    # Issuer inference is filename-first.
+    # In MuniPro trade exports, Description often contains purpose/sector labels
+    # rather than issuer names (for example: GO Various Purpose, Water, Power).
+    # Therefore, each uploaded trade file should be named after the issuer.
+    if "source_file" in out.columns:
+        out["issuer"] = out["source_file"].apply(_issuer_from_source_file)
+    elif "issuer" not in out.columns:
         if "description" in out.columns:
             out["issuer"] = out["description"].apply(_infer_issuer_from_description)
         else:
-            out["issuer"] = out.get("source_file", pd.Series(["Unknown"] * len(out), index=out.index))
+            out["issuer"] = "Unknown"
     else:
         missing_issuer = out["issuer"].isna() | (out["issuer"].astype(str).str.strip() == "") | (out["issuer"].astype(str).str.lower() == "unknown")
         if "description" in out.columns:
             out.loc[missing_issuer, "issuer"] = out.loc[missing_issuer, "description"].apply(_infer_issuer_from_description)
-        if "source_file" in out.columns:
-            out.loc[out["issuer"].isna() | (out["issuer"].astype(str).str.strip() == ""), "issuer"] = out.loc[out["issuer"].isna() | (out["issuer"].astype(str).str.strip() == ""), "source_file"]
 
     out["issuer"] = out["issuer"].fillna("Unknown").astype(str).str.strip()
 
@@ -1511,8 +1549,8 @@ def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
 
 with st.sidebar:
     st.header("1. Upload Data")
-    bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
     trade_files = st.file_uploader("Trade History File(s) — required", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
+    bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
     issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
     mmd_file = st.file_uploader("MMD Curve File — optional", type=["csv", "xlsx", "xls"])
 
@@ -1525,76 +1563,13 @@ with st.sidebar:
         template_download_button(CURVE_TEMPLATE_COLUMNS, "Benchmark curve template CSV", "benchmark_curve_template.csv")
 
     st.markdown("---")
-    st.subheader("Contents")
-    st.markdown(
-        """
-<div class="sidebar-nav-small">
-<b>Data & Setup</b><br>
-<a href="#file-readiness">1. File Readiness Check</a><br>
-<a href="#data-quality-scorecard">2. Data Quality Scorecard</a><br>
-<a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
-
-<b>Benchmark / Spread Framework</b><br>
-<a href="#yield-relative-value">4. Yield & Relative Value</a><br>
-<a href="#issuer-curve">5. Issuer Curve vs Benchmark</a><br>
-<a href="#spread-level">6. Current Spread Level</a><br>
-<a href="#spread-attribution">7. Spread Attribution</a><br><br>
-
-<b>Relative Value Signals</b><br>
-<a href="#market-narrative">8. Market Narrative & Opportunity Map</a><br>
-<a href="#peer-rv">9. Peer RV Comparison</a><br>
-<a href="#cross-issuer-rv">10. Cross-Issuer RV Analytics</a><br>
-<a href="#historical-spread">11. Historical Spread Percentile</a><br>
-<a href="#recommendation-engine">12. Rule-Based Recommendation</a><br>
-<a href="#ai-commentary-studio">13. AI Commentary Studio</a><br><br>
-
-<b>Risk / Flow / Screening</b><br>
-<a href="#curve-shape">13. Curve Shape Analytics</a><br>
-<a href="#scenario-shock">14. Scenario Shock Analysis</a><br>
-<a href="#dealer-proxy">15. Dealer Behavior Proxy</a><br>
-<a href="#security-screener">16. Security Screener</a><br>
-<a href="#watchlist">17. Watchlist / Saved Candidates</a><br><br>
-
-<b>Security-Level Drilldown</b><br>
-<a href="#spread-movement">18. Spread Movement</a><br>
-<a href="#cusip-drilldown">19. CUSIP Opportunity Drilldown</a><br>
-<a href="#rv-positioning">20. RV Positioning Map</a><br>
-<a href="#liquidity">21. Liquidity Analysis</a><br><br>
-
-<b>Reference / Admin / Outputs</b><br>
-<a href="#bond-master">22. Security Reference</a><br>
-<a href="#trade-detail">23. Trade Detail</a><br>
-<a href="#report-export-center">24. Report Export Center</a><br>
-<a href="#export-summary">25. Export Summary</a><br>
-<a href="#admin-methodology">26. Admin Methodology</a><br>
-<a href="#version-changelog">27. Version / Change Log</a><br>
-<a href="#downloads">28. Downloads</a>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Version / Change Log", expanded=False):
-        st.markdown(
-            """
-**Current Version:** `v1.0-team-ready`
-
-Recent additions:
-- Cross-Issuer RV Analytics
-- Scenario Shock Analysis
-- Recommendation Narrative Engine
-- Data Quality Scorecard
-- Export Summary Package
-- Watchlist / Saved Candidates
-- Admin Methodology Page
-            """
-        )
+    st.caption("Name each trade file after its issuer, e.g. `State_of_California_Trade.csv` or `LADWP_Trade.xlsx`. The app will use the filename as the issuer name.")
 
 if not trade_files:
     st.info("Upload at least one MuniPro trade-history file to generate the dashboard. Bond reference data is optional enrichment.")
     with st.expander("Expected file logic"):
         st.write(
-            "The app now uses a trade-first workflow: it standardizes CUSIP fields, infers issuer from trade descriptions, "
+            "The app now uses a trade-first workflow: it standardizes CUSIP fields, uses each trade file name as the issuer name, "
             "builds maturity buckets from trade maturity dates, and optionally enriches static fields from a bond reference file when provided."
         )
     st.stop()
@@ -1702,65 +1677,6 @@ st.success(
 )
 
 with st.sidebar:
-    st.markdown("---")
-    st.header("Data Health")
-
-    if not market_df.empty and "trade_date" in market_df.columns:
-        trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
-        if not trade_dates.empty:
-            earliest_trade = trade_dates.min()
-            latest_trade = trade_dates.max()
-            st.caption(
-                f"📅 Data Coverage:\n"
-                f"{earliest_trade:%Y-%m-%d} → {latest_trade:%Y-%m-%d}"
-            )
-        else:
-            st.caption("📅 Data Coverage:\nNo valid trade dates detected")
-    else:
-        st.caption("📅 Data Coverage:\nNo trade data loaded")
-
-    st.caption(
-        f"📊 Trades Loaded:\n"
-        f"{len(market_df):,}"
-    )
-
-    total_rows = len(market_df)
-    if total_rows > 0 and "cusip" in market_df.columns:
-        valid_cusip_count = market_df["cusip"].notna().sum()
-        valid_cusip_rate = valid_cusip_count / total_rows * 100
-    else:
-        valid_cusip_rate = 0
-
-    cusip_icon = "🟢" if valid_cusip_rate >= 95 else "🟡" if valid_cusip_rate >= 80 else "🔴"
-    st.caption(
-        f"{cusip_icon} Valid CUSIP Rate:\n"
-        f"{valid_cusip_rate:.1f}%"
-    )
-
-    missing_issuers = market_df["issuer"].isna().sum() if "issuer" in market_df.columns else total_rows
-    missing_issuer_rate = missing_issuers / total_rows * 100 if total_rows > 0 else 0
-    missing_icon = "🟢" if missing_issuers == 0 else "🟡" if missing_issuer_rate <= 5 else "🔴"
-    st.caption(
-        f"{missing_icon} Missing Issuers:\n"
-        f"{missing_issuers:,}"
-    )
-
-    st.caption(
-        f"🧹 Duplicate Trades Removed:\n"
-        f"{duplicates_removed:,}"
-    )
-
-    with st.expander("Data Health methodology", expanded=False):
-        st.markdown(
-            """
-- **Data Coverage** uses the earliest and latest valid trade dates after standardization.
-- **Trades Loaded** counts trade rows available for analytics.
-- **Valid CUSIP Rate** is the share of trade rows with a usable CUSIP identifier.
-- **Missing Issuers** counts rows without an issuer after trade-description inference and issuer-mapping logic.
-- **Duplicate Trades Removed** counts exact duplicate standardized trade rows removed before analytics.
-            """
-        )
-
     st.markdown("---")
     st.header("2. Select From Uploaded Issuers")
     selected_issuer = st.selectbox(
@@ -1945,6 +1861,131 @@ Useful for:
 - CUSIP drilldowns
 """
     )
+
+    st.markdown("---")
+    st.subheader("Index")
+    st.markdown(
+        """
+<div class="sidebar-nav-small">
+<b>Data & Setup</b><br>
+<a href="#file-readiness">1. File Readiness Check</a><br>
+<a href="#data-quality-scorecard">2. Data Quality Scorecard</a><br>
+<a href="#executive-snapshot">3. Executive Snapshot</a><br><br>
+
+<b>Benchmark / Spread Framework</b><br>
+<a href="#yield-relative-value">4. Yield & Relative Value</a><br>
+<a href="#issuer-curve">5. Issuer Curve vs Benchmark</a><br>
+<a href="#spread-level">6. Current Spread Level</a><br>
+<a href="#spread-attribution">7. Spread Attribution</a><br><br>
+
+<b>Relative Value Signals</b><br>
+<a href="#market-narrative">8. Market Narrative & Opportunity Map</a><br>
+<a href="#peer-rv">9. Peer RV Comparison</a><br>
+<a href="#cross-issuer-rv">10. Cross-Issuer RV Analytics</a><br>
+<a href="#historical-spread">11. Historical Spread Percentile</a><br>
+<a href="#recommendation-engine">12. Rule-Based Recommendation</a><br>
+<a href="#ai-commentary-studio">13. AI Commentary Studio</a><br><br>
+
+<b>Risk / Flow / Screening</b><br>
+<a href="#curve-shape">13. Curve Shape Analytics</a><br>
+<a href="#scenario-shock">14. Scenario Shock Analysis</a><br>
+<a href="#dealer-proxy">15. Dealer Behavior Proxy</a><br>
+<a href="#security-screener">16. Security Screener</a><br>
+<a href="#watchlist">17. Watchlist / Saved Candidates</a><br><br>
+
+<b>Security-Level Drilldown</b><br>
+<a href="#spread-movement">18. Spread Movement</a><br>
+<a href="#cusip-drilldown">19. CUSIP Opportunity Drilldown</a><br>
+<a href="#rv-positioning">20. RV Positioning Map</a><br>
+<a href="#liquidity">21. Liquidity Analysis</a><br><br>
+
+<b>Reference / Admin / Outputs</b><br>
+<a href="#bond-master">22. Security Reference</a><br>
+<a href="#trade-detail">23. Trade Detail</a><br>
+<a href="#report-export-center">24. Report Export Center</a><br>
+<a href="#export-summary">25. Export Summary</a><br>
+<a href="#admin-methodology">26. Admin Methodology</a><br>
+<a href="#version-changelog">27. Version / Change Log</a><br>
+<a href="#downloads">28. Downloads</a>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Version / Change Log", expanded=False):
+        st.markdown(
+            """
+**Current Version:** `v1.0-team-ready`
+
+Recent additions:
+- Cross-Issuer RV Analytics
+- Scenario Shock Analysis
+- Recommendation Narrative Engine
+- Data Quality Scorecard
+- Export Summary Package
+- Watchlist / Saved Candidates
+- Admin Methodology Page
+            """
+        )
+    st.markdown("---")
+    st.header("Data Health")
+
+    if not market_df.empty and "trade_date" in market_df.columns:
+        trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
+        if not trade_dates.empty:
+            earliest_trade = trade_dates.min()
+            latest_trade = trade_dates.max()
+            st.caption(
+                f"📅 Data Coverage:\n"
+                f"{earliest_trade:%Y-%m-%d} → {latest_trade:%Y-%m-%d}"
+            )
+        else:
+            st.caption("📅 Data Coverage:\nNo valid trade dates detected")
+    else:
+        st.caption("📅 Data Coverage:\nNo trade data loaded")
+
+    st.caption(
+        f"📊 Trades Loaded:\n"
+        f"{len(market_df):,}"
+    )
+
+    total_rows = len(market_df)
+    if total_rows > 0 and "cusip" in market_df.columns:
+        valid_cusip_count = market_df["cusip"].notna().sum()
+        valid_cusip_rate = valid_cusip_count / total_rows * 100
+    else:
+        valid_cusip_rate = 0
+
+    cusip_icon = "🟢" if valid_cusip_rate >= 95 else "🟡" if valid_cusip_rate >= 80 else "🔴"
+    st.caption(
+        f"{cusip_icon} Valid CUSIP Rate:\n"
+        f"{valid_cusip_rate:.1f}%"
+    )
+
+    missing_issuers = market_df["issuer"].isna().sum() if "issuer" in market_df.columns else total_rows
+    missing_issuer_rate = missing_issuers / total_rows * 100 if total_rows > 0 else 0
+    missing_icon = "🟢" if missing_issuers == 0 else "🟡" if missing_issuer_rate <= 5 else "🔴"
+    st.caption(
+        f"{missing_icon} Missing Issuers:\n"
+        f"{missing_issuers:,}"
+    )
+
+    st.caption(
+        f"🧹 Duplicate Trades Removed:\n"
+        f"{duplicates_removed:,}"
+    )
+
+    with st.expander("Data Health methodology", expanded=False):
+        st.markdown(
+            """
+- **Data Coverage** uses the earliest and latest valid trade dates after standardization.
+- **Trades Loaded** counts trade rows available for analytics.
+- **Valid CUSIP Rate** is the share of trade rows with a usable CUSIP identifier.
+- **Missing Issuers** counts rows without an issuer after trade-description inference and issuer-mapping logic.
+- **Duplicate Trades Removed** counts exact duplicate standardized trade rows removed before analytics.
+            """
+        )
+
 
 issuer_bonds = bonds_df[bonds_df["issuer"] == selected_issuer].copy()
 issuer_trades = market_df[market_df["issuer"] == selected_issuer].copy()
