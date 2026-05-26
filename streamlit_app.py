@@ -625,6 +625,7 @@ def _bucket_to_tenor_year(bucket: object, reference_year: int | None = None) -> 
         return None
 
 
+@st.cache_data(show_spinner=False)
 def observed_maturity_years(
     df: pd.DataFrame,
     bucket_col: str = "maturity_bucket",
@@ -648,6 +649,7 @@ def observed_maturity_years(
     return sorted(valid, key=maturity_year_sort_key)
 
 
+@st.cache_data(show_spinner=False)
 def compact_maturity_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
     """Drop all-empty maturity rows and sort calendar maturity labels numerically."""
     if matrix is None or matrix.empty:
@@ -709,6 +711,7 @@ def _rating_key(rating: str) -> str:
     return _curve_column_key(rating)
 
 
+@st.cache_data(show_spinner=False)
 def find_uploaded_benchmark_column(mmd_df: pd.DataFrame, tenor: str, rating: str) -> str | None:
     """Find an explicitly uploaded benchmark column for rating + tenor.
 
@@ -747,6 +750,7 @@ def find_uploaded_benchmark_column(mmd_df: pd.DataFrame, tenor: str, rating: str
     return None
 
 
+@st.cache_data(show_spinner=False)
 def get_benchmark_curve(mmd_plot: pd.DataFrame, tenor: str, rating: str) -> tuple[pd.Series, dict] | tuple[None, dict]:
     """Return benchmark yield and metadata.
 
@@ -779,6 +783,7 @@ def get_benchmark_curve(mmd_plot: pd.DataFrame, tenor: str, rating: str) -> tupl
     }
 
 
+@st.cache_data(show_spinner=False)
 def benchmark_curve_from_mmd(mmd_plot: pd.DataFrame, mmd_col: str, rating: str) -> pd.Series:
     """Backward-compatible wrapper used by older chart blocks."""
     curve, _meta = get_benchmark_curve(mmd_plot, mmd_col, rating)
@@ -787,6 +792,7 @@ def benchmark_curve_from_mmd(mmd_plot: pd.DataFrame, mmd_col: str, rating: str) 
     return curve
 
 
+@st.cache_data(show_spinner=False)
 def rating_spread_table() -> pd.DataFrame:
     """User-facing spread assumption table in both percentage points and bps."""
     rows = []
@@ -808,6 +814,7 @@ def _detect_mmd_date_column(mmd_df: pd.DataFrame) -> str | None:
     return None
 
 
+@st.cache_data(show_spinner=False)
 def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
     """Convert MMD wide curve data into long benchmark data by maturity year.
 
@@ -855,6 +862,7 @@ def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False)
 def build_spread_observations(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -906,6 +914,7 @@ def build_spread_observations(
     return spread_obs.sort_values(["maturity_bucket", "trade_date"])
 
 
+@st.cache_data(show_spinner=False)
 def build_spread_movement_heatmap_data(
     spread_obs: pd.DataFrame,
     windows: dict[str, int] | None = None,
@@ -982,6 +991,7 @@ def build_spread_movement_heatmap_data(
     return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
+@st.cache_data(show_spinner=False)
 def build_spread_level_data(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -1065,6 +1075,7 @@ def build_spread_level_data(
     return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
+@st.cache_data(show_spinner=False)
 def build_issuer_curve_snapshot(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -1244,6 +1255,7 @@ def build_column_mapping(df: pd.DataFrame, expected_fields: list[str]) -> dict[s
     return {field: _find_column(df, field) for field in expected_fields}
 
 
+@st.cache_data(show_spinner=False)
 def validate_dataset(
     df: pd.DataFrame,
     dataset_name: str,
@@ -1274,6 +1286,7 @@ def validate_dataset(
     }
 
 
+@st.cache_data(show_spinner=False)
 def validate_basic_values(df: pd.DataFrame, mapping: dict[str, str | None], dataset_type: str) -> list[str]:
     """Soft data-quality checks. These generate warnings instead of killing the app."""
     warnings: list[str] = []
@@ -1410,6 +1423,7 @@ def _issuer_from_source_file(source_file: object) -> str:
     return name.title().replace(" Ca ", " CA ").replace(" Usd", " USD ").replace(" Go ", " GO ")
 
 
+@st.cache_data(show_spinner=False)
 def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
     """Make standardized trade exports self-sufficient for dashboard analytics."""
     if trades_df is None or trades_df.empty:
@@ -1548,6 +1562,7 @@ def _parse_trade_index_tenor(index_value: object) -> str | None:
     return f"{min(year, MAX_MATURITY_YEAR)}Y"
 
 
+@st.cache_data(show_spinner=False)
 def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataFrame:
     """Build a benchmark curve table directly from trade-file Index / Index Rate columns.
 
@@ -1579,6 +1594,7 @@ def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataF
     return wide.sort_values("Date").reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
 def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build issuer / sector reference from trades and optional mapping."""
     if market_df is None or market_df.empty or "issuer" not in market_df.columns:
@@ -1616,6 +1632,7 @@ def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df:
     return base.sort_values("issuer").reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
 def _build_security_reference_from_trades(market_df: pd.DataFrame, optional_bonds_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Create a security reference table from the trade tape, enriched by optional bond data."""
     if market_df is None or market_df.empty or "cusip" not in market_df.columns:
@@ -1678,6 +1695,7 @@ def _is_mmd_tenor_col(col: object, max_year: int = MMD_MAX_TENOR_YEAR) -> bool:
     return 1 <= year <= max_year
 
 
+@st.cache_data(show_spinner=False)
 def _trim_mmd_frame(mmd_df: pd.DataFrame, lookback_years: int = MMD_FALLBACK_LOOKBACK_YEARS) -> pd.DataFrame:
     """Keep only recent dates and needed benchmark tenor columns."""
     if mmd_df is None or mmd_df.empty:
@@ -1706,6 +1724,7 @@ def _trim_mmd_frame(mmd_df: pd.DataFrame, lookback_years: int = MMD_FALLBACK_LOO
     return out[keep_cols].reset_index(drop=True) if keep_cols else out.reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
 def read_external_mmd_fallback_file(
     file_name: str,
     payload: bytes,
@@ -1869,6 +1888,12 @@ def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
 
 with st.sidebar:
     st.header("1. Trading Data")
+    with st.expander("Performance", expanded=False):
+        st.caption("If you replace files or the app feels stale, clear cached calculations and rerun.")
+        if st.button("Clear cached calculations"):
+            st.cache_data.clear()
+            st.rerun()
+
     trade_files = st.file_uploader(
         "Trade History File(s) — required",
         type=["csv", "xlsx", "xls"],
