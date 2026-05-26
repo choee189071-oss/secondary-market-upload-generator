@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 
@@ -2108,9 +2109,35 @@ with st.sidebar:
     st.markdown("---")
     st.header("2. Select From Uploaded Issuers")
     selected_issuer = st.selectbox(
-        "Issuer detected from uploaded files",
+        "Primary Issuer",
         uploaded_issuers,
-        help="This list is generated from your uploaded trade files. Rename each trade file with the issuer name for best results."
+        help="Main issuer shown first in desk snapshot and drilldown sections. Rename each trade file with the issuer name for best results."
+    )
+
+    # -----------------------------------------------------------------------------
+    # Desk comparison controls
+    # -----------------------------------------------------------------------------
+    peer_options_sidebar = [x for x in uploaded_issuers if x != selected_issuer]
+    default_peers_sidebar = peer_options_sidebar[:2] if peer_options_sidebar else []
+    comparison_issuers_sidebar = st.multiselect(
+        "Compare With Issuers",
+        peer_options_sidebar,
+        default=default_peers_sidebar,
+        help="Optional peer issuers to plot beside the primary issuer in spread and volume charts.",
+    )
+
+    snapshot_reference_lines = st.multiselect(
+        "Reference Lines",
+        ["AAA / MMD Baseline", "Sector Average", "All Uploaded Issuers Average"],
+        default=["Sector Average"] if peer_options_sidebar else [],
+        help="Adds desk-style reference lines to the spread chart. AAA / MMD baseline is 0 bps when spread is measured vs AAA/MMD.",
+    )
+
+    volume_comparison_mode = st.radio(
+        "Volume Chart Grouping",
+        ["Primary vs Peers vs All Other", "Selected Issuers Only"],
+        index=0,
+        help="Controls whether the volume chart stacks selected issuers against the rest of the uploaded market universe.",
     )
 
     # -----------------------------------------------------------------------------
@@ -2431,83 +2458,258 @@ if not issuer_trades.empty and trade_date_filter_enabled and selected_trade_date
 # Desk-first market snapshot
 # -----------------------------------------------------------------------------
 section_anchor("desk-market-snapshot", "Desk Market Snapshot")
-st.caption("Primary desk sequence: spreads → trading volume → issuer curve → spread movement → liquidity → CUSIP drilldown.")
+st.caption(
+    "Desk-style opening view: multi-issuer spread trend, stacked trading volume, curve snapshot, and top movers. "
+    "Use the sidebar to add peer issuers and reference lines."
+)
+
+snapshot_issuers = [selected_issuer] + [x for x in comparison_issuers_sidebar if x != selected_issuer]
+snapshot_issuers = [x for x in snapshot_issuers if x in uploaded_issuers]
+if not snapshot_issuers:
+    snapshot_issuers = [selected_issuer]
+
+snapshot_base = market_df[market_df["issuer"].isin(snapshot_issuers)].copy()
+if trade_date_filter_enabled and isinstance(trade_date_range, tuple) and len(trade_date_range) == 2:
+    snapshot_base = snapshot_base[
+        (pd.to_datetime(snapshot_base["trade_date"], errors="coerce").dt.date >= trade_date_range[0])
+        & (pd.to_datetime(snapshot_base["trade_date"], errors="coerce").dt.date <= trade_date_range[1])
+    ].copy()
 
 snap_left, snap_right = st.columns(2)
 
 with snap_left:
     st.subheader("Secondary Market Spreads")
-    if not issuer_trades.empty and {"trade_date", "yield"}.issubset(issuer_trades.columns):
-        spread_source_col = "spread" if "spread" in issuer_trades.columns and issuer_trades["spread"].notna().any() else None
-        trend_df = issuer_trades.copy()
-        trend_df["trade_date"] = pd.to_datetime(trend_df["trade_date"], errors="coerce")
-        trend_df = trend_df.dropna(subset=["trade_date", "yield"])
-        if spread_source_col:
-            trend_df["spread_bps"] = pd.to_numeric(trend_df[spread_source_col], errors="coerce") * 100
-        elif "index_rate" in trend_df.columns:
-            trend_df["spread_bps"] = (pd.to_numeric(trend_df["yield"], errors="coerce") - pd.to_numeric(trend_df["index_rate"], errors="coerce")) * 100
+    spread_universe = market_df.copy()
+    if trade_date_filter_enabled and isinstance(trade_date_range, tuple) and len(trade_date_range) == 2:
+        spread_universe = spread_universe[
+            (pd.to_datetime(spread_universe["trade_date"], errors="coerce").dt.date >= trade_date_range[0])
+            & (pd.to_datetime(spread_universe["trade_date"], errors="coerce").dt.date <= trade_date_range[1])
+        ].copy()
+
+    if not spread_universe.empty and {"trade_date", "yield", "issuer"}.issubset(spread_universe.columns):
+        spread_universe["trade_date"] = pd.to_datetime(spread_universe["trade_date"], errors="coerce")
+        spread_universe["yield"] = pd.to_numeric(spread_universe["yield"], errors="coerce")
+        if "spread" in spread_universe.columns and spread_universe["spread"].notna().any():
+            spread_universe["spread_bps"] = pd.to_numeric(spread_universe["spread"], errors="coerce") * 100
+        elif "index_rate" in spread_universe.columns:
+            spread_universe["spread_bps"] = (
+                pd.to_numeric(spread_universe["yield"], errors="coerce")
+                - pd.to_numeric(spread_universe["index_rate"], errors="coerce")
+            ) * 100
         else:
-            trend_df["spread_bps"] = pd.NA
-        trend_df = trend_df.dropna(subset=["spread_bps"])
-        if not trend_df.empty:
-            spread_daily = (
-                trend_df.groupby(pd.Grouper(key="trade_date", freq="D"), as_index=False)
+            spread_universe["spread_bps"] = pd.NA
+
+        spread_universe = spread_universe.dropna(subset=["trade_date", "spread_bps"])
+        fig_spread_snapshot = go.Figure()
+
+        selected_spread_df = spread_universe[spread_universe["issuer"].isin(snapshot_issuers)].copy()
+        if not selected_spread_df.empty:
+            issuer_daily = (
+                selected_spread_df.groupby([pd.Grouper(key="trade_date", freq="D"), "issuer"], as_index=False)
                 .agg(spread_bps=("spread_bps", "median"), trade_count=("spread_bps", "count"))
                 .dropna(subset=["spread_bps"])
+                .sort_values("trade_date")
             )
-            fig_spread_snapshot = px.line(
-                spread_daily,
-                x="trade_date",
-                y="spread_bps",
-                markers=False,
-                title=f"{selected_issuer} Median Spread Trend",
-                labels={"trade_date": "Trade Date", "spread_bps": "Spread (bps)"},
+            for issuer_name in snapshot_issuers:
+                tmp = issuer_daily[issuer_daily["issuer"] == issuer_name]
+                if tmp.empty:
+                    continue
+                line_width = 3.2 if issuer_name == selected_issuer else 2.2
+                fig_spread_snapshot.add_trace(
+                    go.Scatter(
+                        x=tmp["trade_date"],
+                        y=tmp["spread_bps"],
+                        mode="lines",
+                        name=issuer_name,
+                        line=dict(width=line_width),
+                        hovertemplate="%{x|%m/%d/%Y}<br>%{y:.1f} bps<extra>%{fullData.name}</extra>",
+                    )
+                )
+
+        if "Sector Average" in snapshot_reference_lines and "sector" in spread_universe.columns:
+            selected_sector_for_ref = selected_sector if selected_sector and selected_sector != "Unknown" else None
+            if selected_sector_for_ref:
+                sector_df = spread_universe[spread_universe["sector"].astype(str) == str(selected_sector_for_ref)].copy()
+                if not sector_df.empty:
+                    sector_daily = (
+                        sector_df.groupby(pd.Grouper(key="trade_date", freq="D"), as_index=False)
+                        .agg(spread_bps=("spread_bps", "median"))
+                        .dropna(subset=["spread_bps"])
+                        .sort_values("trade_date")
+                    )
+                    if not sector_daily.empty:
+                        fig_spread_snapshot.add_trace(
+                            go.Scatter(
+                                x=sector_daily["trade_date"],
+                                y=sector_daily["spread_bps"],
+                                mode="lines",
+                                name=f"{selected_sector_for_ref} Avg",
+                                line=dict(width=2, dash="dash"),
+                                hovertemplate="%{x|%m/%d/%Y}<br>%{y:.1f} bps<extra>%{fullData.name}</extra>",
+                            )
+                        )
+
+        if "All Uploaded Issuers Average" in snapshot_reference_lines:
+            all_daily = (
+                spread_universe.groupby(pd.Grouper(key="trade_date", freq="D"), as_index=False)
+                .agg(spread_bps=("spread_bps", "median"))
+                .dropna(subset=["spread_bps"])
+                .sort_values("trade_date")
             )
-            fig_spread_snapshot.update_layout(height=360, margin=dict(l=20, r=20, t=55, b=30))
+            if not all_daily.empty:
+                fig_spread_snapshot.add_trace(
+                    go.Scatter(
+                        x=all_daily["trade_date"],
+                        y=all_daily["spread_bps"],
+                        mode="lines",
+                        name="All Uploaded Issuers Avg",
+                        line=dict(width=2, dash="dot"),
+                        hovertemplate="%{x|%m/%d/%Y}<br>%{y:.1f} bps<extra>%{fullData.name}</extra>",
+                    )
+                )
+
+        if "AAA / MMD Baseline" in snapshot_reference_lines and not spread_universe.empty:
+            min_dt = spread_universe["trade_date"].min()
+            max_dt = spread_universe["trade_date"].max()
+            if pd.notna(min_dt) and pd.notna(max_dt):
+                fig_spread_snapshot.add_trace(
+                    go.Scatter(
+                        x=[min_dt, max_dt],
+                        y=[0, 0],
+                        mode="lines",
+                        name="AAA / MMD Baseline",
+                        line=dict(width=1.8, dash="longdash"),
+                        hovertemplate="%{x|%m/%d/%Y}<br>0.0 bps<extra>AAA / MMD Baseline</extra>",
+                    )
+                )
+
+        if fig_spread_snapshot.data:
+            fig_spread_snapshot.update_layout(
+                title="Multi-Issuer Spread Trend",
+                xaxis_title="Trade Date",
+                yaxis_title="Spread (bps)",
+                height=390,
+                margin=dict(l=20, r=20, t=55, b=30),
+                legend_title_text="Line Item",
+            )
+            fig_spread_snapshot.update_xaxes(tickformat="%m/%d/%Y")
             safe_plotly_chart(fig_spread_snapshot, use_container_width=True)
         else:
-            st.info("No usable spread or index-rate data for the spread trend.")
+            st.info("No usable spread or index-rate data for the selected spread lines.")
     else:
-        st.info("Upload trades with trade date and yield fields to build spread trends.")
+        st.info("Upload trades with issuer, trade date, yield, and spread/index-rate fields to build spread trends.")
 
 with snap_right:
     st.markdown("<a id='trading-volume'></a>", unsafe_allow_html=True)
     st.subheader("Secondary Market Trading Volume")
-    if not issuer_trades.empty and {"trade_date", "trade_amount"}.issubset(issuer_trades.columns):
-        vol_df = issuer_trades.copy()
-        vol_df["trade_date"] = pd.to_datetime(vol_df["trade_date"], errors="coerce")
-        vol_df["trade_amount"] = pd.to_numeric(vol_df["trade_amount"], errors="coerce")
-        vol_df = vol_df.dropna(subset=["trade_date", "trade_amount"])
-        if not vol_df.empty:
-            vol_df["month"] = vol_df["trade_date"].dt.to_period("M").dt.to_timestamp()
-            monthly_issuer = vol_df.groupby("month", as_index=False).agg(monthly_volume=("trade_amount", "sum"), trade_count=("trade_amount", "count"))
-            fig_vol_snapshot = px.bar(
-                monthly_issuer,
-                x="month",
-                y="monthly_volume",
-                title=f"{selected_issuer} Monthly Trading Volume",
-                labels={"month": "Trade Month", "monthly_volume": "Trade Volume"},
+    if not market_df.empty and {"trade_date", "trade_amount", "issuer"}.issubset(market_df.columns):
+        vol_universe = market_df.copy()
+        vol_universe["trade_date"] = pd.to_datetime(vol_universe["trade_date"], errors="coerce")
+        vol_universe["trade_amount"] = pd.to_numeric(vol_universe["trade_amount"], errors="coerce")
+        vol_universe = vol_universe.dropna(subset=["trade_date", "trade_amount", "issuer"])
+        if trade_date_filter_enabled and isinstance(trade_date_range, tuple) and len(trade_date_range) == 2:
+            vol_universe = vol_universe[
+                (vol_universe["trade_date"].dt.date >= trade_date_range[0])
+                & (vol_universe["trade_date"].dt.date <= trade_date_range[1])
+            ].copy()
+
+        if not vol_universe.empty:
+            vol_universe["month"] = vol_universe["trade_date"].dt.to_period("M").dt.to_timestamp()
+            if volume_comparison_mode == "Primary vs Peers vs All Other":
+                def _volume_group(issuer_name: object) -> str:
+                    issuer_name = str(issuer_name)
+                    if issuer_name == selected_issuer:
+                        return selected_issuer
+                    if issuer_name in comparison_issuers_sidebar:
+                        return issuer_name
+                    return "All Other Uploaded Munis"
+                vol_universe["volume_group"] = vol_universe["issuer"].apply(_volume_group)
+            else:
+                vol_universe = vol_universe[vol_universe["issuer"].isin(snapshot_issuers)].copy()
+                vol_universe["volume_group"] = vol_universe["issuer"].astype(str)
+
+            monthly_grouped = (
+                vol_universe.groupby(["month", "volume_group"], as_index=False)
+                .agg(monthly_volume=("trade_amount", "sum"), trade_count=("trade_amount", "count"))
+                .sort_values("month")
             )
-            fig_vol_snapshot.update_layout(height=360, margin=dict(l=20, r=20, t=55, b=30))
+            monthly_total = (
+                vol_universe.groupby("month", as_index=False)
+                .agg(total_volume=("trade_amount", "sum"))
+                .sort_values("month")
+            )
+            primary_monthly = (
+                vol_universe[vol_universe["issuer"] == selected_issuer]
+                .groupby("month", as_index=False)
+                .agg(primary_volume=("trade_amount", "sum"))
+            )
+            pct_df = monthly_total.merge(primary_monthly, on="month", how="left")
+            pct_df["primary_volume"] = pct_df["primary_volume"].fillna(0)
+            pct_df["primary_pct"] = np.where(pct_df["total_volume"] > 0, pct_df["primary_volume"] / pct_df["total_volume"] * 100, np.nan)
+
+            fig_vol_snapshot = make_subplots(specs=[[{"secondary_y": True}]])
+            group_order = [selected_issuer] + [x for x in comparison_issuers_sidebar if x != selected_issuer]
+            if volume_comparison_mode == "Primary vs Peers vs All Other":
+                group_order += ["All Other Uploaded Munis"]
+            else:
+                group_order = snapshot_issuers
+            for group_name in group_order:
+                tmp = monthly_grouped[monthly_grouped["volume_group"] == group_name]
+                if tmp.empty:
+                    continue
+                fig_vol_snapshot.add_trace(
+                    go.Bar(
+                        x=tmp["month"],
+                        y=tmp["monthly_volume"] / 1_000_000,
+                        name=group_name,
+                        hovertemplate="%{x|%b %Y}<br>$%{y:,.1f}M<extra>%{fullData.name}</extra>",
+                    ),
+                    secondary_y=False,
+                )
+            if not pct_df.empty:
+                fig_vol_snapshot.add_trace(
+                    go.Scatter(
+                        x=pct_df["month"],
+                        y=pct_df["primary_pct"],
+                        mode="lines+markers",
+                        name=f"{selected_issuer} % of Volume",
+                        line=dict(width=3),
+                        hovertemplate="%{x|%b %Y}<br>%{y:.1f}%<extra>%{fullData.name}</extra>",
+                    ),
+                    secondary_y=True,
+                )
+            fig_vol_snapshot.update_layout(
+                title="Monthly Trading Volume + Primary Issuer Share",
+                barmode="stack",
+                height=390,
+                margin=dict(l=20, r=20, t=55, b=30),
+                legend_title_text="Volume Item",
+            )
+            fig_vol_snapshot.update_xaxes(title_text="Trade Month", tickformat="%b %Y")
+            fig_vol_snapshot.update_yaxes(title_text="Secondary Market Volume ($MM)", secondary_y=False)
+            fig_vol_snapshot.update_yaxes(title_text=f"{selected_issuer} % of Total", ticksuffix="%", secondary_y=True)
             safe_plotly_chart(fig_vol_snapshot, use_container_width=True)
         else:
             st.info("No usable trade amount data for monthly volume.")
     else:
-        st.info("Upload trades with trade amount to build trading-volume views.")
+        st.info("Upload trades with issuer, trade date, and trade amount to build trading-volume views.")
 
-snap_col_a, snap_col_b = st.columns(2)
+snap_col_a, snap_col_b, snap_col_c = st.columns(3)
 with snap_col_a:
-    if not issuer_trades.empty and "spread" in issuer_trades.columns:
-        _spread_bps = pd.to_numeric(issuer_trades["spread"], errors="coerce") * 100
-        clean_metric_card("Median Spread", "N/A" if _spread_bps.dropna().empty else f"{_spread_bps.median():.1f} bps", size="small")
+    _metric_source = market_df[market_df["issuer"] == selected_issuer].copy()
+    if not _metric_source.empty and "spread" in _metric_source.columns:
+        _spread_bps = pd.to_numeric(_metric_source["spread"], errors="coerce") * 100
+        clean_metric_card("Primary Median Spread", "N/A" if _spread_bps.dropna().empty else f"{_spread_bps.median():.1f} bps", size="small")
     else:
-        clean_metric_card("Median Spread", "N/A", size="small")
+        clean_metric_card("Primary Median Spread", "N/A", size="small")
 with snap_col_b:
-    if not issuer_trades.empty and "trade_amount" in issuer_trades.columns:
-        _amt = pd.to_numeric(issuer_trades["trade_amount"], errors="coerce").sum()
-        clean_metric_card("Total Trade Volume", f"${_amt/1_000_000:,.1f}M", size="small")
+    if not snapshot_base.empty and "trade_amount" in snapshot_base.columns:
+        _amt = pd.to_numeric(snapshot_base["trade_amount"], errors="coerce").sum()
+        clean_metric_card("Selected Volume", f"${_amt/1_000_000:,.1f}M", size="small")
     else:
-        clean_metric_card("Total Trade Volume", "N/A", size="small")
+        clean_metric_card("Selected Volume", "N/A", size="small")
+with snap_col_c:
+    clean_metric_card("Compared Issuers", f"{len(snapshot_issuers):,}", size="small")
 
 section_anchor("yield-relative-value", "Yield Trend / Relative Value Comparison")
 with st.expander("Methodology: benchmark curve framework", expanded=False):
