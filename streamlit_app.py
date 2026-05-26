@@ -1685,14 +1685,38 @@ def process_uploads(
         uploaded_mmd_df = standardize_mmd(raw_mmd)
 
     trade_index_curve_df = _build_benchmark_curve_from_trade_index(market_df)
-    if not trade_index_curve_df.empty:
-        # Primary benchmark source: the trade tape already supplies Index / Index Rate.
+
+    # -------------------------------------------------------------------------
+    # Benchmark source hierarchy
+    # -------------------------------------------------------------------------
+    # The dashboard must use ONE benchmark universe at a time. Mixing trade-sheet
+    # Index Rate with an external MMD file can create benchmark-source conflict
+    # because dates, tenors, provider conventions, and rounding may differ.
+    #
+    # Priority rule:
+    #   1) Trade Sheet Index / Index Rate = primary source, because it is tied to
+    #      the same pricing environment as the uploaded trades.
+    #   2) Uploaded MMD = fallback only, used when trade exports do not contain
+    #      usable Index / Index Rate.
+    #   3) No benchmark = yield-only analytics still run; benchmark/spread views
+    #      are skipped or downgraded.
+    # -------------------------------------------------------------------------
+    trade_index_available = not trade_index_curve_df.empty
+    uploaded_mmd_available = not uploaded_mmd_df.empty
+
+    if trade_index_available:
         mmd_df = trade_index_curve_df
+        mmd_df.attrs["benchmark_source_mode"] = "Trade Sheet Index / Index Rate"
+        mmd_df.attrs["benchmark_source_priority"] = "Primary"
+        mmd_df.attrs["uploaded_mmd_available"] = uploaded_mmd_available
+        mmd_df.attrs["benchmark_conflict_policy"] = "External MMD ignored because trade index data is available"
     else:
-        # Fallback benchmark source: user-uploaded MMD sheet.
         mmd_df = uploaded_mmd_df
-        if not mmd_df.empty:
+        if uploaded_mmd_available:
             mmd_df.attrs["benchmark_source_mode"] = "Uploaded MMD fallback"
+            mmd_df.attrs["benchmark_source_priority"] = "Fallback"
+            mmd_df.attrs["uploaded_mmd_available"] = True
+            mmd_df.attrs["benchmark_conflict_policy"] = "No trade index data found; using uploaded MMD fallback"
 
     return bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files, duplicates_removed
 
@@ -1842,13 +1866,52 @@ st.success(
     f"from {len(trade_files):,} trade file(s). Detected {len(uploaded_issuers):,} issuer(s)."
 )
 
-benchmark_source_mode = mmd_df.attrs.get("benchmark_source_mode", "Trade Index / Index Rate" if not mmd_df.empty else "None")
-if benchmark_source_mode == "Trade Index / Index Rate":
-    st.info("Benchmark source: using Index / Index Rate from the uploaded trade file as the primary curve source. Uploaded MMD is only needed as fallback.")
+benchmark_source_mode = mmd_df.attrs.get("benchmark_source_mode", "None")
+benchmark_priority = mmd_df.attrs.get("benchmark_source_priority", "None")
+benchmark_conflict_policy = mmd_df.attrs.get("benchmark_conflict_policy", "No benchmark source selected")
+uploaded_mmd_available = bool(mmd_df.attrs.get("uploaded_mmd_available", False))
+
+if benchmark_source_mode == "Trade Sheet Index / Index Rate":
+    st.info(
+        "Benchmark source: using **Index / Index Rate from the uploaded trade sheet** as the primary benchmark universe. "
+        "Any uploaded MMD file is treated as fallback only and is not mixed into the same analytics run."
+    )
 elif benchmark_source_mode == "Uploaded MMD fallback":
-    st.info("Benchmark source: using uploaded MMD file as fallback because the trade file did not contain usable Index / Index Rate data.")
+    st.info(
+        "Benchmark source: using the **uploaded MMD file as fallback** because the trade sheet did not contain usable Index / Index Rate data."
+    )
 else:
     st.warning("No benchmark source detected. Upload trades with Index / Index Rate or provide an MMD file for benchmark analytics.")
+
+with st.expander("Benchmark source governance", expanded=False):
+    st.markdown(
+        """
+This dashboard uses **one benchmark source at a time** to avoid benchmark-source conflict.
+
+**Priority hierarchy**
+
+1. **Trade Sheet Index / Index Rate — recommended primary source.**  
+   This is preferred because it comes from the same uploaded trade tape and pricing context as the observed trades.
+2. **Uploaded MMD file — fallback only.**  
+   This is used only when the trade sheet does not include usable `Index` / `Index Rate` fields.
+3. **No benchmark source.**  
+   Yield-only and liquidity analytics can still run, but benchmark spread analytics are skipped or downgraded.
+
+**Why not mix both?**
+
+Trade-sheet index rates and an external MMD sheet may differ by date, tenor, rounding, provider convention, or interpolation method. Mixing them can shift spreads by several basis points and make relative-value signals inconsistent.
+        """
+    )
+    st.dataframe(
+        pd.DataFrame([
+            {"Item": "Active benchmark source", "Value": benchmark_source_mode},
+            {"Item": "Priority", "Value": benchmark_priority},
+            {"Item": "Conflict policy", "Value": benchmark_conflict_policy},
+            {"Item": "Uploaded MMD detected", "Value": "Yes" if uploaded_mmd_available else "No / Not used"},
+        ]),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 with st.sidebar:
     st.markdown("---")
@@ -1971,6 +2034,11 @@ Useful for:
 - CUSIP drilldowns
 """
     )
+
+    st.markdown("---")
+    st.subheader("Index / Benchmark Source")
+    st.caption(f"Active: {benchmark_source_mode}")
+    st.caption(f"Policy: {benchmark_conflict_policy}")
 
     st.markdown("---")
     st.subheader("Index")
@@ -2201,12 +2269,12 @@ This section groups uploaded trade rows by **trade date** and **issuer**, then p
 
 **Benchmark logic:**
 
-- **AAA Curve = uploaded MMD / AAA curve.**
-- **If users upload explicit AA+/AA/AA-/A+/A/A-/BBB curve columns, the app uses those directly.**
-- **If explicit non-AAA curves are missing, the app falls back to MMD + transparent rating-spread assumptions.**
-- Spread assumptions are **maturity-adjusted**. For example, the 30Y AA spread can be wider than the 5Y AA spread.
+- **Primary source = trade-sheet `Index` / `Index Rate`**, when available. This keeps benchmark spread analytics aligned with the same pricing environment as the uploaded MuniPro trades.
+- **Uploaded MMD is fallback only** and is used only when trade-sheet index data is unavailable.
+- The app intentionally uses **one benchmark universe at a time**; it does not mix trade-sheet index rates with external MMD rates in the same run.
+- If explicit non-AAA curves are unavailable, the app can still use visible rating-spread assumptions as an analytical approximation.
 - Units in the code are percentage points: `0.10 = 10 bps`.
-- This is an internal analytical benchmark, not a live Bloomberg/BVAL/ICE curve. Replace the assumptions with firm-approved or vendor curves when available.
+- This is an internal analytical benchmark, not a live Bloomberg/BVAL/ICE curve. Replace assumptions with firm-approved or vendor curves when available.
         """
     )
     st.dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
