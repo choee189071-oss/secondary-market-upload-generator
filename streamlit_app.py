@@ -436,6 +436,7 @@ def safe_melt_by_maturity(
     var_name: str = "benchmark_rating",
     maturity_concept: str = "maturity_bucket",
     value_vars: list[str] | None = None,
+    id_vars: str | list[str] | None = None,
 ) -> pd.DataFrame:
     """Melt wide matrices defensively using the central maturity concept.
 
@@ -448,9 +449,16 @@ def safe_melt_by_maturity(
     out = df.copy()
     out = out.loc[:, ~out.columns.duplicated()].copy()
 
-    maturity_col = resolve_model_col(out, maturity_concept, required=False)
+    # Accept both the newer defensive API and older pandas.melt-style calls.
+    # Some downstream blocks still call safe_melt_by_maturity(..., id_vars="maturity_bucket").
+    explicit_id_vars = []
+    if id_vars is not None:
+        explicit_id_vars = [id_vars] if isinstance(id_vars, str) else list(id_vars)
+        explicit_id_vars = [c for c in explicit_id_vars if c in out.columns]
+
+    maturity_col = explicit_id_vars[0] if explicit_id_vars else resolve_model_col(out, maturity_concept, required=False)
     if maturity_col is None:
-        # Common case: a table has maturity labels as the index after reset_index.
+        # Common case: a table has maturity labels as the index. Promote index to a column.
         index_name = out.index.name or "maturity_bucket"
         out = out.reset_index().rename(columns={index_name: "maturity_bucket", "index": "maturity_bucket"})
         maturity_col = resolve_model_col(out, maturity_concept, required=False)
@@ -2673,8 +2681,9 @@ This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... 
         "Snapshot / Chart Period",
         ["All", "Last 3M", "Last 6M", "Last 1Y", "YTD", "Custom"],
         index=3,
-        help="Controls the first two desk snapshot charts and downstream trade-date filtered views. Filters by trade date, not maturity date.",
+        help="Choose Custom to freely select exact start/end trade dates. This is a data filter, unlike Plotly zoom which only changes the visual view.",
     )
+    st.caption("Tip: use Custom here for a true date filter; chart zoom only changes the view and does not filter the dataset.")
     if "trade_date" in market_df.columns:
         _trade_dates = pd.to_datetime(market_df["trade_date"], errors="coerce").dropna()
         if not _trade_dates.empty:
