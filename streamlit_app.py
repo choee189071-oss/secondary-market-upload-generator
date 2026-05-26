@@ -381,30 +381,63 @@ def safe_dataframe(
     expanded: bool = False,
     max_rows: int | None = TABLE_PREVIEW_ROWS,
     auto_collapse: bool = True,
+    top_rows: int = 10,
     **kwargs,
 ):
-    """Render a dataframe safely and keep large tables collapsed by default."""
-    display_df = prepare_display_dataframe(df, max_rows=max_rows)
+    """Render dataframes safely for Streamlit Cloud.
 
+    This wrapper solves three common production issues:
+    1) duplicate column names that break Arrow serialization;
+    2) large audit/detail tables dominating the page;
+    3) deprecated Streamlit `use_container_width` warnings flooding logs.
+
+    Large tables show a compact Top-N preview first, with a collapsed preview table
+    behind an expander. The full underlying analytics still use the full dataset.
+    """
+    # Backward compatibility: older calls may still pass use_container_width.
+    if "use_container_width" in kwargs and "width" not in kwargs:
+        kwargs["width"] = "stretch" if kwargs.pop("use_container_width") else "content"
+    else:
+        kwargs.pop("use_container_width", None)
+    kwargs.setdefault("width", "stretch")
+
+    # Respect the sidebar display row limit when the caller did not specify a tighter one.
+    effective_max_rows = max_rows
+    try:
+        if effective_max_rows == TABLE_PREVIEW_ROWS:
+            effective_max_rows = min(TABLE_PREVIEW_ROWS, int(MAX_TABLE_ROWS))
+    except Exception:
+        pass
+
+    display_df = prepare_display_dataframe(df, max_rows=effective_max_rows)
     row_count = len(df) if isinstance(df, pd.DataFrame) else len(display_df)
     col_count = len(display_df.columns)
     is_large = row_count >= LARGE_TABLE_ROW_THRESHOLD or col_count >= LARGE_TABLE_COL_THRESHOLD
 
     if expander_label is None:
         expander_label = f"View data table ({row_count:,} rows × {col_count:,} cols)"
-        if max_rows is not None and row_count > max_rows:
-            expander_label += f" — showing first {max_rows:,} rows"
+        if effective_max_rows is not None and row_count > effective_max_rows:
+            expander_label += f" — preview capped at {effective_max_rows:,} rows"
 
     if auto_collapse and is_large:
+        preview_rows = min(max(int(top_rows), 1), len(display_df))
+        st.caption(f"Showing top {preview_rows:,} rows. Expand for a larger preview.")
+        st.dataframe(display_df.head(preview_rows), *args, **kwargs)
         with st.expander(expander_label, expanded=expanded):
-            if max_rows is not None and row_count > max_rows:
-                st.caption(f"Preview only: showing first {max_rows:,} of {row_count:,} rows.")
+            if effective_max_rows is not None and row_count > effective_max_rows:
+                st.caption(f"Large-table protection: showing first {effective_max_rows:,} of {row_count:,} rows.")
             return st.dataframe(display_df, *args, **kwargs)
+
     return st.dataframe(display_df, *args, **kwargs)
 
 
 def safe_plotly_chart(fig, *args, **kwargs):
-    """Central wrapper for Plotly charts so future throttling can happen in one place."""
+    """Central wrapper for Plotly charts and deprecated Streamlit kwargs."""
+    if "use_container_width" in kwargs and "width" not in kwargs:
+        kwargs["width"] = "stretch" if kwargs.pop("use_container_width") else "content"
+    else:
+        kwargs.pop("use_container_width", None)
+    kwargs.setdefault("width", "stretch")
     try:
         if fig is not None:
             fig.update_layout(uirevision="keep")
@@ -1406,7 +1439,7 @@ def display_validation_report(title: str, report: dict, warnings: list[str] | No
             {"Internal Field": key, "Uploaded Column Detected": value or "—"}
             for key, value in report["mapping"].items()
         ]
-        safe_dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+        safe_dataframe(pd.DataFrame(mapping_rows), width="stretch", hide_index=True)
 
 
 def template_download_button(columns: list[str], label: str, filename: str):
@@ -2169,7 +2202,7 @@ Trade-sheet index rates and an external MMD sheet may differ by date, tenor, rou
             {"Item": "Conflict policy", "Value": benchmark_conflict_policy},
             {"Item": "Uploaded MMD detected", "Value": "Yes" if uploaded_mmd_available else "No / Not used"},
         ]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -2660,7 +2693,7 @@ with st.container():
                 legend_title_text="Line Item",
             )
             fig_spread_snapshot.update_xaxes(tickformat="%m/%d/%Y")
-            safe_plotly_chart(fig_spread_snapshot, use_container_width=True)
+            safe_plotly_chart(fig_spread_snapshot, width="stretch")
         else:
             st.info("No usable spread or index-rate data for the selected spread lines.")
     else:
@@ -2755,7 +2788,7 @@ with st.container():
             fig_vol_snapshot.update_xaxes(title_text="Trade Month", tickformat="%b %Y")
             fig_vol_snapshot.update_yaxes(title_text="Secondary Market Volume ($MM)", secondary_y=False)
             fig_vol_snapshot.update_yaxes(title_text=f"{selected_issuer} % of Total", ticksuffix="%", secondary_y=True)
-            safe_plotly_chart(fig_vol_snapshot, use_container_width=True)
+            safe_plotly_chart(fig_vol_snapshot, width="stretch")
         else:
             st.info("No usable trade amount data for monthly volume.")
     else:
@@ -2794,7 +2827,7 @@ This section groups uploaded trade rows by **trade date** and **issuer**, then p
 - This is an internal analytical benchmark, not a live Bloomberg/BVAL/ICE curve. Replace assumptions with firm-approved or vendor curves when available.
         """
     )
-    safe_dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
+    safe_dataframe(rating_spread_table(), width="stretch", hide_index=True)
 
 issuer_choices = uploaded_issuers
 default_compare = [selected_issuer] if selected_issuer in issuer_choices else issuer_choices[:1]
@@ -2887,7 +2920,7 @@ else:
             st.warning("Benchmark curves could not be plotted because the curve file does not contain a usable date column.")
 
     fig.update_layout(xaxis_title="Trade Date", yaxis_title="Yield (%)", hovermode="x unified")
-    safe_plotly_chart(fig, use_container_width=True)
+    safe_plotly_chart(fig, width="stretch")
 
     if show_spread_to_benchmark and benchmark_ready and not daily.empty:
         spread_base = daily.copy()
@@ -2910,7 +2943,7 @@ else:
                 title="Issuer Spread to Selected Benchmark Curve(s)",
             )
             spread_fig.update_layout(xaxis_title="Trade Date", yaxis_title="Spread to Benchmark (bps)", hovermode="x unified")
-            safe_plotly_chart(spread_fig, use_container_width=True)
+            safe_plotly_chart(spread_fig, width="stretch")
 
             with st.expander("Spread-to-benchmark calculation details", expanded=False):
                 st.markdown(
@@ -2930,7 +2963,7 @@ Where:
                         "benchmark_yield", "benchmark_source", "source_column", "rating_spread_bps", "spread_to_benchmark_bps",
                         "trade_count", "total_trade_amount",
                     ]].sort_values(["trade_date", "issuer", "benchmark_rating"], ascending=[False, True, True]).head(1000),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
     elif show_spread_to_benchmark and mmd_df.empty:
@@ -3047,7 +3080,7 @@ else:
                     },
                 )
                 curve_fig.update_layout(hovermode="x unified", height=500)
-                safe_plotly_chart(curve_fig, use_container_width=True)
+                safe_plotly_chart(curve_fig, width="stretch")
 
                 table_cols = [
                     "maturity_bucket", "benchmark_rating", "issuer_yield", "benchmark_yield",
@@ -3061,7 +3094,7 @@ else:
                         curve_table[c] = pd.to_numeric(curve_table[c], errors="coerce").round(2)
 
                 st.subheader("Curve Spread Table")
-                safe_dataframe(curve_table, use_container_width=True, hide_index=True)
+                safe_dataframe(curve_table, width="stretch", hide_index=True)
 
                 primary_curve_rating = curve_benchmark_ratings[0]
                 primary_rows = issuer_curve_audit[issuer_curve_audit["benchmark_rating"] == primary_curve_rating].copy()
@@ -3145,7 +3178,7 @@ else:
             heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
             heatmap_height = max(320, min(760, 110 + 38 * len(heatmap_matrix.index)))
             heatmap_fig.update_layout(height=heatmap_height)
-            safe_plotly_chart(heatmap_fig, use_container_width=True)
+            safe_plotly_chart(heatmap_fig, width="stretch")
 
             latest_obs_date = heatmap_spread_obs["trade_date"].max()
             st.caption(
@@ -3162,7 +3195,7 @@ else:
                 for c in ["latest_spread_bps", "historical_spread_bps", "spread_movement_bps"]:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
-                safe_dataframe(audit_display, use_container_width=True, hide_index=True)
+                safe_dataframe(audit_display, width="stretch", hide_index=True)
 
 
 
@@ -3265,7 +3298,7 @@ else:
 
     monthly = liq_base.groupby("trade_month", as_index=False).agg(trade_count=("trade_date", "count"), total_trade_amount=("trade_amount", "sum"), avg_yield=("yield", "mean"))
     st.subheader("1. Market Activity Over Time")
-    safe_plotly_chart(px.line(monthly, x="trade_month", y="trade_count", markers=True, title="Monthly Trade Count"), use_container_width=True)
+    safe_plotly_chart(px.line(monthly, x="trade_month", y="trade_count", markers=True, title="Monthly Trade Count"), width="stretch")
 
     st.subheader("2. Trade Size Distribution")
     with st.expander("Methodology: trade size distribution", expanded=False):
@@ -3340,7 +3373,7 @@ This is useful because trade count alone can overstate liquidity when most activ
                 },
             )
             size_fig.update_layout(height=430)
-            safe_plotly_chart(size_fig, use_container_width=True)
+            safe_plotly_chart(size_fig, width="stretch")
 
             amount_fig = px.bar(
                 size_summary,
@@ -3363,7 +3396,7 @@ This is useful because trade count alone can overstate liquidity when most activ
                 },
             )
             amount_fig.update_layout(height=430)
-            safe_plotly_chart(amount_fig, use_container_width=True)
+            safe_plotly_chart(amount_fig, width="stretch")
 
             retail_trade_share = size_summary.loc[
                 size_summary["trade_size_bucket"] == "< $100k", "trade_count_share"
@@ -3399,13 +3432,13 @@ This is useful because trade count alone can overstate liquidity when most activ
                     table_display[pct_col] = table_display[pct_col].map(lambda x: f"{x:.1%}" if pd.notna(x) else "")
                 for amt_col in ["total_trade_amount", "avg_trade_amount", "median_trade_amount"]:
                     table_display[amt_col] = pd.to_numeric(table_display[amt_col], errors="coerce").round(0)
-                safe_dataframe(table_display, use_container_width=True, hide_index=True)
+                safe_dataframe(table_display, width="stretch", hide_index=True)
 
     st.subheader("3. Most Frequently Traded CUSIPs")
-    safe_plotly_chart(px.bar(liq.head(25), x="cusip", y="trade_count", color="liquidity_tier", title="Top 25 Most Frequently Traded CUSIPs"), use_container_width=True)
+    safe_plotly_chart(px.bar(liq.head(25), x="cusip", y="trade_count", color="liquidity_tier", title="Top 25 Most Frequently Traded CUSIPs"), width="stretch")
 
     st.subheader("4. Trade Recency / Staleness")
-    safe_plotly_chart(px.histogram(liq, x="days_since_last_trade", nbins=30, color="liquidity_tier", title="Distribution of Days Since Last Trade"), use_container_width=True)
+    safe_plotly_chart(px.histogram(liq, x="days_since_last_trade", nbins=30, color="liquidity_tier", title="Distribution of Days Since Last Trade"), width="stretch")
 
     st.subheader("5. Liquidity Ranking Table")
     display_cols = [
@@ -3414,7 +3447,7 @@ This is useful because trade count alone can overstate liquidity when most activ
         "avg_yield", "yield_range", "avg_price", "total_trade_amount", "avg_trade_amount", "turnover_ratio",
         "maturity", "coupon", "outstanding_amount",
     ]
-    safe_dataframe(liq[[c for c in display_cols if c in liq.columns]], use_container_width=True, height=500)
+    safe_dataframe(liq[[c for c in display_cols if c in liq.columns]], width="stretch", height=500)
 
 section_anchor("cusip-drilldown", "CUSIP Opportunity Drilldown")
 with st.expander("Methodology: CUSIP opportunity drilldown", expanded=False):
@@ -3671,7 +3704,7 @@ else:
                                         dd_display[col] = pd.to_numeric(dd_display[col], errors="coerce").round(2)
 
                                 st.subheader("CUSIP Opportunity Table")
-                                safe_dataframe(dd_display, use_container_width=True, hide_index=True, height=420)
+                                safe_dataframe(dd_display, width="stretch", hide_index=True, height=420)
 
                                 st.subheader("Security Detail")
                                 selected_cusip = st.selectbox(
@@ -3720,7 +3753,7 @@ else:
                                             labels={"trade_date": "Trade Date", "avg_yield": "Average Yield (%)"},
                                         )
                                         sec_yield_fig.update_layout(height=380)
-                                        safe_plotly_chart(sec_yield_fig, use_container_width=True)
+                                        safe_plotly_chart(sec_yield_fig, width="stretch")
 
                                     with detail_col2:
                                         if "spread_to_benchmark_bps" in sec_daily.columns and sec_daily["spread_to_benchmark_bps"].notna().any():
@@ -3734,7 +3767,7 @@ else:
                                                 labels={"trade_date": "Trade Date", "spread_to_benchmark_bps": "Spread (bps)"},
                                             )
                                             sec_spread_fig.update_layout(height=380)
-                                            safe_plotly_chart(sec_spread_fig, use_container_width=True)
+                                            safe_plotly_chart(sec_spread_fig, width="stretch")
                                         else:
                                             sec_amt_fig = px.bar(
                                                 sec_daily,
@@ -3745,7 +3778,7 @@ else:
                                                 labels={"trade_date": "Trade Date", "total_trade_amount": "Total Trade Amount"},
                                             )
                                             sec_amt_fig.update_layout(height=380)
-                                            safe_plotly_chart(sec_amt_fig, use_container_width=True)
+                                            safe_plotly_chart(sec_amt_fig, width="stretch")
 
                                     with st.expander("Latest trades for selected CUSIP", expanded=False):
                                         latest_trade_cols = [
@@ -3757,7 +3790,7 @@ else:
                                             sec_trades[[c for c in latest_trade_cols if c in sec_trades.columns]]
                                             .sort_values("trade_date", ascending=False)
                                             .head(500),
-                                            use_container_width=True,
+                                            width="stretch",
                                             hide_index=True,
                                         )
 
@@ -4015,7 +4048,7 @@ else:
 
                         safe_dataframe(
                             display_candidates.head(1000),
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             height=480,
                         )
@@ -4049,7 +4082,7 @@ else:
                         screener_fig.add_vline(x=min_liquidity, line_dash="dash", opacity=0.45)
                         screener_fig.add_hline(y=min_spread, line_dash="dash", opacity=0.45)
                         screener_fig.update_layout(height=520, hovermode="closest")
-                        safe_plotly_chart(screener_fig, use_container_width=True)
+                        safe_plotly_chart(screener_fig, width="stretch")
 
                         csv_candidates = candidates.to_csv(index=False).encode("utf-8")
                         st.download_button(
@@ -4079,7 +4112,7 @@ else:
                         for c in ["avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "liquidity_score"]:
                             if c in audit_screen.columns:
                                 audit_screen[c] = pd.to_numeric(audit_screen[c], errors="coerce").round(2)
-                        safe_dataframe(audit_screen.head(5000), use_container_width=True, hide_index=True)
+                        safe_dataframe(audit_screen.head(5000), width="stretch", hide_index=True)
 
 
 
@@ -4308,7 +4341,7 @@ else:
                                 )
                                 peer_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.45)
                                 peer_curve_fig.update_layout(height=520, hovermode="x unified")
-                                safe_plotly_chart(peer_curve_fig, use_container_width=True)
+                                safe_plotly_chart(peer_curve_fig, width="stretch")
 
                                 st.subheader("2. Peer Spread Heatmap")
                                 peer_matrix = peer_summary.pivot_table(
@@ -4339,7 +4372,7 @@ else:
                                     hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
                                 )
                                 peer_heatmap_fig.update_layout(height=max(380, 70 * len(peer_matrix.index)))
-                                safe_plotly_chart(peer_heatmap_fig, use_container_width=True)
+                                safe_plotly_chart(peer_heatmap_fig, width="stretch")
 
                                 st.subheader("3. Peer Ranking Table")
 
@@ -4462,7 +4495,7 @@ Use this ranking as a first-pass screen, then review the CUSIP-level drilldown a
                                             "latest_trade",
                                         ]
                                     ],
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
@@ -4501,7 +4534,7 @@ Use this ranking as a first-pass screen, then review the CUSIP-level drilldown a
                                         f"Benchmark date used: {peer_benchmark_date.strftime('%Y-%m-%d')}. "
                                         f"Lookback window: {peer_window_label}."
                                     )
-                                    safe_dataframe(audit_df, use_container_width=True, hide_index=True)
+                                    safe_dataframe(audit_df, width="stretch", hide_index=True)
 
 
 
@@ -4775,7 +4808,7 @@ else:
                                         hovertemplate="Issuer=%{y}<br>Bucket=%{x}<br>Peer Gap=%{z:.1f} bp<extra></extra>",
                                     )
                                     gap_fig.update_layout(height=max(390, 72 * len(gap_matrix.index)))
-                                    safe_plotly_chart(gap_fig, use_container_width=True)
+                                    safe_plotly_chart(gap_fig, width="stretch")
 
                                     st.subheader("2. Cross-Issuer RV Ranking")
                                     ranking = xrv_summary.sort_values("x_issuer_rv_score", ascending=False, na_position="last").copy()
@@ -4806,7 +4839,25 @@ else:
                                         if c in ranking_display.columns:
                                             ranking_display[c] = pd.to_numeric(ranking_display[c], errors="coerce").round(2)
 
-                                    safe_dataframe(ranking_display, use_container_width=True, hide_index=True, height=430)
+                                    ranking_display_top = ranking_display.head(15).copy()
+                                    st.caption("Showing top 15 cross-issuer RV candidates. Expand the table for a larger preview.")
+                                    safe_dataframe(
+                                        ranking_display_top,
+                                        width="stretch",
+                                        hide_index=True,
+                                        height=430,
+                                        auto_collapse=False,
+                                    )
+                                    if len(ranking_display) > len(ranking_display_top):
+                                        with st.expander(f"View broader Cross-Issuer RV Ranking ({len(ranking_display):,} rows)", expanded=False):
+                                            safe_dataframe(
+                                                ranking_display,
+                                                width="stretch",
+                                                hide_index=True,
+                                                height=430,
+                                                max_rows=min(MAX_TABLE_ROWS, 1000),
+                                                auto_collapse=False,
+                                            )
 
                                     st.subheader("3. Cross-Issuer Opportunity Map")
                                     xrv_scatter = px.scatter(
@@ -4839,7 +4890,7 @@ else:
                                     xrv_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
                                     xrv_scatter.add_vline(x=60, line_dash="dash", opacity=0.35)
                                     xrv_scatter.update_layout(height=540, hovermode="closest")
-                                    safe_plotly_chart(xrv_scatter, use_container_width=True)
+                                    safe_plotly_chart(xrv_scatter, width="stretch")
 
                                     if not ranking.empty:
                                         top = ranking.iloc[0]
@@ -4884,7 +4935,7 @@ else:
                                             f"Benchmark date used: {xrv_benchmark_date.strftime('%Y-%m-%d')}. "
                                             f"Lookback window: {xrv_window}."
                                         )
-                                        safe_dataframe(audit_xrv, use_container_width=True, hide_index=True)
+                                        safe_dataframe(audit_xrv, width="stretch", hide_index=True)
 
 
 section_anchor("spread-level", "Current Spread Level Framework")
@@ -4974,7 +5025,7 @@ else:
             )
             level_curve_fig.add_hline(y=0, line_dash="dash", opacity=0.5)
             level_curve_fig.update_layout(hovermode="x unified")
-            safe_plotly_chart(level_curve_fig, use_container_width=True)
+            safe_plotly_chart(level_curve_fig, width="stretch")
 
             # 2) Spread level heatmap: maturity year x benchmark rating.
             st.subheader("2. Current Spread Level Heatmap")
@@ -4994,7 +5045,7 @@ else:
                 hovertemplate="Maturity=%{y}<br>Benchmark=%{x}<br>Spread=%{z:.1f} bp<extra></extra>",
             )
             level_heatmap_fig.update_layout(height=420)
-            safe_plotly_chart(level_heatmap_fig, use_container_width=True)
+            safe_plotly_chart(level_heatmap_fig, width="stretch")
 
             # 3) Quick signal: identify the cheapest bucket vs the first selected benchmark.
             primary_rating = level_ratings[0]
@@ -5019,7 +5070,7 @@ else:
                 for c in ["avg_yield", "benchmark_yield", "spread_to_benchmark_bps", "rating_spread_bps"]:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
-                safe_dataframe(audit_display, use_container_width=True, hide_index=True)
+                safe_dataframe(audit_display, width="stretch", hide_index=True)
 
 
 section_anchor("spread-attribution", "Spread Attribution Waterfall")
@@ -5241,7 +5292,7 @@ else:
                                 height=540,
                                 showlegend=False,
                             )
-                            safe_plotly_chart(wf_fig, use_container_width=True)
+                            safe_plotly_chart(wf_fig, width="stretch")
 
                             wf_metric1, wf_metric2, wf_metric3, wf_metric4 = st.columns(4)
                             wf_metric1.metric("Issuer Yield", f"{wf_avg_issuer_yield:.2f}%")
@@ -5292,7 +5343,7 @@ else:
                                         {"Metric": "Benchmark source column", "Value": wf_aaa_meta.get("source_column")},
                                     ]
                                 )
-                                safe_dataframe(audit_df, use_container_width=True, hide_index=True)
+                                safe_dataframe(audit_df, width="stretch", hide_index=True)
 
 
 
@@ -5492,7 +5543,7 @@ else:
                 hist_fig.add_hline(y=hist_p25, line_dash="dot", opacity=0.45, annotation_text="25th")
                 hist_fig.add_hline(y=hist_p75, line_dash="dot", opacity=0.45, annotation_text="75th")
                 hist_fig.update_layout(height=520, hovermode="x unified")
-                safe_plotly_chart(hist_fig, use_container_width=True)
+                safe_plotly_chart(hist_fig, width="stretch")
 
                 dist_col1, dist_col2 = st.columns([1.2, 1])
                 with dist_col1:
@@ -5506,7 +5557,7 @@ else:
                     hist_dist_fig.add_vline(x=current_spread, line_dash="solid", annotation_text="Current")
                     hist_dist_fig.add_vline(x=hist_median, line_dash="dash", annotation_text="Median")
                     hist_dist_fig.update_layout(height=430)
-                    safe_plotly_chart(hist_dist_fig, use_container_width=True)
+                    safe_plotly_chart(hist_dist_fig, width="stretch")
 
                 with dist_col2:
                     pct_table = pd.DataFrame(
@@ -5522,7 +5573,7 @@ else:
                         ]
                     )
                     pct_table["Spread (bps)"] = pct_table["Spread (bps)"].round(2)
-                    safe_dataframe(pct_table, use_container_width=True, hide_index=True)
+                    safe_dataframe(pct_table, width="stretch", hide_index=True)
 
                 with st.expander("Historical spread audit table", expanded=False):
                     audit_cols = [
@@ -5542,7 +5593,7 @@ else:
                             audit_hist[c] = pd.to_numeric(audit_hist[c], errors="coerce").round(2)
                     safe_dataframe(
                         audit_hist.sort_values("trade_date", ascending=False).head(1000),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -5700,7 +5751,7 @@ else:
                                 },
                             )
                             fig_curve_shape.update_layout(height=450, hovermode="x unified")
-                            safe_plotly_chart(fig_curve_shape, use_container_width=True)
+                            safe_plotly_chart(fig_curve_shape, width="stretch")
 
                             curve_values = (
                                 curve_shape_df.set_index("maturity_bucket")[metric_col]
@@ -5855,7 +5906,7 @@ else:
                             with st.expander("Curve Analytics Availability", expanded=False):
                                 safe_dataframe(
                                     analytics_status_df,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
@@ -5872,7 +5923,7 @@ else:
                                 for idx, (_, row) in enumerate(metrics_df.head(4).iterrows()):
                                     mcols[idx % len(mcols)].metric(row["Metric"], row["Display"])
 
-                                safe_dataframe(metrics_df, use_container_width=True, hide_index=True)
+                                safe_dataframe(metrics_df, width="stretch", hide_index=True)
 
                                 # Read-through
                                 slope_1030 = metrics_df.loc[metrics_df["Metric"] == "10s30s Slope", "Value"]
@@ -5920,7 +5971,7 @@ else:
                                         f"Issuer lookback: latest {cs_lookback} days. "
                                         f"Benchmark date: {cs_benchmark_date.strftime('%Y-%m-%d')}."
                                     )
-                                    safe_dataframe(audit_curve, use_container_width=True, hide_index=True)
+                                    safe_dataframe(audit_curve, width="stretch", hide_index=True)
 
 
 section_anchor("market-narrative", "Market Narrative & Opportunity Map")
@@ -6031,7 +6082,7 @@ with mn_tab1:
                     yaxis2=dict(title="Average Yield (%)", overlaying="y", side="right"),
                     hovermode="x unified",
                 )
-                safe_plotly_chart(tl_fig, use_container_width=True)
+                safe_plotly_chart(tl_fig, width="stretch")
 
                 amount_fig = px.bar(
                     timeline_plot,
@@ -6045,7 +6096,7 @@ with mn_tab1:
                     hover_data={"trade_count": ":,.0f", "avg_yield": ":.2f"},
                 )
                 amount_fig.update_layout(height=380)
-                safe_plotly_chart(amount_fig, use_container_width=True)
+                safe_plotly_chart(amount_fig, width="stretch")
 
                 # Simple narrative event detection
                 event_rows = []
@@ -6079,7 +6130,7 @@ with mn_tab1:
                 if event_rows:
                     st.subheader("Narrative Signals")
                     events_df = pd.DataFrame(event_rows)
-                    safe_dataframe(events_df, use_container_width=True, hide_index=True)
+                    safe_dataframe(events_df, width="stretch", hide_index=True)
                 else:
                     st.info("No unusually large activity/volume/yield-move events were detected in the selected timeline window.")
 
@@ -6233,7 +6284,7 @@ with mn_tab2:
                 bgcolor="rgba(255,255,255,0.75)",
             )
             q_fig.update_layout(height=560, hovermode="closest")
-            safe_plotly_chart(q_fig, use_container_width=True)
+            safe_plotly_chart(q_fig, width="stretch")
 
             q_summary = (
                 quadrant_df.groupby("Quadrant", as_index=False)
@@ -6244,7 +6295,7 @@ with mn_tab2:
                     total_trade_amount=("total_trade_amount", "sum") if "total_trade_amount" in quadrant_df.columns else ("liquidity_score", "count"),
                 )
             )
-            safe_dataframe(q_summary, use_container_width=True, hide_index=True)
+            safe_dataframe(q_summary, width="stretch", hide_index=True)
 
             with st.expander("Quadrant security-level table", expanded=False):
                 display_cols = [
@@ -6256,7 +6307,7 @@ with mn_tab2:
                     quadrant_df[[c for c in display_cols if c in quadrant_df.columns]]
                     .sort_values(["Quadrant", "liquidity_score"], ascending=[True, False])
                     .head(5000),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -6412,7 +6463,7 @@ else:
             },
         )
         flow_fig.update_layout(height=430)
-        safe_plotly_chart(flow_fig, use_container_width=True)
+        safe_plotly_chart(flow_fig, width="stretch")
 
         dealer_daily = (
             dealer_df.groupby(["trade_date", "flow_side"], as_index=False)
@@ -6450,7 +6501,7 @@ else:
         )
         pressure_fig.add_hline(y=0, line_dash="dash", opacity=0.45)
         pressure_fig.update_layout(height=430)
-        safe_plotly_chart(pressure_fig, use_container_width=True)
+        safe_plotly_chart(pressure_fig, width="stretch")
 
         with st.expander("Dealer proxy audit table", expanded=False):
             audit_cols = [
@@ -6476,7 +6527,7 @@ else:
             st.caption(f"Side classification source column: `{dealer_trade_type_col}`.")
             safe_dataframe(
                 dealer_audit_display.sort_values("trade_date", ascending=False).head(5000),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -6796,13 +6847,13 @@ else:
                     if pd.notna(median_y):
                         rv_fig.add_hline(y=median_y, line_dash="dash", opacity=0.45)
                     rv_fig.update_layout(height=560, hovermode="closest")
-                    safe_plotly_chart(rv_fig, use_container_width=True)
+                    safe_plotly_chart(rv_fig, width="stretch")
                 except Exception as exc:
                     st.warning(
                         "The positioning map could not be plotted because the scatter inputs were not usable. "
                         f"The cleaned known-maturity data table is shown below for review. Error: {exc}"
                     )
-                    safe_dataframe(rv_known.head(1000), use_container_width=True, hide_index=True)
+                    safe_dataframe(rv_known.head(1000), width="stretch", hide_index=True)
                     median_liquidity = rv_known["liquidity_score"].median() if "liquidity_score" in rv_known.columns else pd.NA
                     median_y = rv_known[rv_y_axis_col].median() if rv_y_axis_col in rv_known.columns else pd.NA
 
@@ -6837,7 +6888,7 @@ else:
                     unknown_existing_cols = [c for c in unknown_display_cols if c in rv_unknown.columns]
                     safe_dataframe(
                         rv_unknown[unknown_existing_cols].head(5000),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -6873,7 +6924,7 @@ else:
                         rv_display[c] = pd.to_numeric(rv_display[c], errors="coerce").round(2)
                 safe_dataframe(
                     rv_display.sort_values([rv_y_axis_col, "liquidity_score"], ascending=False),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     height=420,
                 )
@@ -7077,7 +7128,7 @@ else:
         )
         shock_bar.add_hline(y=0, line_dash="dash", opacity=0.45)
         shock_bar.update_layout(height=440)
-        safe_plotly_chart(shock_bar, use_container_width=True)
+        safe_plotly_chart(shock_bar, width="stretch")
 
         st.subheader("2. Shock Summary Table")
         bucket_display = bucket_summary.copy()
@@ -7099,7 +7150,7 @@ else:
                     "impact_direction",
                 ]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -7150,7 +7201,7 @@ else:
                 if col in detail_display.columns:
                     detail_display[col] = pd.to_numeric(detail_display[col], errors="coerce").round(2)
 
-            safe_dataframe(detail_display.head(5000), use_container_width=True, hide_index=True, height=480)
+            safe_dataframe(detail_display.head(5000), width="stretch", hide_index=True, height=480)
 
             shock_scatter = px.scatter(
                 cusip_shock,
@@ -7172,7 +7223,7 @@ else:
             )
             shock_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
             shock_scatter.update_layout(height=500)
-            safe_plotly_chart(shock_scatter, use_container_width=True)
+            safe_plotly_chart(shock_scatter, width="stretch")
 
         with st.expander("Scenario shock assumptions and audit", expanded=False):
             shock_assumption_df = pd.DataFrame(
@@ -7186,7 +7237,7 @@ else:
                     for bucket in MATURITY_BUCKET_ORDER
                 ]
             )
-            safe_dataframe(shock_assumption_df, use_container_width=True, hide_index=True)
+            safe_dataframe(shock_assumption_df, width="stretch", hide_index=True)
 
             st.download_button(
                 label="Download Scenario Shock Results CSV",
@@ -7280,7 +7331,7 @@ else:
             .reset_index()
         )
         st.metric("Saved CUSIPs", f"{len(watchlist_summary):,}")
-        safe_dataframe(watchlist_summary, use_container_width=True, hide_index=True)
+        safe_dataframe(watchlist_summary, width="stretch", hide_index=True)
 
         st.download_button(
             label="Download Watchlist CSV",
@@ -7689,7 +7740,7 @@ else:
     if evidence_rows:
         st.markdown("### Evidence Trail")
         evidence_df = pd.DataFrame(evidence_rows)
-        safe_dataframe(evidence_df, use_container_width=True, hide_index=True)
+        safe_dataframe(evidence_df, width="stretch", hide_index=True)
 
     with st.expander("Rule thresholds used in this narrative", expanded=False):
         rule_df = pd.DataFrame(
@@ -7706,7 +7757,7 @@ else:
                 {"Rule": "Buy-heavy flow", "Threshold": "Flow imbalance <= -25%"},
             ]
         )
-        safe_dataframe(rule_df, use_container_width=True, hide_index=True)
+        safe_dataframe(rule_df, width="stretch", hide_index=True)
 
 
 
@@ -8136,11 +8187,11 @@ with snap_col5:
 
 section_anchor("bond-master", "Security Reference / Optional Bond Enrichment")
 bond_cols = ["issuer", "sector", "primary_type", "election", "series", "cusip", "secondary_credit", "term", "maturity", "par_amount", "outstanding_amount", "coupon", "call_date", "call_price", "fed_tax", "amt"]
-safe_dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].sort_values([c for c in ["maturity", "cusip"] if c in issuer_bonds.columns]), use_container_width=True)
+safe_dataframe(issuer_bonds[[c for c in bond_cols if c in issuer_bonds.columns]].sort_values([c for c in ["maturity", "cusip"] if c in issuer_bonds.columns]), width="stretch")
 
 section_anchor("trade-detail", "Underlying Trade Detail")
 trade_cols = ["trade_datetime", "cusip", "description", "maturity_trade", "maturity_bond", "maturity_bucket", "coupon_trade", "yield", "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"]
-safe_dataframe(issuer_trades[[c for c in trade_cols if c in issuer_trades.columns]].sort_values("trade_datetime", ascending=False).head(20000), use_container_width=True)
+safe_dataframe(issuer_trades[[c for c in trade_cols if c in issuer_trades.columns]].sort_values("trade_datetime", ascending=False).head(20000), width="stretch")
 
 
 
@@ -8608,13 +8659,13 @@ Rule-based and explainable. Each phrase is triggered by spread movement, histori
 )
 
 with st.expander("Rating spread assumptions", expanded=False):
-    safe_dataframe(rating_spread_table(), use_container_width=True, hide_index=True)
+    safe_dataframe(rating_spread_table(), width="stretch", hide_index=True)
 
 with st.expander("Duration proxy assumptions", expanded=False):
     duration_proxy_df = pd.DataFrame(
         [{"Maturity Year": f"{y}Y", "Proxy Duration": DURATION_PROXY[f"{y}Y"]} for y in range(1, MAX_MATURITY_YEAR + 1)]
     )
-    safe_dataframe(duration_proxy_df, use_container_width=True, hide_index=True)
+    safe_dataframe(duration_proxy_df, width="stretch", hide_index=True)
 
 section_anchor("version-changelog", "Version / Change Log")
 version_rows = [
@@ -8622,7 +8673,7 @@ version_rows = [
     {"Version": "v1.1", "Change": "Added Cross-Issuer RV Analytics, Scenario Shock, Recommendation Narrative, and CUSIP Drilldown."},
     {"Version": "v1.2", "Change": "Added Data Quality Scorecard, Export Summary Package, Admin Methodology Page, and Watchlist."},
 ]
-safe_dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
+safe_dataframe(pd.DataFrame(version_rows), width="stretch", hide_index=True)
 st.caption("Update this changelog whenever the team changes methodology, assumptions, or major modules.")
 
 
@@ -8638,10 +8689,10 @@ with d3:
 if show_raw_tables:
     st.header("Raw / Processed Tables")
     st.subheader("Issuer Master")
-    safe_dataframe(issuer_master, use_container_width=True)
+    safe_dataframe(issuer_master, width="stretch")
     st.subheader("Security Reference")
-    safe_dataframe(bonds_df, use_container_width=True)
+    safe_dataframe(bonds_df, width="stretch")
     st.subheader("All Trades")
-    safe_dataframe(trades_df.head(20000), use_container_width=True)
+    safe_dataframe(trades_df.head(20000), width="stretch")
     st.subheader("Merged Market Data")
-    safe_dataframe(market_df.head(20000), use_container_width=True)
+    safe_dataframe(market_df.head(20000), width="stretch")
