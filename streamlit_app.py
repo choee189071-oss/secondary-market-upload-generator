@@ -465,6 +465,107 @@ def compact_heatmap_matrix_for_display(matrix: pd.DataFrame, max_rows: int | Non
     return out
 
 
+def maturity_zone_label(value: object) -> str:
+    """Collapse annual maturity years into desk-readable curve sectors."""
+    y = maturity_year_sort_key(value)
+    if y == 9999:
+        return "Unknown"
+    if y <= 3:
+        return "1-3Y"
+    if y <= 7:
+        return "4-7Y"
+    if y <= 12:
+        return "8-12Y"
+    if y <= 20:
+        return "13-20Y"
+    return "21Y+"
+
+
+MATURITY_ZONE_ORDER = ["1-3Y", "4-7Y", "8-12Y", "13-20Y", "21Y+"]
+
+
+def aggregate_maturity_rows_for_display(matrix: pd.DataFrame, agg: str = "median") -> pd.DataFrame:
+    """Aggregate heatmap rows from 1Y..40Y into readable maturity zones."""
+    if matrix is None or matrix.empty:
+        return matrix
+    out = matrix.dropna(how="all").copy()
+    if out.empty:
+        return out
+    out["__maturity_zone__"] = [maturity_zone_label(idx) for idx in out.index]
+    grouped = out.groupby("__maturity_zone__").median(numeric_only=True) if agg == "median" else out.groupby("__maturity_zone__").mean(numeric_only=True)
+    grouped = grouped.reindex([z for z in MATURITY_ZONE_ORDER if z in grouped.index])
+    return grouped
+
+
+def aggregate_maturity_columns_for_display(matrix: pd.DataFrame, agg: str = "median") -> pd.DataFrame:
+    """Aggregate heatmap columns from 1Y..40Y into readable maturity zones."""
+    if matrix is None or matrix.empty:
+        return matrix
+    out = matrix.dropna(how="all").copy()
+    if out.empty:
+        return out
+    zone_map = {col: maturity_zone_label(col) for col in out.columns}
+    frames = []
+    for zone in MATURITY_ZONE_ORDER:
+        cols = [c for c, z in zone_map.items() if z == zone]
+        if not cols:
+            continue
+        numeric = out[cols].apply(pd.to_numeric, errors="coerce")
+        frames.append(numeric.median(axis=1).rename(zone) if agg == "median" else numeric.mean(axis=1).rename(zone))
+    return pd.concat(frames, axis=1) if frames else out
+
+
+def ranked_bar_chart(
+    df: pd.DataFrame,
+    value_col: str,
+    label_col: str,
+    title: str,
+    x_title: str,
+    top_n: int = 15,
+    color_col: str | None = None,
+    hover_cols: list[str] | None = None,
+):
+    """Desk-friendly horizontal bar chart for top ranked opportunities."""
+    if df is None or df.empty or value_col not in df.columns or label_col not in df.columns:
+        return None
+    plot_df = df.copy()
+    plot_df[value_col] = pd.to_numeric(plot_df[value_col], errors="coerce")
+    plot_df = plot_df.dropna(subset=[value_col])
+    if plot_df.empty:
+        return None
+    plot_df = plot_df.sort_values(value_col, ascending=False).head(top_n)
+    plot_df[label_col] = plot_df[label_col].astype(str)
+    fig = px.bar(
+        plot_df.sort_values(value_col, ascending=True),
+        x=value_col,
+        y=label_col,
+        orientation="h",
+        color=color_col if color_col in plot_df.columns else None,
+        hover_data=[c for c in (hover_cols or []) if c in plot_df.columns],
+        title=title,
+        labels={value_col: x_title, label_col: "Security / Bucket"},
+    )
+    fig.add_vline(x=0, line_dash="dash", opacity=0.35)
+    fig.update_layout(height=max(360, 28 * len(plot_df) + 140), showlegend=bool(color_col and color_col in plot_df.columns))
+    return fig
+
+
+def add_security_label(df: pd.DataFrame, label_col: str = "security_label") -> pd.DataFrame:
+    """Create a compact, human-readable label for CUSIP/security rows."""
+    out = df.copy()
+    if "cusip" in out.columns:
+        out[label_col] = out["cusip"].astype(str)
+    elif "issuer" in out.columns and "maturity_bucket" in out.columns:
+        out[label_col] = out["issuer"].astype(str) + " " + out["maturity_bucket"].astype(str)
+    elif "issuer" in out.columns:
+        out[label_col] = out["issuer"].astype(str)
+    else:
+        out[label_col] = out.index.astype(str)
+    if "maturity_bucket" in out.columns and "cusip" in out.columns:
+        out[label_col] = out[label_col] + " (" + out["maturity_bucket"].astype(str) + ")"
+    return out
+
+
 def section_anchor(anchor_id: str, title: str, level: int = 2):
     """Create a stable HTML anchor plus a Streamlit header/subheader."""
     st.markdown(f"<a id='{anchor_id}'></a>", unsafe_allow_html=True)
@@ -3164,6 +3265,7 @@ else:
         if heatmap_matrix.empty or heatmap_matrix.isna().all().all():
             st.info("Not enough historical spread observations to calculate movement across the selected windows yet.")
         else:
+            heatmap_matrix = aggregate_maturity_rows_for_display(heatmap_matrix) if len(heatmap_matrix.index) > 10 else heatmap_matrix
             heatmap_text = heatmap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
             heatmap_fig = px.imshow(
                 heatmap_matrix.astype(float),
@@ -4046,43 +4148,58 @@ else:
                             if c in display_candidates.columns:
                                 display_candidates[c] = pd.to_numeric(display_candidates[c], errors="coerce").round(2)
 
+                        st.caption("Showing top 15 candidates. Expand for a larger preview.")
                         safe_dataframe(
-                            display_candidates.head(1000),
+                            display_candidates.head(15),
                             width="stretch",
                             hide_index=True,
-                            height=480,
+                            height=420,
+                            auto_collapse=False,
                         )
+                        if len(display_candidates) > 15:
+                            with st.expander(f"View broader candidate table ({len(display_candidates):,} rows)", expanded=False):
+                                safe_dataframe(display_candidates, width="stretch", hide_index=True, height=480, max_rows=1000, auto_collapse=False)
 
-                        screener_fig = px.scatter(
-                            candidates,
-                            x="liquidity_score",
-                            y="spread_to_benchmark_bps",
-                            size="total_trade_amount",
-                            size_max=38,
-                            color="maturity_bucket",
-                            hover_name="cusip",
-                            hover_data=[
-                                c for c in [
-                                    "issuer",
-                                    "sector",
-                                    "avg_yield",
-                                    "benchmark_yield",
-                                    "trade_count",
-                                    "days_since_last_trade",
-                                    "rv_score",
-                                ] if c in candidates.columns
+                        # Desk-friendly replacement for the old bubble scatter:
+                        # show the clearest Top-N ranked opportunities first.
+                        candidates_labeled = add_security_label(candidates)
+                        screener_fig = ranked_bar_chart(
+                            candidates_labeled,
+                            value_col="spread_to_benchmark_bps",
+                            label_col="security_label",
+                            title="Top Cheap / Wide Bonds vs Benchmark",
+                            x_title="Spread to Benchmark (bps)",
+                            top_n=15,
+                            color_col="maturity_bucket",
+                            hover_cols=[
+                                "issuer", "sector", "avg_yield", "benchmark_yield", "trade_count",
+                                "days_since_last_trade", "rv_score", "liquidity_score", "total_trade_amount",
                             ],
-                            title="Top Relative Value Candidates",
-                            labels={
-                                "liquidity_score": "Liquidity Score",
-                                "spread_to_benchmark_bps": "Spread to Benchmark (bps)",
-                                "maturity_bucket": "Maturity Year",
-                            },
                         )
-                        screener_fig.add_vline(x=min_liquidity, line_dash="dash", opacity=0.45)
-                        screener_fig.add_hline(y=min_spread, line_dash="dash", opacity=0.45)
-                        screener_fig.update_layout(height=520, hovermode="closest")
-                        safe_plotly_chart(screener_fig, width="stretch")
+                        if screener_fig is not None:
+                            safe_plotly_chart(screener_fig, width="stretch")
+
+                        # Secondary read-through table: cheap + liquid / rich / review buckets.
+                        quadrant = candidates_labeled.copy()
+                        quadrant["desk_signal"] = np.select(
+                            [
+                                (quadrant["spread_to_benchmark_bps"] >= min_spread) & (quadrant["liquidity_score"] >= min_liquidity),
+                                (quadrant["spread_to_benchmark_bps"] >= min_spread) & (quadrant["liquidity_score"] < min_liquidity),
+                                (quadrant["spread_to_benchmark_bps"] < 0) & (quadrant["liquidity_score"] >= min_liquidity),
+                            ],
+                            ["Cheap + Liquid", "Cheap / Needs Liquidity Check", "Rich + Liquid"],
+                            default="Review",
+                        )
+                        st.subheader("Top Opportunity Read-Through")
+                        q_cols = [
+                            "desk_signal", "security_label", "issuer", "sector", "maturity_bucket",
+                            "spread_to_benchmark_bps", "liquidity_score", "trade_count", "total_trade_amount", "rv_score",
+                        ]
+                        q_display = quadrant[[c for c in q_cols if c in quadrant.columns]].head(15).copy()
+                        for c in ["spread_to_benchmark_bps", "liquidity_score", "rv_score"]:
+                            if c in q_display.columns:
+                                q_display[c] = pd.to_numeric(q_display[c], errors="coerce").round(2)
+                        safe_dataframe(q_display, width="stretch", hide_index=True, auto_collapse=False, height=420)
 
                         csv_candidates = candidates.to_csv(index=False).encode("utf-8")
                         st.download_button(
@@ -4787,6 +4904,7 @@ else:
                                         aggfunc="mean",
                                         observed=False,
                                     ).reindex(columns=maturity_order)
+                                    gap_matrix = aggregate_maturity_columns_for_display(gap_matrix) if len(gap_matrix.columns) > 10 else gap_matrix
                                     gap_text = gap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
                                     gap_fig = px.imshow(
                                         gap_matrix.astype(float),
@@ -4859,38 +4977,35 @@ else:
                                                 auto_collapse=False,
                                             )
 
-                                    st.subheader("3. Cross-Issuer Opportunity Map")
-                                    xrv_scatter = px.scatter(
-                                        ranking,
-                                        x="liquidity_score",
-                                        y="peer_gap_bps",
-                                        size="total_trade_amount",
-                                        size_max=38,
-                                        color="maturity_bucket",
-                                        symbol="x_issuer_signal",
-                                        hover_name="issuer",
-                                        hover_data=[
-                                            "sector",
-                                            "maturity_bucket",
-                                            "spread_to_benchmark_bps",
-                                            "bucket_peer_median_bps",
-                                            "peer_z_score",
-                                            "trade_count",
-                                            "total_trade_amount",
-                                            "x_issuer_rv_score",
-                                            "x_issuer_signal",
-                                        ],
-                                        title="Cross-Issuer Relative Value Opportunity Map",
-                                        labels={
-                                            "liquidity_score": "Liquidity Score",
-                                            "peer_gap_bps": "Peer Gap (bps)",
-                                            "maturity_bucket": "Maturity Year",
-                                        },
+                                    st.subheader("3. Cross-Issuer Opportunity Ranking")
+                                    # Bubble maps become unreadable with many issuer/maturity combinations.
+                                    # Use a ranked bar chart plus a decision table instead.
+                                    ranking_labeled = ranking.copy()
+                                    ranking_labeled["issuer_bucket"] = ranking_labeled["issuer"].astype(str) + " " + ranking_labeled["maturity_bucket"].astype(str)
+                                    xrv_bar = ranked_bar_chart(
+                                        ranking_labeled,
+                                        value_col="peer_gap_bps",
+                                        label_col="issuer_bucket",
+                                        title="Top Cross-Issuer Cheapness vs Peer Median",
+                                        x_title="Peer Gap (bps)",
+                                        top_n=18,
+                                        color_col="x_issuer_signal",
+                                        hover_cols=["issuer", "sector", "maturity_bucket", "spread_to_benchmark_bps", "bucket_peer_median_bps", "liquidity_score", "trade_count", "x_issuer_rv_score"],
                                     )
-                                    xrv_scatter.add_hline(y=0, line_dash="dash", opacity=0.45)
-                                    xrv_scatter.add_vline(x=60, line_dash="dash", opacity=0.35)
-                                    xrv_scatter.update_layout(height=540, hovermode="closest")
-                                    safe_plotly_chart(xrv_scatter, width="stretch")
+                                    if xrv_bar is not None:
+                                        safe_plotly_chart(xrv_bar, width="stretch")
+
+                                    st.subheader("Cross-Issuer Decision Table")
+                                    decision_cols = [
+                                        "x_issuer_signal", "issuer", "sector", "maturity_bucket", "peer_gap_bps",
+                                        "spread_to_benchmark_bps", "bucket_peer_median_bps", "liquidity_score",
+                                        "trade_count", "total_trade_amount", "x_issuer_rv_score",
+                                    ]
+                                    decision_display = ranking_labeled[[c for c in decision_cols if c in ranking_labeled.columns]].head(20).copy()
+                                    for c in ["peer_gap_bps", "spread_to_benchmark_bps", "bucket_peer_median_bps", "liquidity_score", "x_issuer_rv_score"]:
+                                        if c in decision_display.columns:
+                                            decision_display[c] = pd.to_numeric(decision_display[c], errors="coerce").round(2)
+                                    safe_dataframe(decision_display, width="stretch", hide_index=True, auto_collapse=False, height=460)
 
                                     if not ranking.empty:
                                         top = ranking.iloc[0]
@@ -4993,6 +5108,7 @@ else:
                 "Check that the curve file has a Date column plus either 5Y/10Y/20Y/30Y base columns or explicit rating curve columns such as AA_10Y, and that trade dates overlap with the curve history."
             )
         else:
+            level_matrix = aggregate_maturity_rows_for_display(level_matrix) if len(level_matrix.index) > 10 else level_matrix
             level_text = level_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
 
             # 1) Spread level curve: one line per selected benchmark rating.
@@ -6822,32 +6938,39 @@ else:
 
             else:
                 try:
-                    rv_fig = px.scatter(
-                        rv_known,
-                        x="liquidity_score",
-                        y=rv_y_axis_col,
-                        size=size_col,
-                        size_max=38,
-                        color="maturity_bucket",
-                        category_orders={"maturity_bucket": valid_buckets},
-                        hover_name="cusip",
-                        hover_data=hover_cols,
-                        title=f"{selected_issuer} Relative Value Positioning Map",
-                        labels={
-                            "liquidity_score": "Liquidity Score",
-                            rv_y_axis_col: rv_y_axis_label,
-                            "maturity_bucket": "Maturity Year",
-                            size_col: rv_size_by if size_col != "point_size" else "Fixed Point Size",
-                        },
-                    )
                     median_liquidity = rv_known["liquidity_score"].median()
                     median_y = rv_known[rv_y_axis_col].median()
-                    if pd.notna(median_liquidity):
-                        rv_fig.add_vline(x=median_liquidity, line_dash="dash", opacity=0.45)
-                    if pd.notna(median_y):
-                        rv_fig.add_hline(y=median_y, line_dash="dash", opacity=0.45)
-                    rv_fig.update_layout(height=560, hovermode="closest")
-                    safe_plotly_chart(rv_fig, width="stretch")
+
+                    rv_known_labeled = add_security_label(rv_known)
+                    # Replace crowded bubble scatter with a ranked horizontal bar view.
+                    rv_fig = ranked_bar_chart(
+                        rv_known_labeled,
+                        value_col=rv_y_axis_col,
+                        label_col="security_label",
+                        title=f"{selected_issuer} Ranked Relative Value Candidates",
+                        x_title=rv_y_axis_label,
+                        top_n=18,
+                        color_col="maturity_bucket",
+                        hover_cols=hover_cols,
+                    )
+                    if rv_fig is not None:
+                        safe_plotly_chart(rv_fig, width="stretch")
+
+                    # Add a compact decision table so users do not need to interpret a dense bubble map.
+                    rv_read = rv_known_labeled.copy()
+                    rv_read["desk_signal"] = np.select(
+                        [
+                            (rv_read["liquidity_score"] >= median_liquidity) & (rv_read[rv_y_axis_col] >= median_y),
+                            (rv_read["liquidity_score"] < median_liquidity) & (rv_read[rv_y_axis_col] >= median_y),
+                            (rv_read["liquidity_score"] >= median_liquidity) & (rv_read[rv_y_axis_col] < median_y),
+                        ],
+                        ["Cheap + Liquid", "Cheap / Needs Liquidity Check", "Rich + Liquid"],
+                        default="In Line / Review",
+                    )
+                    read_cols = ["desk_signal", "security_label", "maturity_bucket", rv_y_axis_col, "liquidity_score", "trade_count", "total_trade_amount"]
+                    read_display = rv_read[[c for c in read_cols if c in rv_read.columns]].sort_values(rv_y_axis_col, ascending=False).head(15)
+                    st.subheader("Positioning Read-Through")
+                    safe_dataframe(read_display, width="stretch", hide_index=True, auto_collapse=False, height=400)
                 except Exception as exc:
                     st.warning(
                         "The positioning map could not be plotted because the scatter inputs were not usable. "
