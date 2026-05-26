@@ -566,66 +566,22 @@ RATING_SPREADS: dict[str, dict[str, float]] = {
 #
 # The benchmark tenor mapping still uses the closest MMD tenor for each bucket.
 
-# Calendar maturity-year buckets used throughout the dashboard.
-# A bond that currently falls into the old "1Y" bucket is displayed as its
-# actual calendar maturity year. For example, in 2026, a 1Y maturity appears
-# as 2027. We keep the internal column name `maturity_bucket` for backward
-# compatibility with existing chart code, but the values are now calendar
-# years like 2027, 2028, 2029...
+# Annual maturity-year buckets used throughout the dashboard.
+# A trade with 4.3 years to maturity is assigned to 5Y via ceil(years_to_maturity).
 MAX_MATURITY_YEAR = 40
-CURRENT_ANALYSIS_YEAR = pd.Timestamp.today().year
-MATURITY_BUCKET_ORDER = [str(CURRENT_ANALYSIS_YEAR + y) for y in range(1, MAX_MATURITY_YEAR + 1)]
+MATURITY_BUCKET_ORDER = [f"{y}Y" for y in range(1, MAX_MATURITY_YEAR + 1)]
 MATURITY_BUCKET_OPTIONS = ["All"] + MATURITY_BUCKET_ORDER
 
 
-def format_mmddyyyy(value: object) -> str:
-    """Display dates as month/day/year for user-facing labels and tables."""
-    if value is None or pd.isna(value):
-        return "—"
-    try:
-        return pd.to_datetime(value).strftime("%m/%d/%Y")
-    except Exception:
-        return str(value)
-
-
-def format_mmddyyyy_hm(value: object) -> str:
-    """Display datetimes as month/day/year hour:minute."""
-    if value is None or pd.isna(value):
-        return "—"
-    try:
-        return pd.to_datetime(value).strftime("%m/%d/%Y %H:%M")
-    except Exception:
-        return str(value)
-
-
 def maturity_year_sort_key(value: object) -> int:
-    """Sort calendar years like 2027, 2030 numerically; supports legacy 10Y too."""
+    """Sort labels like 1Y, 10Y, 30Y numerically instead of alphabetically."""
     try:
         text = str(value).strip().upper().replace("Y", "")
         return int(float(text))
     except Exception:
-        return 999999
+        return 9999
 
 
-def _bucket_to_tenor_year(bucket: object, reference_year: int | None = None) -> int | None:
-    """Convert a displayed maturity bucket to an approximate tenor year.
-
-    - Calendar label 2031 with reference year 2026 -> 5
-    - Legacy label 5Y -> 5
-    """
-    if reference_year is None:
-        reference_year = CURRENT_ANALYSIS_YEAR
-    try:
-        text = str(bucket).strip().upper().replace("Y", "")
-        value = int(float(text))
-        if value >= 1900:
-            return max(1, min(MAX_MATURITY_YEAR, value - int(reference_year)))
-        return max(1, min(MAX_MATURITY_YEAR, value))
-    except Exception:
-        return None
-
-
-@st.cache_data(show_spinner=False)
 def observed_maturity_years(
     df: pd.DataFrame,
     bucket_col: str = "maturity_bucket",
@@ -633,7 +589,7 @@ def observed_maturity_years(
 ) -> list[str]:
     """Return only maturity years that actually exist in the data.
 
-    This prevents heatmaps/charts from showing empty calendar-year rows.
+    This prevents heatmaps/charts from showing empty 1Y..40Y rows.
     Set min_observations > 1 when a chart should suppress noisy one-off tenors.
     """
     if df is None or df.empty or bucket_col not in df.columns:
@@ -645,13 +601,12 @@ def observed_maturity_years(
         .groupby(bucket_col)
         .size()
     )
-    valid = [b for b, n in counts.items() if n >= min_observations and _bucket_to_tenor_year(b) is not None]
+    valid = [b for b, n in counts.items() if n >= min_observations and b in MATURITY_BUCKET_ORDER]
     return sorted(valid, key=maturity_year_sort_key)
 
 
-@st.cache_data(show_spinner=False)
 def compact_maturity_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
-    """Drop all-empty maturity rows and sort calendar maturity labels numerically."""
+    """Drop all-empty maturity rows and sort annual maturity labels numerically."""
     if matrix is None or matrix.empty:
         return matrix
     out = matrix.dropna(how="all")
@@ -660,21 +615,20 @@ def compact_maturity_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
     return out.loc[sorted(out.index, key=maturity_year_sort_key)]
 
 # Backward compatibility for any older processed data that still contains broad buckets.
-# New trade-only processing writes maturity_bucket as calendar maturity years like 2027, 2028...
+# New trade-only processing writes maturity_bucket as annual labels like 1Y, 2Y, ..., 40Y.
 MATURITY_BUCKET_RENAME = {
-    "Short": str(CURRENT_ANALYSIS_YEAR + 5),
-    "Intermediate": str(CURRENT_ANALYSIS_YEAR + 10),
-    "Long": str(CURRENT_ANALYSIS_YEAR + 20),
-    "Extended Long": str(CURRENT_ANALYSIS_YEAR + 30),
-    "10Y": str(CURRENT_ANALYSIS_YEAR + 10),
-    "20Y": str(CURRENT_ANALYSIS_YEAR + 20),
-    "30Y": str(CURRENT_ANALYSIS_YEAR + 30),
+    "Short": "5Y",
+    "Intermediate": "10Y",
+    "Long": "20Y",
+    "Extended Long": "30Y",
+    "10Y": "10Y",
+    "20Y": "20Y",
+    "30Y": "30Y",
 }
 
 
 def _nearest_benchmark_tenor(year: int) -> str:
-    """Map an approximate tenor year to the closest available benchmark tenor."""
-    year = max(1, min(MAX_MATURITY_YEAR, int(year)))
+    """Map an annual maturity year to the closest available benchmark tenor."""
     if year <= 2:
         return f"{year}Y"
     if year <= 7:
@@ -686,7 +640,7 @@ def _nearest_benchmark_tenor(year: int) -> str:
     return "30Y"
 
 
-MMD_BUCKET_MAP = {str(CURRENT_ANALYSIS_YEAR + y): _nearest_benchmark_tenor(y) for y in range(1, MAX_MATURITY_YEAR + 1)}
+MMD_BUCKET_MAP = {f"{y}Y": _nearest_benchmark_tenor(y) for y in range(1, MAX_MATURITY_YEAR + 1)}
 MMD_BUCKET_MAP["All"] = "10Y"
 BENCHMARK_RATINGS = list(RATING_SPREADS.keys())
 
@@ -711,7 +665,6 @@ def _rating_key(rating: str) -> str:
     return _curve_column_key(rating)
 
 
-@st.cache_data(show_spinner=False)
 def find_uploaded_benchmark_column(mmd_df: pd.DataFrame, tenor: str, rating: str) -> str | None:
     """Find an explicitly uploaded benchmark column for rating + tenor.
 
@@ -750,7 +703,6 @@ def find_uploaded_benchmark_column(mmd_df: pd.DataFrame, tenor: str, rating: str
     return None
 
 
-@st.cache_data(show_spinner=False)
 def get_benchmark_curve(mmd_plot: pd.DataFrame, tenor: str, rating: str) -> tuple[pd.Series, dict] | tuple[None, dict]:
     """Return benchmark yield and metadata.
 
@@ -783,7 +735,6 @@ def get_benchmark_curve(mmd_plot: pd.DataFrame, tenor: str, rating: str) -> tupl
     }
 
 
-@st.cache_data(show_spinner=False)
 def benchmark_curve_from_mmd(mmd_plot: pd.DataFrame, mmd_col: str, rating: str) -> pd.Series:
     """Backward-compatible wrapper used by older chart blocks."""
     curve, _meta = get_benchmark_curve(mmd_plot, mmd_col, rating)
@@ -792,7 +743,6 @@ def benchmark_curve_from_mmd(mmd_plot: pd.DataFrame, mmd_col: str, rating: str) 
     return curve
 
 
-@st.cache_data(show_spinner=False)
 def rating_spread_table() -> pd.DataFrame:
     """User-facing spread assumption table in both percentage points and bps."""
     rows = []
@@ -814,13 +764,12 @@ def _detect_mmd_date_column(mmd_df: pd.DataFrame) -> str | None:
     return None
 
 
-@st.cache_data(show_spinner=False)
 def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
     """Convert MMD wide curve data into long benchmark data by maturity year.
 
     Output columns:
     - trade_date: normalized MMD date
-    - maturity_bucket: calendar maturity year, e.g. 2027 / 2028 / 2029 / ...
+    - maturity_bucket: 1Y / 2Y / 3Y / ...
     - benchmark_rating
     - mmd_tenor
     - benchmark_yield
@@ -862,7 +811,6 @@ def make_benchmark_long(mmd_df: pd.DataFrame, rating: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-@st.cache_data(show_spinner=False)
 def build_spread_observations(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -914,7 +862,6 @@ def build_spread_observations(
     return spread_obs.sort_values(["maturity_bucket", "trade_date"])
 
 
-@st.cache_data(show_spinner=False)
 def build_spread_movement_heatmap_data(
     spread_obs: pd.DataFrame,
     windows: dict[str, int] | None = None,
@@ -991,7 +938,6 @@ def build_spread_movement_heatmap_data(
     return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
-@st.cache_data(show_spinner=False)
 def build_spread_level_data(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -1075,7 +1021,6 @@ def build_spread_level_data(
     return compact_maturity_matrix(matrix), pd.DataFrame(audit_rows)
 
 
-@st.cache_data(show_spinner=False)
 def build_issuer_curve_snapshot(
     market_df: pd.DataFrame,
     mmd_df: pd.DataFrame,
@@ -1255,7 +1200,6 @@ def build_column_mapping(df: pd.DataFrame, expected_fields: list[str]) -> dict[s
     return {field: _find_column(df, field) for field in expected_fields}
 
 
-@st.cache_data(show_spinner=False)
 def validate_dataset(
     df: pd.DataFrame,
     dataset_name: str,
@@ -1286,7 +1230,6 @@ def validate_dataset(
     }
 
 
-@st.cache_data(show_spinner=False)
 def validate_basic_values(df: pd.DataFrame, mapping: dict[str, str | None], dataset_type: str) -> list[str]:
     """Soft data-quality checks. These generate warnings instead of killing the app."""
     warnings: list[str] = []
@@ -1423,7 +1366,6 @@ def _issuer_from_source_file(source_file: object) -> str:
     return name.title().replace(" Ca ", " CA ").replace(" Usd", " USD ").replace(" Go ", " GO ")
 
 
-@st.cache_data(show_spinner=False)
 def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
     """Make standardized trade exports self-sufficient for dashboard analytics."""
     if trades_df is None or trades_df.empty:
@@ -1489,17 +1431,12 @@ def _ensure_trade_only_fields(trades_df: pd.DataFrame) -> pd.DataFrame:
         out["maturity_year"] = pd.Series(np.ceil(y_for_year), index=out.index).where(y_for_year.notna())
         out["maturity_year"] = out["maturity_year"].astype("Int64")
 
-    # Dashboard-wide maturity grouping: calendar maturity year labels (2027, 2028, ...).
+    # Dashboard-wide maturity grouping: annual maturity labels (1Y, 2Y, ...).
     # We keep the column name `maturity_bucket` for backward compatibility with existing chart code,
-    # but its values are now calendar maturity years rather than broad ranges or 1Y/2Y labels.
-    if "maturity" in out.columns:
-        _maturity_year = pd.to_datetime(out["maturity"], errors="coerce").dt.year
-        out["maturity_calendar_year"] = _maturity_year.astype("Int64")
-        out["maturity_bucket"] = _maturity_year.apply(
-            lambda v: str(int(v))
-            if pd.notna(v) and int(v) >= CURRENT_ANALYSIS_YEAR and int(v) <= CURRENT_ANALYSIS_YEAR + MAX_MATURITY_YEAR
-            else "Unknown"
-        )
+    # but its values are now maturity-year labels rather than broad ranges.
+    if "maturity_year" in out.columns:
+        _yy = pd.to_numeric(out["maturity_year"], errors="coerce")
+        out["maturity_bucket"] = _yy.apply(lambda v: f"{int(v)}Y" if pd.notna(v) and int(v) >= 1 and int(v) <= MAX_MATURITY_YEAR else "Unknown")
     elif "maturity_bucket" in out.columns:
         out["maturity_bucket"] = out["maturity_bucket"].replace(MATURITY_BUCKET_RENAME).fillna("Unknown")
 
@@ -1562,12 +1499,11 @@ def _parse_trade_index_tenor(index_value: object) -> str | None:
     return f"{min(year, MAX_MATURITY_YEAR)}Y"
 
 
-@st.cache_data(show_spinner=False)
 def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataFrame:
     """Build a benchmark curve table directly from trade-file Index / Index Rate columns.
 
     This makes the MuniPro trade tape the primary benchmark source. Uploaded MMD
-    files become primary benchmark source when provided; trade index rates become fallback.
+    files become fallback only when trade exports do not include usable Index Rate.
     """
     required = {"trade_date", "index", "index_rate"}
     if market_df is None or market_df.empty or not required.issubset(set(market_df.columns)):
@@ -1594,7 +1530,6 @@ def _build_benchmark_curve_from_trade_index(market_df: pd.DataFrame) -> pd.DataF
     return wide.sort_values("Date").reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False)
 def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build issuer / sector reference from trades and optional mapping."""
     if market_df is None or market_df.empty or "issuer" not in market_df.columns:
@@ -1632,7 +1567,6 @@ def _build_issuer_master_from_trades(market_df: pd.DataFrame, issuer_mapping_df:
     return base.sort_values("issuer").reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False)
 def _build_security_reference_from_trades(market_df: pd.DataFrame, optional_bonds_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Create a security reference table from the trade tape, enriched by optional bond data."""
     if market_df is None or market_df.empty or "cusip" not in market_df.columns:
@@ -1685,17 +1619,74 @@ def _is_date_like_col(col: object) -> bool:
 
 
 def _is_mmd_tenor_col(col: object, max_year: int = MMD_MAX_TENOR_YEAR) -> bool:
-    """Return True for tenor columns like 1Y, 01Y, AAA_10Y, MMD 30Y."""
+    """Return True for tenor columns like 1Y, 1-Yr, 01 Yr, AAA_10Y, MMD 30-Year."""
     text = str(col).strip().upper()
     # Keep simple numeric tenor columns and benchmark-labeled tenor columns.
-    match = re.search(r"(?:^|[^0-9])0?([1-9]|[1-3][0-9]|40)\s*Y(?:[^0-9]|$)", text)
+    # Compatible with MMD exports such as: 1-Yr, 2-Yr, 10-Yr, 30-Yr.
+    match = re.search(r"(?:^|[^0-9])0?([1-9]|[1-3][0-9]|40)\s*(?:-|_|\s)?\s*(?:Y|YR|YRS|YEAR|YEARS)(?:[^0-9]|$)", text)
     if not match:
         return False
     year = int(match.group(1))
     return 1 <= year <= max_year
 
 
-@st.cache_data(show_spinner=False)
+def normalize_mmd_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize common MMD tenor column labels to the app's 1Y / 2Y / ... format.
+
+    Examples converted:
+    - 1-Yr, 01-Yr, 1 Yr, 1-Year -> 1Y
+    - AAA 10-Yr, AAA_10 Yr -> AAA_10Y
+    - MMD 30-Year -> MMD_30Y
+
+    This prevents benchmark-source warnings when uploaded MMD files use vendor
+    labels like `1-Yr` while the app expects `1Y`.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+
+    out = df.copy()
+    rename: dict[object, str] = {}
+    used = set(map(str, out.columns))
+
+    for col in out.columns:
+        raw = str(col).strip()
+        if _is_date_like_col(raw):
+            # Keep date as Date so existing date detection works.
+            rename[col] = "Date"
+            continue
+
+        # Bare tenor: 1-Yr / 1 Yr / 1-Year -> 1Y
+        m = re.match(r"^0?([1-9]|[1-3][0-9]|40)\s*(?:-|_|\s)?\s*(?:Y|YR|YRS|YEAR|YEARS)$", raw, flags=re.I)
+        if m:
+            target = f"{int(m.group(1))}Y"
+            rename[col] = target
+            used.add(target)
+            continue
+
+        # Labeled tenor: AAA 10-Yr / AA_10 Yr / MMD 30-Year -> AAA_10Y / AA_10Y / MMD_30Y
+        m = re.match(r"^(.+?)\s*(?:-|_|\s)+0?([1-9]|[1-3][0-9]|40)\s*(?:-|_|\s)?\s*(?:Y|YR|YRS|YEAR|YEARS)$", raw, flags=re.I)
+        if m:
+            prefix = re.sub(r"[^A-Za-z0-9+\-]+", "_", m.group(1).strip()).strip("_")
+            target = f"{prefix}_{int(m.group(2))}Y" if prefix else f"{int(m.group(2))}Y"
+            rename[col] = target
+            used.add(target)
+
+    if rename:
+        out = out.rename(columns=rename)
+        # After renaming, duplicate columns can occur if the file already had both 1-Yr and 1Y.
+        # Keep the first non-null value across duplicates, then remove duplicate names.
+        if out.columns.duplicated().any():
+            combined = {}
+            for col in out.columns:
+                data = out.loc[:, out.columns == col]
+                if isinstance(data, pd.DataFrame) and data.shape[1] > 1:
+                    combined[col] = data.bfill(axis=1).iloc[:, 0]
+                else:
+                    combined[col] = data.iloc[:, 0] if isinstance(data, pd.DataFrame) else data
+            out = pd.DataFrame(combined)
+    return out
+
+
 def _trim_mmd_frame(mmd_df: pd.DataFrame, lookback_years: int = MMD_FALLBACK_LOOKBACK_YEARS) -> pd.DataFrame:
     """Keep only recent dates and needed benchmark tenor columns."""
     if mmd_df is None or mmd_df.empty:
@@ -1724,7 +1715,6 @@ def _trim_mmd_frame(mmd_df: pd.DataFrame, lookback_years: int = MMD_FALLBACK_LOO
     return out[keep_cols].reset_index(drop=True) if keep_cols else out.reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False)
 def read_external_mmd_fallback_file(
     file_name: str,
     payload: bytes,
@@ -1749,7 +1739,9 @@ def read_external_mmd_fallback_file(
     else:
         raw_mmd = read_uploaded_file(io.BytesIO(payload), file_name)
 
+    raw_mmd = normalize_mmd_columns(raw_mmd)
     standardized = standardize_mmd(raw_mmd)
+    standardized = normalize_mmd_columns(standardized)
     return _trim_mmd_frame(standardized, lookback_years=lookback_years)
 
 @st.cache_data(show_spinner="Processing uploaded data...")
@@ -1829,14 +1821,13 @@ def process_uploads(
 
     bonds_df = _build_security_reference_from_trades(market_df, optional_bonds_df)
 
-    # Build both possible benchmark sources, but use only ONE active source.
-    # Updated governance: Uploaded MMD has priority when provided, because it is
-    # the explicit benchmark file supplied by the user/team. Trade Sheet Index /
-    # Index Rate is used only as a fallback when no MMD file is provided.
+    # Build trade-implied benchmark first. If it exists, do NOT read the external
+    # MMD file at all; this prevents benchmark conflict and avoids loading large
+    # MMD histories into memory unnecessarily.
     trade_index_curve_df = _build_benchmark_curve_from_trade_index(market_df)
 
     uploaded_mmd_df = pd.DataFrame()
-    if mmd_payload is not None:
+    if mmd_payload is not None and trade_index_curve_df.empty:
         name, payload = mmd_payload
         uploaded_mmd_df = read_external_mmd_fallback_file(
             file_name=name,
@@ -1852,29 +1843,29 @@ def process_uploads(
     # because dates, tenors, provider conventions, and rounding may differ.
     #
     # Priority rule:
-    #   1) Uploaded MMD = primary source when supplied. Keep the file small: use
-    #      only the study period and necessary 1Y-40Y / rating curve columns.
-    #   2) Trade Sheet Index / Index Rate = fallback when no usable MMD is supplied.
+    #   1) Trade Sheet Index / Index Rate = primary source, because it is tied to
+    #      the same pricing environment as the uploaded trades.
+    #   2) Uploaded MMD = fallback only, used when trade exports do not contain
+    #      usable Index / Index Rate.
     #   3) No benchmark = yield-only analytics still run; benchmark/spread views
     #      are skipped or downgraded.
     # -------------------------------------------------------------------------
-    uploaded_mmd_available = not uploaded_mmd_df.empty
     trade_index_available = not trade_index_curve_df.empty
+    uploaded_mmd_available = not uploaded_mmd_df.empty
 
-    if uploaded_mmd_available:
-        mmd_df = uploaded_mmd_df
-        mmd_df.attrs["benchmark_source_mode"] = "Uploaded MMD"
-        mmd_df.attrs["benchmark_source_priority"] = "Primary"
-        mmd_df.attrs["trade_index_available"] = trade_index_available
-        mmd_df.attrs["benchmark_conflict_policy"] = "Trade Sheet Index / Index Rate ignored because uploaded MMD is available"
-    elif trade_index_available:
+    if trade_index_available:
         mmd_df = trade_index_curve_df
         mmd_df.attrs["benchmark_source_mode"] = "Trade Sheet Index / Index Rate"
-        mmd_df.attrs["benchmark_source_priority"] = "Fallback"
-        mmd_df.attrs["uploaded_mmd_available"] = False
-        mmd_df.attrs["benchmark_conflict_policy"] = "No uploaded MMD found; using trade-sheet Index Rate fallback"
+        mmd_df.attrs["benchmark_source_priority"] = "Primary"
+        mmd_df.attrs["uploaded_mmd_available"] = uploaded_mmd_available
+        mmd_df.attrs["benchmark_conflict_policy"] = "External MMD ignored because trade index data is available"
     else:
-        mmd_df = pd.DataFrame()
+        mmd_df = uploaded_mmd_df
+        if uploaded_mmd_available:
+            mmd_df.attrs["benchmark_source_mode"] = "Uploaded MMD fallback"
+            mmd_df.attrs["benchmark_source_priority"] = "Fallback"
+            mmd_df.attrs["uploaded_mmd_available"] = True
+            mmd_df.attrs["benchmark_conflict_policy"] = "No trade index data found; using uploaded MMD fallback"
 
     return bonds_df, trades_df, issuer_master, market_df, mmd_df, failed_files, duplicates_removed
 
@@ -1886,14 +1877,32 @@ def dataframe_download_button(df: pd.DataFrame, label: str, filename: str):
     st.download_button(label=label, data=csv, file_name=filename, mime="text/csv")
 
 
+def safe_numeric_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return a single numeric-safe Series even when duplicate column names exist.
+
+    Pandas returns a DataFrame instead of a Series when a DataFrame contains
+    duplicate column names. This helper prevents `pd.to_numeric()` TypeError in
+    display tables after complex merges.
+    """
+    data = df[col]
+    if isinstance(data, pd.DataFrame):
+        data = data.bfill(axis=1).iloc[:, 0]
+    return pd.to_numeric(data, errors="coerce")
+
+
+def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicate column names by keeping the first non-null value."""
+    if df is None or df.empty or not df.columns.duplicated().any():
+        return df
+    combined = {}
+    for col in df.columns:
+        data = df.loc[:, df.columns == col]
+        combined[col] = data.bfill(axis=1).iloc[:, 0] if data.shape[1] > 1 else data.iloc[:, 0]
+    return pd.DataFrame(combined)
+
+
 with st.sidebar:
     st.header("1. Trading Data")
-    with st.expander("Performance", expanded=False):
-        st.caption("If you replace files or the app feels stale, clear cached calculations and rerun.")
-        if st.button("Clear cached calculations"):
-            st.cache_data.clear()
-            st.rerun()
-
     trade_files = st.file_uploader(
         "Trade History File(s) — required",
         type=["csv", "xlsx", "xls"],
@@ -1910,23 +1919,21 @@ with st.sidebar:
         bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
         issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
         use_external_mmd_fallback = st.checkbox(
-            "Enable Uploaded MMD Benchmark",
+            "Enable External MMD Fallback",
             value=False,
             help=(
-                "Off by default to prevent memory overload. When enabled and uploaded, MMD becomes the primary benchmark source. "
-                "Keep the MMD file small: include only the study period and necessary 1Y-40Y / rating curve columns."
+                "Off by default to prevent memory overload. The app uses Trade Sheet Index / Index Rate first. "
+                "Only enable this if your trade files do not have usable Index Rate data."
             ),
         )
         mmd_file = st.file_uploader(
-            "MMD Curve File — optional primary benchmark",
+            "MMD Curve File — optional fallback",
             type=["csv", "xlsx", "xls"],
             disabled=not use_external_mmd_fallback,
-            help="When provided, uploaded MMD is used before Trade Sheet Index / Index Rate. Avoid oversized historical files.",
+            help="Loaded only when External MMD Fallback is enabled and trade-sheet Index Rate is unavailable.",
         )
-        if use_external_mmd_fallback:
-            st.caption("When uploaded, MMD is the primary benchmark source. Avoid oversized files; ideally include only the dates/years you are studying and necessary 1Y–40Y columns.")
-        else:
-            st.caption("Uploaded MMD loading is off. Turn it on only when you have a trimmed MMD file for the study period.")
+        if not use_external_mmd_fallback:
+            st.caption("External MMD loading is off. This protects Streamlit memory and avoids benchmark-source conflict.")
 
     with st.expander("Download blank templates", expanded=False):
         template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
@@ -2052,17 +2059,17 @@ benchmark_priority = mmd_df.attrs.get("benchmark_source_priority", "None")
 benchmark_conflict_policy = mmd_df.attrs.get("benchmark_conflict_policy", "No benchmark source selected")
 uploaded_mmd_available = bool(mmd_df.attrs.get("uploaded_mmd_available", False))
 
-if benchmark_source_mode == "Uploaded MMD":
+if benchmark_source_mode == "Trade Sheet Index / Index Rate":
     st.info(
-        "Benchmark source: using the **uploaded MMD file** as the primary benchmark universe. "
-        "Trade Sheet Index / Index Rate is ignored for benchmark calculations to avoid source conflict."
+        "Benchmark source: using **Index / Index Rate from the uploaded trade sheet** as the primary benchmark universe. "
+        "Any uploaded MMD file is treated as fallback only and is not mixed into the same analytics run."
     )
-elif benchmark_source_mode == "Trade Sheet Index / Index Rate":
+elif benchmark_source_mode == "Uploaded MMD fallback":
     st.info(
-        "Benchmark source: using **Index / Index Rate from the uploaded trade sheet** as the fallback benchmark universe because no uploaded MMD file is active."
+        "Benchmark source: using the **uploaded MMD file as fallback** because the trade sheet did not contain usable Index / Index Rate data."
     )
 else:
-    st.warning("No benchmark source detected. Upload a trimmed MMD file or trades with Index / Index Rate for benchmark analytics.")
+    st.warning("No benchmark source detected. Upload trades with Index / Index Rate or provide an MMD file for benchmark analytics.")
 
 with st.expander("Benchmark source governance", expanded=False):
     st.markdown(
@@ -2071,10 +2078,10 @@ This dashboard uses **one benchmark source at a time** to avoid benchmark-source
 
 **Priority hierarchy**
 
-1. **Uploaded MMD file — primary source when provided.**  
-   Keep the file small: include only the study period and necessary 1Y–40Y / rating curve columns.
-2. **Trade Sheet Index / Index Rate — fallback source.**  
-   This is used only when no uploaded MMD file is active.
+1. **Trade Sheet Index / Index Rate — recommended primary source.**  
+   This is preferred because it comes from the same uploaded trade tape and pricing context as the observed trades.
+2. **Uploaded MMD file — fallback only.**  
+   This is used only when the trade sheet does not include usable `Index` / `Index Rate` fields.
 3. **No benchmark source.**  
    Yield-only and liquidity analytics can still run, but benchmark spread analytics are skipped or downgraded.
 
@@ -2142,29 +2149,37 @@ with st.sidebar:
             """
 ### Maturity Year Definition
 
-The dashboard now groups securities by **calendar maturity year** instead of broad ranges or tenor labels.
+The dashboard now groups securities by **integer years to maturity** instead of broad ranges.
 
-**Example:**
+**Formula:**
 
-- If the analysis year is 2026, old `1Y` exposure is displayed as **2027**.
-- A bond maturing in 2034 is displayed under **2034**, not `8Y`.
+`years_to_maturity = (maturity_date - trade_date) / 365.25`
 
-This makes issuer-level analysis easier because users can read the chart as actual maturity years rather than translating tenor buckets mentally.
+**Bucket rule:**
+
+- We use `ceil(years_to_maturity)` for the displayed maturity year.
+- Example: 4.3 years to maturity → **5Y**.
+- This is closer to curve-tenor convention than broad buckets like 1Y / 30Y.
+
+This makes issuer-level analysis easier because you can compare 1Y, 2Y, 3Y, ... securities directly.
             """
         )
 
     issuer_year_values = []
-    if "maturity_bucket" in market_df.columns:
-        issuer_year_values = observed_maturity_years(
-            market_df.loc[market_df["issuer"] == selected_issuer],
-            bucket_col="maturity_bucket",
-            min_observations=1,
+    if "maturity_year" in market_df.columns:
+        issuer_year_values = (
+            market_df.loc[market_df["issuer"] == selected_issuer, "maturity_year"]
+            .dropna()
+            .astype(int)
+            .sort_values()
+            .unique()
+            .tolist()
         )
-    maturity_year_options = ["All"] + issuer_year_values
+    maturity_year_options = ["All"] + [f"{int(y)}Y" for y in issuer_year_values if int(y) >= 1]
     selected_maturity_year = st.selectbox(
         "Maturity Year",
         maturity_year_options,
-        help="Filter securities by calendar maturity year. Example: in 2026, old 1Y exposure appears as 2027.",
+        help="Filter securities by integer years to maturity. Example: 4.3 years to maturity is grouped as 5Y.",
     )
 
     # -----------------------------------------------------------------------------
@@ -2286,7 +2301,7 @@ Recent additions:
             latest_trade = trade_dates.max()
             st.caption(
                 f"📅 Data Coverage:\n"
-                f"{format_mmddyyyy(earliest_trade)} → {format_mmddyyyy(latest_trade)}"
+                f"{earliest_trade:%Y-%m-%d} → {latest_trade:%Y-%m-%d}"
             )
         else:
             st.caption("📅 Data Coverage:\nNo valid trade dates detected")
@@ -2416,7 +2431,7 @@ if not issuer_trades.empty and trade_date_filter_enabled and selected_trade_date
 section_anchor("executive-snapshot", "Executive Snapshot")
 
 latest_trade_display = (
-    format_mmddyyyy(issuer_trades["trade_date"].max())
+    issuer_trades["trade_date"].max().strftime("%Y-%m-%d")
     if not issuer_trades.empty
     else "No trades"
 )
@@ -2442,9 +2457,9 @@ This section groups uploaded trade rows by **trade date** and **issuer**, then p
 
 **Benchmark logic:**
 
-- **Primary source = uploaded MMD file**, when provided. Keep the file trimmed to the study period and necessary curve columns to avoid memory overload.
-- **Fallback source = trade-sheet `Index` / `Index Rate`**, used only when no MMD file is active.
-- The app intentionally uses **one benchmark universe at a time**; it does not mix uploaded MMD rates with trade-sheet index rates in the same run.
+- **Primary source = trade-sheet `Index` / `Index Rate`**, when available. This keeps benchmark spread analytics aligned with the same pricing environment as the uploaded MuniPro trades.
+- **Uploaded MMD is fallback only** and is used only when trade-sheet index data is unavailable.
+- The app intentionally uses **one benchmark universe at a time**; it does not mix trade-sheet index rates with external MMD rates in the same run.
 - If explicit non-AAA curves are unavailable, the app can still use visible rating-spread assumptions as an analytical approximation.
 - Units in the code are percentage points: `0.10 = 10 bps`.
 - This is an internal analytical benchmark, not a live Bloomberg/BVAL/ICE curve. Replace assumptions with firm-approved or vendor curves when available.
@@ -2601,7 +2616,7 @@ This chart shows a **cross-sectional yield curve** by maturity year, rather than
 
 **Issuer curve logic:**
 
-- The issuer curve is built from uploaded trade yields by maturity year: **2027 / 2028 / 2029 / ...**.
+- The issuer curve is built from uploaded trade yields by maturity year: **1Y / 2Y / 3Y / ...**.
 - Default aggregation uses **average yield over the latest selected window** ending on the curve date. This reduces noise from sparse municipal trading.
 - You can also use **latest trade per bucket** when you want the most recent observation in each maturity year.
 
@@ -3103,7 +3118,7 @@ else:
                                             audit_curve[c] = pd.to_numeric(audit_curve[c], errors="coerce").round(2)
                                     st.caption(
                                         f"Issuer lookback: latest {cs_lookback} days. "
-                                        f"Benchmark date: {format_mmddyyyy(cs_benchmark_date)}."
+                                        f"Benchmark date: {cs_benchmark_date.strftime('%Y-%m-%d')}."
                                     )
                                     st.dataframe(audit_curve, use_container_width=True, hide_index=True)
 
@@ -3495,8 +3510,8 @@ else:
                                         {"Metric": "Selected issuer", "Value": selected_issuer},
                                         {"Metric": "Maturity year", "Value": wf_bucket},
                                         {"Metric": "MMD tenor", "Value": wf_tenor},
-                                        {"Metric": "Latest issuer trade date", "Value": format_mmddyyyy(wf_latest_trade_date)},
-                                        {"Metric": "Benchmark curve date", "Value": format_mmddyyyy(wf_benchmark_date)},
+                                        {"Metric": "Latest issuer trade date", "Value": wf_latest_trade_date.strftime("%Y-%m-%d")},
+                                        {"Metric": "Benchmark curve date", "Value": wf_benchmark_date.strftime("%Y-%m-%d")},
                                         {"Metric": "Issuer yield lookback", "Value": f"{wf_lookback_days} days"},
                                         {"Metric": "Trade count in lookback", "Value": f"{wf_trade_count:,}"},
                                         {"Metric": "Total trade amount in lookback", "Value": f"{wf_total_trade_amount:,.0f}"},
@@ -3661,7 +3676,7 @@ with mn_tab1:
                     if notes:
                         event_rows.append(
                             {
-                                "Date": format_mmddyyyy(row["trade_date"]),
+                                "Date": row["trade_date"].strftime("%Y-%m-%d"),
                                 "Narrative Signal": "; ".join(notes),
                                 "Trade Count": int(row["trade_count"]),
                                 "Total Trade Amount": row["total_trade_amount"],
@@ -4270,7 +4285,7 @@ Use this ranking as a first-pass screen, then review the CUSIP-level drilldown a
                                         if c in audit_df.columns:
                                             audit_df[c] = pd.to_numeric(audit_df[c], errors="coerce").round(2)
                                     st.caption(
-                                        f"Benchmark date used: {format_mmddyyyy(peer_benchmark_date)}. "
+                                        f"Benchmark date used: {peer_benchmark_date.strftime('%Y-%m-%d')}. "
                                         f"Lookback window: {peer_window_label}."
                                     )
                                     st.dataframe(audit_df, use_container_width=True, hide_index=True)
@@ -4653,7 +4668,7 @@ else:
                                             if c in audit_xrv.columns:
                                                 audit_xrv[c] = pd.to_numeric(audit_xrv[c], errors="coerce").round(2)
                                         st.caption(
-                                            f"Benchmark date used: {format_mmddyyyy(xrv_benchmark_date)}. "
+                                            f"Benchmark date used: {xrv_benchmark_date.strftime('%Y-%m-%d')}. "
                                             f"Lookback window: {xrv_window}."
                                         )
                                         st.dataframe(audit_xrv, use_container_width=True, hide_index=True)
@@ -5325,7 +5340,7 @@ else:
                     s1, s2, s3, s4 = st.columns(4)
                     s1.metric("Candidates", f"{len(candidates):,}")
                     s2.metric("Benchmark", f"{screen_rating}")
-                    s3.metric("Benchmark Date", format_mmddyyyy(screen_benchmark_date))
+                    s3.metric("Benchmark Date", screen_benchmark_date.strftime("%Y-%m-%d"))
                     s4.metric("Universe CUSIPs", f"{len(screen_summary):,}")
 
                     if candidates.empty:
@@ -6069,11 +6084,11 @@ ai_context = {
     "bucket": ai_bucket,
     "benchmark": ai_rating,
     "period": ai_period,
-    "analytics_as_of": format_mmddyyyy_hm(pd.Timestamp.now()),
+    "analytics_as_of": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
     "executive_snapshot": {
         "securities": len(issuer_bonds),
         "trades_current_filter": len(issuer_trades),
-        "latest_trade": format_mmddyyyy(issuer_trades["trade_date"].max()) if not issuer_trades.empty else None,
+        "latest_trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else None,
     },
     "signals": {},
     "market_context_request": {
@@ -6126,7 +6141,7 @@ try:
             "current_spread_bps": round(ai_current_spread, 2),
             "spread_change_bps": None if ai_spread_change is None else round(ai_spread_change, 2),
             "historical_percentile_1y": None if ai_percentile is None else round(ai_percentile, 1),
-            "latest_spread_date": format_mmddyyyy(ai_latest_date),
+            "latest_spread_date": ai_latest_date.strftime("%Y-%m-%d"),
             "benchmark_source": ai_latest.get("benchmark_source"),
             "benchmark_column": ai_latest.get("source_column"),
         }
@@ -6712,23 +6727,6 @@ else:
             "Cells show change in spread, in basis points, from the latest available observation to each lookback window."
         )
 
-    with st.expander("Heatmap display settings", expanded=False):
-        heatmap_display_mode = st.radio(
-            "Display mode",
-            ["Heatmap + top movers", "Top movers only", "Full heatmap"],
-            index=0,
-            horizontal=True,
-            help="Use top movers when the heatmap has too many maturity years to read comfortably.",
-        )
-        heatmap_max_rows = st.slider(
-            "Maximum maturity years shown in compact heatmap",
-            min_value=5,
-            max_value=30,
-            value=15,
-            step=1,
-            help="Rows are selected by largest absolute spread movement across lookback windows.",
-        )
-
     heatmap_spread_obs = build_spread_observations(
         market_df=market_df,
         mmd_df=mmd_df,
@@ -6746,61 +6744,25 @@ else:
         if heatmap_matrix.empty or heatmap_matrix.isna().all().all():
             st.info("Not enough historical spread observations to calculate movement across the selected windows yet.")
         else:
-            # A full calendar-year heatmap can become dense. Show a compact view by default,
-            # selected by maturity years with the largest absolute movement.
-            heatmap_rank = heatmap_matrix.abs().max(axis=1).sort_values(ascending=False)
-            compact_index = sorted(heatmap_rank.head(int(heatmap_max_rows)).index, key=maturity_year_sort_key)
-            compact_heatmap_matrix = heatmap_matrix.loc[compact_index] if compact_index else heatmap_matrix
-
-            top_movers = (
-                heatmap_matrix.reset_index(names="maturity_bucket")
-                .melt(id_vars="maturity_bucket", var_name="lookback_window", value_name="spread_movement_bps")
-                .dropna(subset=["spread_movement_bps"])
+            heatmap_text = heatmap_matrix.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
+            heatmap_fig = px.imshow(
+                heatmap_matrix.astype(float),
+                x=heatmap_matrix.columns,
+                y=heatmap_matrix.index,
+                color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
+                color_continuous_midpoint=0,
+                aspect="auto",
+                title=f"{selected_issuer} Spread Movement vs {heatmap_rating} Curve",
+                labels={"x": "Lookback Window", "y": "Maturity Year", "color": "Spread Movement (bps)"},
             )
-            if not top_movers.empty:
-                top_movers["abs_movement_bps"] = top_movers["spread_movement_bps"].abs()
-                top_movers = top_movers.sort_values("abs_movement_bps", ascending=False).head(12)
-                st.subheader("Top Spread Movers")
-                st.dataframe(
-                    top_movers.rename(
-                        columns={
-                            "maturity_bucket": "Maturity Year",
-                            "lookback_window": "Lookback Window",
-                            "spread_movement_bps": "Spread Movement (bps)",
-                            "abs_movement_bps": "Absolute Movement (bps)",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            if heatmap_display_mode != "Top movers only":
-                matrix_to_plot = compact_heatmap_matrix if heatmap_display_mode == "Heatmap + top movers" else heatmap_matrix
-                heatmap_text = matrix_to_plot.map(lambda x: "" if pd.isna(x) else f"{x:+.1f} bp")
-                heatmap_fig = px.imshow(
-                    matrix_to_plot.astype(float),
-                    x=matrix_to_plot.columns,
-                    y=matrix_to_plot.index,
-                    color_continuous_scale=["#1a9850", "#f7f7f7", "#d73027"],
-                    color_continuous_midpoint=0,
-                    aspect="auto",
-                    title=f"{selected_issuer} Spread Movement vs {heatmap_rating} Curve",
-                    labels={"x": "Lookback Window", "y": "Maturity Year", "color": "Spread Movement (bps)"},
-                )
-                heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
-                heatmap_height = max(320, min(760, 110 + 42 * len(matrix_to_plot.index)))
-                heatmap_fig.update_layout(height=heatmap_height)
-                st.plotly_chart(heatmap_fig, use_container_width=True)
-
-                if heatmap_display_mode == "Heatmap + top movers" and len(heatmap_matrix.index) > len(matrix_to_plot.index):
-                    st.caption(
-                        f"Compact heatmap showing {len(matrix_to_plot.index)} of {len(heatmap_matrix.index)} maturity years, selected by largest absolute movement. "
-                        "Switch to Full heatmap in display settings to see every maturity year."
-                    )
+            heatmap_fig.update_traces(text=heatmap_text.values, texttemplate="%{text}", hovertemplate="Maturity=%{y}<br>Window=%{x}<br>Movement=%{z:.1f} bp<extra></extra>")
+            heatmap_height = max(320, min(760, 110 + 38 * len(heatmap_matrix.index)))
+            heatmap_fig.update_layout(height=heatmap_height)
+            st.plotly_chart(heatmap_fig, use_container_width=True)
 
             latest_obs_date = heatmap_spread_obs["trade_date"].max()
             st.caption(
-                f"Latest available spread observation used: {format_mmddyyyy(latest_obs_date)}. "
+                f"Latest available spread observation used: {latest_obs_date.strftime('%Y-%m-%d')}. "
                 "Positive values indicate spread widening; negative values indicate spread tightening."
             )
 
@@ -6810,9 +6772,6 @@ else:
                     "historical_date", "historical_spread_bps", "spread_movement_bps", "note",
                 ]
                 audit_display = heatmap_audit[[c for c in display_cols if c in heatmap_audit.columns]].copy()
-                for c in ["latest_date", "target_date", "historical_date"]:
-                    if c in audit_display.columns:
-                        audit_display[c] = audit_display[c].apply(format_mmddyyyy)
                 for c in ["latest_spread_bps", "historical_spread_bps", "spread_movement_bps"]:
                     if c in audit_display.columns:
                         audit_display[c] = pd.to_numeric(audit_display[c], errors="coerce").round(2)
@@ -7168,10 +7127,10 @@ else:
                             with st.expander("Drilldown benchmark/audit details", expanded=False):
                                 st.markdown(
                                     f"""
-- Latest CUSIP trade date used: **{format_mmddyyyy(dd_latest_date)}**
-- Current window start: **{format_mmddyyyy(dd_current_start)}**
-- Historical target date: **{format_mmddyyyy(dd_hist_target)}**
-- Benchmark date: **{format_mmddyyyy(dd_benchmark_date)}**
+- Latest CUSIP trade date used: **{dd_latest_date.strftime('%Y-%m-%d')}**
+- Current window start: **{dd_current_start.strftime('%Y-%m-%d')}**
+- Historical target date: **{dd_hist_target.strftime('%Y-%m-%d')}**
+- Benchmark date: **{dd_benchmark_date.strftime('%Y-%m-%d')}**
 - Benchmark source: **{dd_meta.get('benchmark_source')}**
 - Source column: **{dd_meta.get('source_column')}**
 - Benchmark yield: **{dd_benchmark_yield:.4f}%**
@@ -7190,7 +7149,7 @@ This scatter plot maps individual CUSIPs by **tradability** and **relative value
 - **X-axis = Liquidity Score**: higher means more actively traded, larger traded amount, more recent activity, and less staleness.
 - **Y-axis = Spread to Benchmark**: higher means the bond is trading cheaper versus the selected benchmark curve.
 - **Bubble size = Total Trade Amount**: larger dots indicate more secondary-market trading volume.
-- **Color = Maturity Year**: calendar maturity year, e.g. 2027 / 2028 / 2029.
+- **Color = Maturity Year**: 1Y / 2Y / 3Y / ....
 
 **Quadrants:**
 
@@ -7565,9 +7524,10 @@ else:
                 ]
                 display_cols = [c for c in display_cols if c in rv_summary.columns]
                 rv_display = rv_summary[display_cols].copy()
+                rv_display = dedupe_columns(rv_display)
                 for c in ["liquidity_score", rv_y_axis_col, "avg_yield", "benchmark_yield", "turnover_ratio", "avg_price"]:
                     if c in rv_display.columns:
-                        rv_display[c] = pd.to_numeric(rv_display[c], errors="coerce").round(2)
+                        rv_display[c] = safe_numeric_series(rv_display, c).round(2)
                 st.dataframe(
                     rv_display.sort_values([rv_y_axis_col, "liquidity_score"], ascending=False),
                     use_container_width=True,
@@ -7992,12 +7952,12 @@ export_options = st.multiselect(
 selected_export_charts = [(name, fig) for name, fig in export_chart_items if name in export_options]
 
 export_meta = {
-    "Generated": format_mmddyyyy_hm(pd.Timestamp.now()),
+    "Generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
     "Selected Issuer": selected_issuer,
     "Sector": selected_sector,
     "Securities": f"{len(issuer_bonds):,}",
     "Trades in Current Filter": f"{len(issuer_trades):,}",
-    "Latest Trade": format_mmddyyyy(issuer_trades["trade_date"].max()) if not issuer_trades.empty else "No trades",
+    "Latest Trade": issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades",
 }
 
 report_html_parts = [
@@ -8205,8 +8165,8 @@ This avoids adding fragile report-generation dependencies while keeping the work
         """
     )
 
-latest_trade_text = format_mmddyyyy(issuer_trades["trade_date"].max()) if not issuer_trades.empty else "No trades"
-summary_timestamp = format_mmddyyyy_hm(pd.Timestamp.now())
+latest_trade_text = issuer_trades["trade_date"].max().strftime("%Y-%m-%d") if not issuer_trades.empty else "No trades"
+summary_timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
 summary_lines = [
     f"# Municipal Secondary Market Dashboard Summary",
     "",
