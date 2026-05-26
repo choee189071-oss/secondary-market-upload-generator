@@ -1601,6 +1601,89 @@ def _build_security_reference_from_trades(market_df: pd.DataFrame, optional_bond
 
     return ref.reset_index(drop=True)
 
+
+# -----------------------------------------------------------------------------
+# Memory-safe external MMD fallback loader
+# -----------------------------------------------------------------------------
+# External MMD files can be very large, especially if they contain daily 1Y-40Y
+# history across many years. Because the trade sheet's Index / Index Rate is the
+# preferred benchmark source, the app should not read a large MMD file unless it
+# actually needs fallback benchmark data.
+MMD_FALLBACK_LOOKBACK_YEARS = 2
+MMD_MAX_TENOR_YEAR = 40
+
+
+def _is_date_like_col(col: object) -> bool:
+    key = _normalize_col_name(col)
+    return key in {"date", "trade date", "pricing date", "curve date", "mmd date"}
+
+
+def _is_mmd_tenor_col(col: object, max_year: int = MMD_MAX_TENOR_YEAR) -> bool:
+    """Return True for tenor columns like 1Y, 01Y, AAA_10Y, MMD 30Y."""
+    text = str(col).strip().upper()
+    # Keep simple numeric tenor columns and benchmark-labeled tenor columns.
+    match = re.search(r"(?:^|[^0-9])0?([1-9]|[1-3][0-9]|40)\s*Y(?:[^0-9]|$)", text)
+    if not match:
+        return False
+    year = int(match.group(1))
+    return 1 <= year <= max_year
+
+
+def _trim_mmd_frame(mmd_df: pd.DataFrame, lookback_years: int = MMD_FALLBACK_LOOKBACK_YEARS) -> pd.DataFrame:
+    """Keep only recent dates and needed benchmark tenor columns."""
+    if mmd_df is None or mmd_df.empty:
+        return pd.DataFrame()
+
+    out = mmd_df.copy()
+    date_col = _detect_mmd_date_column(out)
+    if date_col is None:
+        return out
+
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    out = out.dropna(subset=[date_col])
+    if not out.empty:
+        cutoff = out[date_col].max() - pd.DateOffset(years=int(lookback_years))
+        out = out[out[date_col] >= cutoff].copy()
+
+    keep_cols = [date_col]
+    for col in out.columns:
+        if col == date_col:
+            continue
+        if _is_mmd_tenor_col(col):
+            keep_cols.append(col)
+
+    # Preserve any supported curve columns after standardization, but drop unrelated heavy columns.
+    keep_cols = [c for c in keep_cols if c in out.columns]
+    return out[keep_cols].reset_index(drop=True) if keep_cols else out.reset_index(drop=True)
+
+
+def read_external_mmd_fallback_file(
+    file_name: str,
+    payload: bytes,
+    lookback_years: int = MMD_FALLBACK_LOOKBACK_YEARS,
+) -> pd.DataFrame:
+    """Memory-aware MMD reader used only when external MMD fallback is enabled.
+
+    CSV files are read with a reduced column set where possible. Excel files are
+    still read through the standard reader, then trimmed immediately.
+    """
+    suffix = Path(file_name).suffix.lower()
+
+    if suffix == ".csv":
+        # First pass: only read headers so we can avoid loading unrelated columns.
+        header = pd.read_csv(io.BytesIO(payload), nrows=0)
+        usecols = [c for c in header.columns if _is_date_like_col(c) or _is_mmd_tenor_col(c)]
+        if not usecols:
+            # Fall back to ordinary reader if the column names are unusual.
+            raw_mmd = read_uploaded_file(io.BytesIO(payload), file_name)
+        else:
+            raw_mmd = pd.read_csv(io.BytesIO(payload), usecols=usecols)
+    else:
+        raw_mmd = read_uploaded_file(io.BytesIO(payload), file_name)
+
+    standardized = standardize_mmd(raw_mmd)
+    return _trim_mmd_frame(standardized, lookback_years=lookback_years)
+
 @st.cache_data(show_spinner="Processing uploaded data...")
 def process_uploads(
     trade_payloads: list[tuple[str, bytes]],
@@ -1678,13 +1761,19 @@ def process_uploads(
 
     bonds_df = _build_security_reference_from_trades(market_df, optional_bonds_df)
 
-    uploaded_mmd_df = pd.DataFrame()
-    if mmd_payload is not None:
-        name, payload = mmd_payload
-        raw_mmd = read_uploaded_file(io.BytesIO(payload), name)
-        uploaded_mmd_df = standardize_mmd(raw_mmd)
-
+    # Build trade-implied benchmark first. If it exists, do NOT read the external
+    # MMD file at all; this prevents benchmark conflict and avoids loading large
+    # MMD histories into memory unnecessarily.
     trade_index_curve_df = _build_benchmark_curve_from_trade_index(market_df)
+
+    uploaded_mmd_df = pd.DataFrame()
+    if mmd_payload is not None and trade_index_curve_df.empty:
+        name, payload = mmd_payload
+        uploaded_mmd_df = read_external_mmd_fallback_file(
+            file_name=name,
+            payload=payload,
+            lookback_years=MMD_FALLBACK_LOOKBACK_YEARS,
+        )
 
     # -------------------------------------------------------------------------
     # Benchmark source hierarchy
@@ -1745,7 +1834,22 @@ with st.sidebar:
     with st.expander("Optional Bond / Issuer / MMD files", expanded=False):
         bond_file = st.file_uploader("Bond Reference File — optional enrichment", type=["csv", "xlsx", "xls"])
         issuer_mapping_file = st.file_uploader("Issuer / Sector Mapping — optional", type=["csv", "xlsx", "xls"])
-        mmd_file = st.file_uploader("MMD Curve File — optional fallback", type=["csv", "xlsx", "xls"])
+        use_external_mmd_fallback = st.checkbox(
+            "Enable External MMD Fallback",
+            value=False,
+            help=(
+                "Off by default to prevent memory overload. The app uses Trade Sheet Index / Index Rate first. "
+                "Only enable this if your trade files do not have usable Index Rate data."
+            ),
+        )
+        mmd_file = st.file_uploader(
+            "MMD Curve File — optional fallback",
+            type=["csv", "xlsx", "xls"],
+            disabled=not use_external_mmd_fallback,
+            help="Loaded only when External MMD Fallback is enabled and trade-sheet Index Rate is unavailable.",
+        )
+        if not use_external_mmd_fallback:
+            st.caption("External MMD loading is off. This protects Streamlit memory and avoids benchmark-source conflict.")
 
     with st.expander("Download blank templates", expanded=False):
         template_download_button(TRADE_REQUIRED + TRADE_RECOMMENDED + TRADE_OPTIONAL, "Trade template CSV", "trade_history_template.csv")
@@ -1764,7 +1868,7 @@ if not trade_files:
 bond_payload = (bond_file.name, bond_file.getvalue()) if bond_file else None
 trade_payloads = [(f.name, f.getvalue()) for f in trade_files]
 issuer_mapping_payload = (issuer_mapping_file.name, issuer_mapping_file.getvalue()) if issuer_mapping_file else None
-mmd_payload = (mmd_file.name, mmd_file.getvalue()) if mmd_file else None
+mmd_payload = (mmd_file.name, mmd_file.getvalue()) if (use_external_mmd_fallback and mmd_file) else None
 
 # -----------------------------------------------------------------------------
 # File-readiness gate: inspect the uploaded files before running full analytics.
