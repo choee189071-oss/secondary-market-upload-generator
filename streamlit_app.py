@@ -188,6 +188,106 @@ Rules:
         return f"AI Commentary Error: {str(e)}"
 
 
+def generate_ai_section_readthrough(
+    section_title: str,
+    python_quote: str,
+    evidence: list[str] | None = None,
+    model: str = "gpt-4.1-mini",
+) -> str:
+    """Lightweight AI polish layer for one section.
+
+    The numeric facts are produced by Python first. The AI only rewrites them into
+    senior-analyst slide language and must not invent new numbers or causality.
+    """
+    if not OPENAI_AVAILABLE or client is None:
+        return (
+            "AI section read-through unavailable. Confirm that `openai` is in requirements.txt "
+            "and `OPENAI_API_KEY` is configured in Streamlit Secrets."
+        )
+
+    payload = {
+        "section_title": section_title,
+        "python_generated_quote": python_quote,
+        "calculation_evidence": evidence or [],
+        "output_rules": [
+            "Return 2-3 concise bullets only.",
+            "Use only the quote and evidence provided.",
+            "Do not invent market news, causality, ratings changes, or additional numbers.",
+            "Write in senior municipal fixed-income analyst style.",
+            "Make the language slide-ready for a public finance / trading audience.",
+            "If the evidence is thin, explicitly phrase the conclusion as a screening signal."
+        ],
+    }
+
+    try:
+        response = client.responses.create(
+            model=model,
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a senior municipal bond analyst. Convert Python-generated dashboard facts "
+                        "into concise, evidence-linked slide bullets. Do not add unsupported facts."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload, indent=2, default=str)},
+            ],
+            temperature=0.2,
+            max_output_tokens=350,
+        )
+        return response.output_text
+    except Exception as e:
+        return f"AI Section Read-through Error: {str(e)}"
+
+
+def answer_dashboard_question_with_ai(
+    context_package: dict,
+    user_question: str,
+    model: str = "gpt-4.1-mini",
+) -> str:
+    """Single centralized analyst copilot for dashboard questions.
+
+    This is intentionally centralized rather than repeated under every chart.
+    """
+    if not OPENAI_AVAILABLE or client is None:
+        return (
+            "AI dashboard assistant unavailable. Confirm that `openai` is in requirements.txt "
+            "and `OPENAI_API_KEY` is configured in Streamlit Secrets."
+        )
+
+    payload = {
+        "dashboard_context_package": context_package,
+        "user_question": user_question,
+        "rules": [
+            "Answer using only the structured dashboard context package.",
+            "Do not invent issuer news, market events, ratings actions, or recommendations.",
+            "Separate data-backed observations from interpretation.",
+            "If the context package is insufficient, say what additional data is needed.",
+            "Keep the answer concise and desk-oriented."
+        ],
+    }
+    try:
+        response = client.responses.create(
+            model=model,
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a municipal secondary-market analyst copilot embedded in a dashboard. "
+                        "You help users interpret dashboard signals without inventing unsupported facts."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload, indent=2, default=str)},
+            ],
+            temperature=0.2,
+            max_output_tokens=700,
+        )
+        return response.output_text
+    except Exception as e:
+        return f"AI Dashboard Assistant Error: {str(e)}"
+
+
+
 
 from data_utils import (
     build_issuer_master,
@@ -683,7 +783,7 @@ def _first_existing_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 
 
 def _render_slide_quote(title: str, quote: str, evidence: list[str] | None = None, expanded: bool = False):
-    """Render a compact slide-ready quote plus optional calculation evidence."""
+    """Render a compact slide-ready quote plus optional calculation evidence and AI polish."""
     if not quote:
         return
     st.markdown(f"**Analyst read-through — {title}**")
@@ -692,6 +792,30 @@ def _render_slide_quote(title: str, quote: str, evidence: list[str] | None = Non
         with st.expander("Evidence / calculation details", expanded=expanded):
             for item in evidence:
                 st.markdown(f"- {item}")
+
+    # Optional per-section AI read-through.
+    # Python remains the source of truth for numbers; AI only polishes the narrative.
+    safe_key = re.sub(r"[^a-zA-Z0-9_]+", "_", str(title)).strip("_").lower()[:60]
+    with st.expander("AI read-through polish", expanded=False):
+        st.caption(
+            "Uses the Python-generated quote and evidence above. The AI is instructed not to invent numbers or causes."
+        )
+        ai_model_for_section = st.selectbox(
+            "Section AI model",
+            ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"],
+            index=0,
+            key=f"section_ai_model_{safe_key}",
+        )
+        if st.button("Generate polished section bullets", key=f"section_ai_button_{safe_key}"):
+            with st.spinner("Generating section read-through..."):
+                st.session_state[f"section_ai_output_{safe_key}"] = generate_ai_section_readthrough(
+                    section_title=title,
+                    python_quote=quote,
+                    evidence=evidence or [],
+                    model=ai_model_for_section,
+                )
+        if f"section_ai_output_{safe_key}" in st.session_state:
+            st.markdown(st.session_state[f"section_ai_output_{safe_key}"])
 
 
 def render_spread_trend_readthrough(df: pd.DataFrame, primary_issuer: str, compare_issuers: list[str] | None = None):
@@ -8828,6 +8952,34 @@ except Exception as exc:
 st.subheader("AI Context Package")
 with st.expander("Review structured evidence before sending to AI", expanded=False):
     st.json(ai_context)
+
+st.subheader("Ask the Dashboard Analyst")
+st.caption(
+    "Use this as one centralized AI copilot for questions about the selected issuer, benchmark, bucket, and dashboard signals."
+)
+ask_ai_question = st.text_area(
+    "Ask a context question",
+    placeholder="Example: What should I say about this issuer in a slide? Is this cheapness more likely spread-driven or liquidity-driven?",
+    key="dashboard_ai_question",
+)
+ask_ai_model = st.selectbox(
+    "Dashboard assistant model",
+    ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"],
+    index=0,
+    key="dashboard_ai_question_model",
+)
+if st.button("Ask AI Analyst", key="ask_dashboard_ai_button"):
+    if not ask_ai_question.strip():
+        st.warning("Type a question first.")
+    else:
+        with st.spinner("Reading dashboard context..."):
+            st.session_state["dashboard_ai_answer"] = answer_dashboard_question_with_ai(
+                context_package=ai_context,
+                user_question=ask_ai_question,
+                model=ask_ai_model,
+            )
+if "dashboard_ai_answer" in st.session_state:
+    st.markdown(st.session_state["dashboard_ai_answer"])
 
 # -----------------------------
 # Controlled retrieval + synthesis workflow
