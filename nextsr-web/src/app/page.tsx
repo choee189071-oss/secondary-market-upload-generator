@@ -1,8 +1,9 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import type {
   ActivityPoint,
+  BenchmarkAuditRow,
   CrossIssuerRvPoint,
   CurvePoint,
   CurveShapeMetric,
@@ -16,6 +17,8 @@ import type {
   PeerRvPoint,
   PositionPoint,
   ScenarioShockPoint,
+  SecurityDetail,
+  SecurityTradePoint,
   SecurityCandidate,
   SpreadAttributionPoint,
   SpreadMovementPoint,
@@ -66,7 +69,9 @@ function BarMetricChart<T>({ data, label, value, tone = "teal" }: { data: T[]; l
         const x = 52 + index * barWidth;
         return (
           <g key={`${label(point)}-${index}`}>
-            <rect className={`bar ${tone}`} height={height} width={Math.max(7, barWidth - 8)} x={x} y={230 - height} />
+            <rect className={`bar ${tone}`} height={height} width={Math.max(7, barWidth - 8)} x={x} y={230 - height}>
+              <title>{`${label(point)}: ${formatNumber(rawValue)}`}</title>
+            </rect>
             {index % Math.ceil(data.length / 12 || 1) === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{label(point)}</text> : null}
           </g>
         );
@@ -98,7 +103,7 @@ function MiniTable<T>({ columns, rows }: { columns: Array<{ key: string; header:
   );
 }
 
-function IssuerCurveChart({ data }: { data: CurvePoint[] }) {
+function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { data: CurvePoint[]; showIssuer?: boolean; showBenchmark?: boolean }) {
   const values = data.flatMap((point) => [point.issuer_yield, point.benchmark_yield]).filter((value): value is number => value !== null);
   if (!data.length || !values.length) {
     return <EmptyChart />;
@@ -122,11 +127,15 @@ function IssuerCurveChart({ data }: { data: CurvePoint[] }) {
           </g>
         );
       })}
-      <polyline className="line benchmark" points={linePath(data, x, (point) => y(point.benchmark_yield))} />
-      <polyline className="line issuer" points={linePath(data, x, (point) => y(point.issuer_yield))} />
-      {data.filter((point) => point.issuer_yield !== null).map((point) => (
-        <circle className="dot issuer-dot" cx={x(point)} cy={y(point.issuer_yield) ?? 0} key={point.maturity_bucket} r="3.4" />
-      ))}
+      {showBenchmark ? <polyline className="line benchmark" points={linePath(data, x, (point) => y(point.benchmark_yield))} /> : null}
+      {showIssuer ? <polyline className="line issuer" points={linePath(data, x, (point) => y(point.issuer_yield))} /> : null}
+      {showIssuer
+        ? data.filter((point) => point.issuer_yield !== null).map((point) => (
+            <circle className="dot issuer-dot" cx={x(point)} cy={y(point.issuer_yield) ?? 0} key={point.maturity_bucket} r="3.4">
+              <title>{`${point.maturity_bucket}: issuer ${point.issuer_yield ?? "N/A"}%, benchmark ${point.benchmark_yield ?? "N/A"}%, spread ${point.spread_bps ?? "N/A"} bps`}</title>
+            </circle>
+          ))
+        : null}
       {[1, 5, 10, 15, 20, 25, 30, 35, 40].map((year) => (
         <text className="axis-label" key={year} x={42 + ((year - 1) / 39) * 716} y="324" textAnchor="middle">{year}Y</text>
       ))}
@@ -157,6 +166,11 @@ function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
       })}
       <line className="zero-line" x1="42" x2="758" y1={y(0)} y2={y(0)} />
       <polyline className="line spread" points={linePath(data, x, (point) => y(point.spread_bps))} />
+      {data.map((point, index) => (
+        <circle className="dot issuer-dot" cx={x(point, index)} cy={y(point.spread_bps)} key={`${point.date}-${index}`} r="3">
+          <title>{`${point.date}: ${point.spread_bps} bps; yield ${point.avg_yield}%; benchmark ${point.benchmark_yield}%`}</title>
+        </circle>
+      ))}
       <text className="axis-label" x="42" y="324">{data[0].date}</text>
       <text className="axis-label" x="758" y="324" textAnchor="end">{data[data.length - 1].date}</text>
     </svg>
@@ -177,7 +191,9 @@ function ActivityChart({ data }: { data: ActivityPoint[] }) {
         const x = 52 + index * barWidth;
         return (
           <g key={point.month}>
-            <rect className="bar activity" height={height} width={Math.max(8, barWidth - 8)} x={x} y={230 - height} />
+            <rect className="bar activity" height={height} width={Math.max(8, barWidth - 8)} x={x} y={230 - height}>
+              <title>{`${point.month}: ${point.trade_count.toLocaleString()} trades; ${point.total_trade_amount.toLocaleString()} par`}</title>
+            </rect>
             {index % 2 === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{point.month.slice(5)}</text> : null}
           </g>
         );
@@ -187,7 +203,7 @@ function ActivityChart({ data }: { data: ActivityPoint[] }) {
   );
 }
 
-function PositioningChart({ data }: { data: PositionPoint[] }) {
+function PositioningChart({ data, selectedCusip, onSelect }: { data: PositionPoint[]; selectedCusip?: string; onSelect?: (cusip: string) => void }) {
   const points = data.filter((point) => point.spread_bps !== null && point.liquidity_score !== null);
   if (!points.length) {
     return <EmptyChart />;
@@ -212,12 +228,15 @@ function PositioningChart({ data }: { data: PositionPoint[] }) {
       })}
       {points.slice(0, 60).map((point) => (
         <circle
-          className={point.signal.includes("Wide") ? "bubble hot" : "bubble"}
+          className={`${point.signal.includes("Wide") ? "bubble hot" : "bubble"} ${point.cusip === selectedCusip ? "selected" : ""}`}
           cx={x(point.liquidity_score)}
           cy={y(point.spread_bps)}
           key={point.cusip}
+          onClick={() => onSelect?.(point.cusip)}
           r={Math.max(4, Math.min(13, Math.sqrt(point.total_trade_amount || 1) / 850))}
-        />
+        >
+          <title>{`${point.cusip}: spread ${point.spread_bps ?? "N/A"} bps; liquidity ${point.liquidity_score ?? "N/A"}; RV ${point.rv_score ?? "N/A"}`}</title>
+        </circle>
       ))}
       <text className="axis-label" x="42" y="324">Liquidity 0</text>
       <text className="axis-label" x="758" y="324" textAnchor="end">Liquidity 100</text>
@@ -240,8 +259,30 @@ export default function Home() {
   const [validation, setValidation] = useState<PayloadValidation | null>(null);
   const [candidates, setCandidates] = useState<SecurityCandidate[]>([]);
   const [dashboard, setDashboard] = useState<DashboardAnalytics | null>(null);
+  const [selectedCusip, setSelectedCusip] = useState("");
+  const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [showIssuerCurve, setShowIssuerCurve] = useState(true);
+  const [showBenchmarkCurve, setShowBenchmarkCurve] = useState(true);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("nextsr-watchlist");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setWatchlist(parsed.filter((item) => typeof item === "string"));
+        }
+      } catch {
+        setWatchlist([]);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("nextsr-watchlist", JSON.stringify(watchlist));
+  }, [watchlist]);
 
   const jsonText = useMemo(() => (payload ? JSON.stringify(payload, null, 2) : ""), [payload]);
   const filteredCandidates = useMemo(
@@ -273,6 +314,38 @@ export default function Home() {
     const rows = candidates.map((candidate) => headers.map((header) => JSON.stringify(candidate[header as keyof SecurityCandidate] ?? "")).join(","));
     return `data:text/csv;charset=utf-8,${encodeURIComponent([headers.join(","), ...rows].join("\n"))}`;
   }, [candidates]);
+  const htmlReportHref = useMemo(() => {
+    const html = dashboard?.report_artifacts.html_report;
+    return html ? `data:text/html;charset=utf-8,${encodeURIComponent(html)}` : "";
+  }, [dashboard]);
+  const chartDataHref = useMemo(() => {
+    const data = dashboard?.report_artifacts.chart_data_json;
+    return data ? `data:application/json;charset=utf-8,${encodeURIComponent(data)}` : "";
+  }, [dashboard]);
+  const selectedSecurity = useMemo(() => {
+    if (!dashboard?.security_details.length) {
+      return null;
+    }
+    return dashboard.security_details.find((item) => item.cusip === selectedCusip) ?? dashboard.security_details[0];
+  }, [dashboard, selectedCusip]);
+  const watchlistRows = useMemo(() => {
+    const details = dashboard?.security_details ?? [];
+    return watchlist
+      .map((cusip) => details.find((detail) => detail.cusip === cusip) ?? candidates.find((candidate) => candidate.cusip === cusip))
+      .filter((item): item is SecurityDetail | SecurityCandidate => Boolean(item));
+  }, [candidates, dashboard, watchlist]);
+  const watchlistCsvHref = useMemo(() => {
+    if (!watchlistRows.length) {
+      return "";
+    }
+    const headers = ["cusip", "issuer", "signal", "maturity_bucket", "spread_to_benchmark_bps", "liquidity_score", "rv_score", "trade_count", "total_trade_amount", "latest_trade_date"];
+    const rows = watchlistRows.map((row) => headers.map((header) => JSON.stringify(row[header as keyof typeof row] ?? "")).join(","));
+    return `data:text/csv;charset=utf-8,${encodeURIComponent([headers.join(","), ...rows].join("\n"))}`;
+  }, [watchlistRows]);
+
+  function toggleWatchlist(cusip: string) {
+    setWatchlist((current) => (current.includes(cusip) ? current.filter((item) => item !== cusip) : [...current, cusip].sort()));
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -287,6 +360,7 @@ export default function Home() {
     setValidation(null);
     setCandidates([]);
     setDashboard(null);
+    setSelectedCusip("");
 
     const formData = new FormData();
     tradeFiles.forEach((file) => formData.append("tradeFiles", file));
@@ -310,6 +384,7 @@ export default function Home() {
       setValidation(data.validation);
       setCandidates(data.security_screener ?? []);
       setDashboard(data.dashboard ?? null);
+      setSelectedCusip(data.dashboard?.security_details?.[0]?.cusip ?? data.security_screener?.[0]?.cusip ?? "");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Payload generation failed.");
     } finally {
@@ -501,6 +576,16 @@ export default function Home() {
                     Screener CSV
                   </a>
                 ) : null}
+                {htmlReportHref ? (
+                  <a className="secondary-button" href={htmlReportHref} download="secondary_market_report.html">
+                    HTML Report
+                  </a>
+                ) : null}
+                {chartDataHref ? (
+                  <a className="secondary-button" href={chartDataHref} download="chart_data_bundle.json">
+                    Chart Data
+                  </a>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -606,11 +691,15 @@ export default function Home() {
                 <p>Average issuer yield by maturity bucket over the selected lookback window.</p>
               </div>
               <div className="legend">
-                <span><i className="legend-dot issuer-key" />Issuer</span>
-                <span><i className="legend-dot benchmark-key" />Benchmark</span>
+                <button className={showIssuerCurve ? "legend-button active" : "legend-button"} type="button" onClick={() => setShowIssuerCurve((value) => !value)}>
+                  <i className="legend-dot issuer-key" />Issuer
+                </button>
+                <button className={showBenchmarkCurve ? "legend-button active" : "legend-button"} type="button" onClick={() => setShowBenchmarkCurve((value) => !value)}>
+                  <i className="legend-dot benchmark-key" />Benchmark
+                </button>
               </div>
             </div>
-            <IssuerCurveChart data={dashboard.issuer_curve} />
+            <IssuerCurveChart data={dashboard.issuer_curve} showIssuer={showIssuerCurve} showBenchmark={showBenchmarkCurve} />
           </article>
 
           <article className="panel chart-panel">
@@ -640,7 +729,7 @@ export default function Home() {
                 <p>Liquidity score versus spread, sized by total par traded.</p>
               </div>
             </div>
-            <PositioningChart data={dashboard.positioning} />
+            <PositioningChart data={dashboard.positioning} selectedCusip={selectedCusip} onSelect={setSelectedCusip} />
           </article>
 
           <article className="panel chart-panel">
@@ -789,13 +878,18 @@ export default function Home() {
                     <th>Trades</th>
                     <th>Total Par</th>
                     <th>Latest</th>
+                    <th>Watch</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredCandidates.map((candidate) => (
-                    <tr key={candidate.cusip}>
+                    <tr className={candidate.cusip === selectedCusip ? "selected-row" : ""} key={candidate.cusip}>
                       <td>{candidate.signal}</td>
-                      <td>{candidate.cusip}</td>
+                      <td>
+                        <button className="link-button" type="button" onClick={() => setSelectedCusip(candidate.cusip)}>
+                          {candidate.cusip}
+                        </button>
+                      </td>
                       <td>{candidate.maturity_bucket ?? "N/A"}</td>
                       <td>{formatNumber(candidate.spread_to_benchmark_bps, " bps")}</td>
                       <td>{formatNumber(candidate.liquidity_score)}</td>
@@ -803,6 +897,11 @@ export default function Home() {
                       <td>{candidate.trade_count.toLocaleString()}</td>
                       <td>{candidate.total_trade_amount.toLocaleString()}</td>
                       <td>{candidate.latest_trade_date ?? "N/A"}</td>
+                      <td>
+                        <button className="mini-button" type="button" onClick={() => toggleWatchlist(candidate.cusip)}>
+                          {watchlist.includes(candidate.cusip) ? "Saved" : "Add"}
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -817,10 +916,102 @@ export default function Home() {
       {payload && dashboard ? (
         <section className="parity-band final-band">
           <article className="panel">
+            <div className="toolbar">
+              <div>
+                <h2>CUSIP Opportunity Drilldown</h2>
+                <span className="table-count">{selectedSecurity?.cusip ?? "No CUSIP selected"}</span>
+              </div>
+              {selectedSecurity ? (
+                <button className="secondary-button" type="button" onClick={() => toggleWatchlist(selectedSecurity.cusip)}>
+                  {watchlist.includes(selectedSecurity.cusip) ? "Remove Watch" : "Add Watch"}
+                </button>
+              ) : null}
+            </div>
+            {selectedSecurity ? (
+              <div className="drilldown-stack">
+                <div className="metrics dense">
+                  <div className="metric"><span>CUSIP</span><strong>{selectedSecurity.cusip}</strong></div>
+                  <div className="metric"><span>Signal</span><strong>{selectedSecurity.signal}</strong></div>
+                  <div className="metric"><span>Bucket</span><strong>{selectedSecurity.maturity_bucket ?? "N/A"}</strong></div>
+                  <div className="metric"><span>Latest Trade</span><strong>{selectedSecurity.latest_trade_date ?? "N/A"}</strong></div>
+                  <div className="metric"><span>Latest Yield</span><strong>{formatNumber(selectedSecurity.latest_yield, "%")}</strong></div>
+                  <div className="metric"><span>Latest Price</span><strong>{formatNumber(selectedSecurity.latest_price)}</strong></div>
+                  <div className="metric"><span>Spread</span><strong>{formatNumber(selectedSecurity.spread_to_benchmark_bps, " bps")}</strong></div>
+                  <div className="metric"><span>Total Par</span><strong>{selectedSecurity.total_trade_amount.toLocaleString()}</strong></div>
+                </div>
+                <div className="readthrough-list">
+                  {selectedSecurity.readthrough.map((item) => <p key={item}>{item}</p>)}
+                </div>
+                <MiniTable<SecurityTradePoint>
+                  rows={selectedSecurity.trades.slice(-20).reverse()}
+                  columns={[
+                    { key: "date", header: "Date", render: (row) => row.date },
+                    { key: "side", header: "Side", render: (row) => row.trade_type },
+                    { key: "yield", header: "Yield", render: (row) => formatNumber(row.yield, "%") },
+                    { key: "price", header: "Price", render: (row) => formatNumber(row.price) },
+                    { key: "spread", header: "Spread", render: (row) => formatNumber(row.spread_bps, " bps") },
+                    { key: "par", header: "Par", render: (row) => row.trade_amount.toLocaleString() }
+                  ]}
+                />
+              </div>
+            ) : (
+              <div className="empty-state small">No security detail available.</div>
+            )}
+          </article>
+
+          <article className="panel">
+            <div className="toolbar">
+              <div>
+                <h2>Watchlist / Saved Candidates</h2>
+                <span className="table-count">{watchlistRows.length.toLocaleString()} saved</span>
+              </div>
+              <div className="button-row">
+                {watchlistCsvHref ? (
+                  <a className="secondary-button" href={watchlistCsvHref} download="watchlist.csv">
+                    Watchlist CSV
+                  </a>
+                ) : null}
+                <button className="secondary-button" type="button" onClick={() => setWatchlist([])}>
+                  Clear
+                </button>
+              </div>
+            </div>
+            <MiniTable
+              rows={watchlistRows}
+              columns={[
+                { key: "cusip", header: "CUSIP", render: (row) => row.cusip },
+                { key: "issuer", header: "Issuer", render: (row) => row.issuer },
+                { key: "signal", header: "Signal", render: (row) => row.signal },
+                { key: "spread", header: "Spread", render: (row) => formatNumber(row.spread_to_benchmark_bps, " bps") },
+                { key: "liq", header: "Liquidity", render: (row) => formatNumber(row.liquidity_score) },
+                { key: "rv", header: "RV", render: (row) => formatNumber(row.rv_score) }
+              ]}
+            />
+          </article>
+        </section>
+      ) : null}
+
+      {payload && dashboard ? (
+        <section className="parity-band final-band">
+          <article className="panel">
             <div className="chart-header">
               <div>
-                <h2>AI Commentary Studio</h2>
-                <p>Structured evidence package for controlled commentary generation.</p>
+                <h2>Recommendation Narrative Engine</h2>
+                <p>Rule-based narrative generated from calculated dashboard evidence.</p>
+              </div>
+            </div>
+            <div className="methodology-block">
+              <strong>{dashboard.recommendation.label}</strong>
+              <p>{dashboard.recommendation.summary}</p>
+            </div>
+            <div className="split-list">
+              <div>
+                <h3>Drivers</h3>
+                {dashboard.recommendation.drivers.map((item) => <p key={item}>{item}</p>)}
+              </div>
+              <div>
+                <h3>Caveats</h3>
+                {dashboard.recommendation.caveats.map((item) => <p key={item}>{item}</p>)}
               </div>
             </div>
             <details className="developer-payload" open>
@@ -840,6 +1031,30 @@ export default function Home() {
               <strong>{dashboard.admin.methodology_version}</strong>
               <p>{dashboard.admin.benchmark_policy}</p>
             </div>
+            <details className="developer-payload">
+              <summary>Benchmark Audit</summary>
+              <MiniTable<BenchmarkAuditRow>
+                rows={dashboard.benchmark_audit.slice(0, 40)}
+                columns={[
+                  { key: "date", header: "Date", render: (row) => row.date },
+                  { key: "tenor", header: "Tenor", render: (row) => row.tenor },
+                  { key: "yield", header: "Yield", render: (row) => formatNumber(row.benchmark_yield, "%") },
+                  { key: "source", header: "Source", render: (row) => row.benchmark_source },
+                  { key: "n", header: "Obs", render: (row) => row.observation_count.toLocaleString() }
+                ]}
+              />
+            </details>
+            <details className="developer-payload">
+              <summary>Methodology Sections</summary>
+              <div className="methodology-list">
+                {dashboard.methodology_sections.map((section) => (
+                  <div key={section.title}>
+                    <strong>{section.title}</strong>
+                    <p>{section.body}</p>
+                  </div>
+                ))}
+              </div>
+            </details>
             <MiniTable
               rows={dashboard.admin.module_status}
               columns={[

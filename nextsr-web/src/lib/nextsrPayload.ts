@@ -220,6 +220,66 @@ export type DealerProxyPoint = {
   total_trade_amount: number;
 };
 
+export type SecurityTradePoint = {
+  date: string | null;
+  yield: number | null;
+  price: number | null;
+  trade_amount: number;
+  spread_bps: number | null;
+  benchmark_yield: number | null;
+  trade_type: string | null;
+};
+
+export type SecurityDetail = {
+  cusip: string;
+  issuer: string;
+  sector: string | null;
+  description: string | null;
+  maturity_bucket: string | null;
+  maturity_date: string | null;
+  coupon: number | null;
+  latest_trade_date: string | null;
+  trade_count: number;
+  total_trade_amount: number;
+  avg_yield: number | null;
+  latest_yield: number | null;
+  avg_price: number | null;
+  latest_price: number | null;
+  spread_to_benchmark_bps: number | null;
+  liquidity_score: number | null;
+  rv_score: number | null;
+  signal: string;
+  readthrough: string[];
+  evidence: string[];
+  trades: SecurityTradePoint[];
+};
+
+export type BenchmarkAuditRow = {
+  date: string;
+  tenor: string;
+  benchmark_yield: number;
+  benchmark_source: string;
+  observation_count: number;
+};
+
+export type RecommendationNarrative = {
+  label: string;
+  summary: string;
+  drivers: string[];
+  caveats: string[];
+  evidence: string[];
+};
+
+export type MethodologySection = {
+  title: string;
+  body: string;
+};
+
+export type ReportArtifacts = {
+  html_report: string;
+  chart_data_json: string;
+};
+
 export type DashboardAnalytics = {
   file_readiness: FileReadinessReport[];
   data_health: DataHealth;
@@ -237,6 +297,11 @@ export type DashboardAnalytics = {
   curve_shape: CurveShapeMetric[];
   scenario_shock: ScenarioShockPoint[];
   dealer_proxy: DealerProxyPoint[];
+  security_details: SecurityDetail[];
+  benchmark_audit: BenchmarkAuditRow[];
+  recommendation: RecommendationNarrative;
+  methodology_sections: MethodologySection[];
+  report_artifacts: ReportArtifacts;
   analyst_context: Record<string, unknown>;
   export_summary_markdown: string;
   admin: {
@@ -273,6 +338,7 @@ type BenchmarkRow = {
   tenor: string;
   benchmark_yield: number;
   benchmark_source: string;
+  observation_count?: number;
 };
 
 type SpreadObservation = {
@@ -652,7 +718,8 @@ function parseMmdBenchmarkCurve(rows: RawRow[]): BenchmarkRow[] {
         date: dateLabel,
         tenor: `${Number(tenorMatch[1])}Y`,
         benchmark_yield: benchmarkYield,
-        benchmark_source: "Uploaded MMD fallback"
+        benchmark_source: "Uploaded MMD fallback",
+        observation_count: 1
       });
     }
   }
@@ -715,7 +782,8 @@ function buildTradeIndexCurve(trades: TradeRow[]): BenchmarkRow[] {
         date,
         tenor,
         benchmark_yield: median,
-        benchmark_source: "Trade Sheet Index / Index Rate"
+        benchmark_source: "Trade Sheet Index / Index Rate",
+        observation_count: values.length
       };
     })
     .sort((a, b) => `${a.date}|${a.tenor}`.localeCompare(`${b.date}|${b.tenor}`));
@@ -1385,6 +1453,223 @@ function buildDealerProxy(trades: TradeRow[], issuer: string, periodDays: number
   return Array.from(groups.values()).map((row) => ({ ...row, total_trade_amount: Math.round(row.total_trade_amount) }));
 }
 
+function buildBenchmarkAudit(benchmarkCurve: BenchmarkRow[]): BenchmarkAuditRow[] {
+  return benchmarkCurve
+    .slice()
+    .sort((a, b) => `${b.date}|${a.tenor}`.localeCompare(`${a.date}|${b.tenor}`))
+    .slice(0, 200)
+    .map((row) => ({
+      date: row.date,
+      tenor: row.tenor,
+      benchmark_yield: roundOrNull(row.benchmark_yield, 4) ?? row.benchmark_yield,
+      benchmark_source: row.benchmark_source,
+      observation_count: row.observation_count ?? 1
+    }));
+}
+
+function buildSecurityDetails(trades: TradeRow[], securityScreener: SecurityCandidate[], benchmarkCurve: BenchmarkRow[]): SecurityDetail[] {
+  const byCusip = new Map<string, TradeRow[]>();
+  for (const trade of trades) {
+    if (!trade.cusip) {
+      continue;
+    }
+    byCusip.set(trade.cusip, [...(byCusip.get(trade.cusip) ?? []), trade]);
+  }
+  const candidateByCusip = new Map(securityScreener.map((candidate) => [candidate.cusip, candidate]));
+
+  return Array.from(byCusip.entries())
+    .map(([cusip, rows]) => {
+      const sortedRows = rows
+        .filter((row) => row.trade_date)
+        .sort((a, b) => (a.trade_date?.getTime() ?? 0) - (b.trade_date?.getTime() ?? 0));
+      const sourceRows = sortedRows.length ? sortedRows : rows;
+      const latest = sourceRows[sourceRows.length - 1];
+      const candidate = candidateByCusip.get(cusip);
+      const yields = sourceRows.map((row) => row.yield).filter((value): value is number => value !== null);
+      const prices = sourceRows.map((row) => row.price).filter((value): value is number => value !== null);
+      const totalAmount = sourceRows.reduce((sum, row) => sum + (row.trade_amount ?? 0), 0);
+      const benchmark = latest?.trade_date ? latestBenchmarkForBucket(benchmarkCurve, latest.trade_date, latest.maturity_bucket) : null;
+      const latestSpread = latest?.yield !== null && latest?.yield !== undefined && benchmark?.benchmark_yield !== undefined ? (latest.yield - benchmark.benchmark_yield) * 100 : candidate?.spread_to_benchmark_bps ?? null;
+      const tradePoints = sourceRows.slice(-80).map((row) => {
+        const rowBenchmark = row.trade_date ? latestBenchmarkForBucket(benchmarkCurve, row.trade_date, row.maturity_bucket) : null;
+        const spread = row.yield !== null && rowBenchmark?.benchmark_yield !== undefined ? (row.yield - rowBenchmark.benchmark_yield) * 100 : null;
+        return {
+          date: row.trade_date ? dateKey(row.trade_date) : null,
+          yield: roundOrNull(row.yield, 3),
+          price: roundOrNull(row.price, 3),
+          trade_amount: Math.round(row.trade_amount ?? 0),
+          spread_bps: roundOrNull(spread, 2),
+          benchmark_yield: roundOrNull(rowBenchmark?.benchmark_yield ?? null, 3),
+          trade_type: row.trade_type
+        };
+      });
+      const readthrough = [
+        `${cusip} has ${sourceRows.length.toLocaleString()} trade observation(s) in the uploaded universe.`,
+        latestSpread === null ? "Spread to benchmark is unavailable for the latest trade." : `Latest spread screens at ${latestSpread >= 0 ? "+" : ""}${latestSpread.toFixed(1)} bps.`,
+        candidate?.liquidity_score === null || candidate?.liquidity_score === undefined ? "Liquidity score is unavailable." : `Liquidity score is ${candidate.liquidity_score.toFixed(1)} based on trade count, par amount, and recency.`,
+        candidate?.signal ? `Current screener signal: ${candidate.signal}.` : "Current screener signal is unavailable."
+      ];
+      return {
+        cusip,
+        issuer: latest?.issuer ?? candidate?.issuer ?? "Unknown",
+        sector: latest?.sector ?? candidate?.sector ?? null,
+        description: latest?.description ?? null,
+        maturity_bucket: latest?.maturity_bucket ?? candidate?.maturity_bucket ?? null,
+        maturity_date: latest?.maturity ? dateKey(latest.maturity) : null,
+        coupon: roundOrNull(latest?.coupon, 3),
+        latest_trade_date: latest?.trade_date ? dateKey(latest.trade_date) : candidate?.latest_trade_date ?? null,
+        trade_count: sourceRows.length,
+        total_trade_amount: Math.round(totalAmount),
+        avg_yield: roundOrNull(yields.length ? yields.reduce((sum, value) => sum + value, 0) / yields.length : null, 3),
+        latest_yield: roundOrNull(latest?.yield, 3),
+        avg_price: roundOrNull(prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null, 3),
+        latest_price: roundOrNull(latest?.price, 3),
+        spread_to_benchmark_bps: roundOrNull(latestSpread, 2),
+        liquidity_score: candidate?.liquidity_score ?? null,
+        rv_score: candidate?.rv_score ?? null,
+        signal: candidate?.signal ?? "Monitor",
+        readthrough,
+        evidence: candidate?.evidence ?? [],
+        trades: tradePoints
+      };
+    })
+    .sort((a, b) => (b.rv_score ?? -Infinity) - (a.rv_score ?? -Infinity))
+    .slice(0, 300);
+}
+
+function buildRecommendationNarrative(payload: NextsrPayload, candidates: SecurityCandidate[], peerRv: PeerRvPoint[]): RecommendationNarrative {
+  const drivers: string[] = [];
+  const caveats: string[] = [];
+  const spread = payload.signals.spread.current_spread_bps;
+  const spreadMove = payload.signals.spread.spread_change_bps;
+  const percentile = payload.signals.spread.historical_percentile_1y;
+  const liquidity = payload.signals.liquidity.liquidity_score;
+  const flow = payload.signals.flow.sell_buy_imbalance;
+  const strongestPeerGap = peerRv
+    .map((row) => row.peer_gap_bps)
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => Math.abs(b) - Math.abs(a))[0] ?? null;
+
+  if (spread !== null) drivers.push(`Current selected-bucket spread is ${spread >= 0 ? "+" : ""}${spread.toFixed(1)} bps.`);
+  if (spreadMove !== null) drivers.push(`${spreadMove >= 0 ? "Widened" : "Tightened"} ${Math.abs(spreadMove).toFixed(1)} bps over the selected lookback.`);
+  if (percentile !== null) drivers.push(`Current spread is at the ${percentile.toFixed(0)}th percentile of available 1Y observations.`);
+  if (liquidity !== null) drivers.push(`Liquidity score is ${liquidity.toFixed(1)} with ${payload.signals.liquidity.trade_count.toLocaleString()} recent trade(s).`);
+  if (flow !== null) drivers.push(`Classified sell/buy flow imbalance is ${(flow * 100).toFixed(1)}%.`);
+  if (strongestPeerGap !== null) drivers.push(`Largest peer gap observation is ${strongestPeerGap >= 0 ? "+" : ""}${strongestPeerGap.toFixed(1)} bps.`);
+
+  if (payload.universe.benchmark_source === null) caveats.push("Benchmark-dependent analytics are limited because no benchmark source was detected.");
+  if (payload.signals.liquidity.trade_count < 3) caveats.push("Recent liquidity sample is thin; interpret spread signals as screening indicators.");
+  if (!candidates.length) caveats.push("No CUSIP-level screener candidates passed scoring.");
+  if (!caveats.length) caveats.push("Signals are screening indicators, not investment recommendations.");
+
+  const summary =
+    payload.label === "Potential Relative Value Candidate"
+      ? "The selected issuer/bucket screens as a relative-value candidate based on spread, liquidity, and flow evidence."
+      : payload.label === "Watchlist Candidate"
+        ? "The selected issuer/bucket belongs on watchlist pending stronger confirmation from liquidity, peer, or historical signals."
+        : payload.label === "Potentially Rich / Lower Priority"
+          ? "The selected issuer/bucket screens relatively rich or lower priority under the current rules."
+          : "The selected issuer/bucket is neutral and needs more evidence before stronger action.";
+
+  return {
+    label: payload.label,
+    summary,
+    drivers,
+    caveats,
+    evidence: payload.evidence
+  };
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function buildHtmlReport(payload: NextsrPayload, dataHealth: DataHealth, recommendation: RecommendationNarrative, candidates: SecurityCandidate[], curveShape: CurveShapeMetric[]) {
+  const candidateRows = candidates
+    .slice(0, 15)
+    .map((candidate) => `<tr><td>${escapeHtml(candidate.cusip)}</td><td>${escapeHtml(candidate.signal)}</td><td>${escapeHtml(candidate.maturity_bucket)}</td><td>${escapeHtml(candidate.spread_to_benchmark_bps ?? "N/A")}</td><td>${escapeHtml(candidate.liquidity_score ?? "N/A")}</td><td>${escapeHtml(candidate.rv_score ?? "N/A")}</td></tr>`)
+    .join("");
+  const driverRows = recommendation.drivers.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const caveatRows = recommendation.caveats.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const curveRows = curveShape.map((metric) => `<li>${escapeHtml(metric.metric)}: ${escapeHtml(metric.value ?? "N/A")} ${escapeHtml(metric.unit)}. ${escapeHtml(metric.readthrough)}</li>`).join("");
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(payload.issuer)} Secondary Market Report</title>
+  <style>
+    body { font-family: Arial, sans-serif; color: #18202a; margin: 32px; }
+    h1 { margin-bottom: 4px; }
+    .muted { color: #697586; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
+    .card { border: 1px solid #d9e1ec; border-radius: 8px; padding: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border-bottom: 1px solid #d9e1ec; padding: 8px; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(payload.issuer)} Secondary Market Report</h1>
+  <div class="muted">As of ${escapeHtml(payload.as_of_date ?? "N/A")} · ${escapeHtml(payload.maturity_bucket ?? "N/A")} · ${escapeHtml(dataHealth.benchmark_source ?? "No benchmark")}</div>
+  <div class="grid">
+    <div class="card"><strong>Signal</strong><br />${escapeHtml(payload.label)}</div>
+    <div class="card"><strong>Spread</strong><br />${escapeHtml(payload.signals.spread.current_spread_bps ?? "N/A")} bps</div>
+    <div class="card"><strong>Liquidity</strong><br />${escapeHtml(payload.signals.liquidity.liquidity_score ?? "N/A")}</div>
+    <div class="card"><strong>Universe</strong><br />${escapeHtml(dataHealth.model_ready_rows.toLocaleString())} trades</div>
+  </div>
+  <h2>Recommendation Narrative</h2>
+  <p>${escapeHtml(recommendation.summary)}</p>
+  <h3>Drivers</h3><ul>${driverRows}</ul>
+  <h3>Caveats</h3><ul>${caveatRows}</ul>
+  <h2>Top Security Candidates</h2>
+  <table><thead><tr><th>CUSIP</th><th>Signal</th><th>Bucket</th><th>Spread</th><th>Liquidity</th><th>RV</th></tr></thead><tbody>${candidateRows}</tbody></table>
+  <h2>Curve Shape</h2><ul>${curveRows}</ul>
+</body>
+</html>`;
+}
+
+function buildMethodologySections(): MethodologySection[] {
+  return [
+    {
+      title: "Benchmark Source Governance",
+      body: "Trade Sheet Index / Index Rate is used first because it is tied to the same trade tape. Uploaded MMD is used only when trade-index benchmark data is unavailable."
+    },
+    {
+      title: "Security Screener",
+      body: "CUSIP-level scores combine spread-to-benchmark, liquidity percentile, trade count, par amount, and recency. Scores are relative screening signals."
+    },
+    {
+      title: "Liquidity",
+      body: "Liquidity score blends recent trade count, total par traded, and days since latest trade. It does not represent executable depth."
+    },
+    {
+      title: "Scenario Shock",
+      body: "Price impact uses a transparent maturity-based duration proxy. It is intended for quick screening, not full risk-model valuation."
+    },
+    {
+      title: "AI Commentary",
+      body: "The AI context package is structured from calculated dashboard evidence. Live AI generation should be enabled only after API-key and data-governance settings are configured."
+    }
+  ];
+}
+
+function buildReportArtifacts(input: {
+  payload: NextsrPayload;
+  dataHealth: DataHealth;
+  recommendation: RecommendationNarrative;
+  candidates: SecurityCandidate[];
+  curveShape: CurveShapeMetric[];
+  dashboardData: Record<string, unknown>;
+}): ReportArtifacts {
+  return {
+    html_report: buildHtmlReport(input.payload, input.dataHealth, input.recommendation, input.candidates, input.curveShape),
+    chart_data_json: JSON.stringify(input.dashboardData, null, 2)
+  };
+}
+
 function buildExportSummary(payload: NextsrPayload, dataHealth: DataHealth, candidates: SecurityCandidate[], curveShape: CurveShapeMetric[]) {
   const lines = [
     `# ${payload.issuer ?? "Unknown"} Secondary Market Summary`,
@@ -1435,16 +1720,31 @@ function emptyDashboard(): DashboardAnalytics {
     curve_shape: [],
     scenario_shock: [],
     dealer_proxy: [],
+    security_details: [],
+    benchmark_audit: [],
+    recommendation: {
+      label: "Neutral / Needs More Evidence",
+      summary: "No recommendation narrative is available until a dashboard payload is generated.",
+      drivers: [],
+      caveats: [],
+      evidence: []
+    },
+    methodology_sections: buildMethodologySections(),
+    report_artifacts: {
+      html_report: "",
+      chart_data_json: ""
+    },
     analyst_context: {},
     export_summary_markdown: "",
     admin: {
-      methodology_version: "nextsr-parity.v1",
+      methodology_version: "nextsr-parity.v2",
       benchmark_policy: "Trade Sheet Index / Index Rate first; uploaded MMD is fallback when trade index is unavailable.",
       module_status: [
         { module: "Data Engine", status: "ported", notes: "Multi-trade upload, optional bond reference, issuer mapping, MMD fallback, merged trade universe." },
-        { module: "Core Dashboard", status: "ported", notes: "Spread trend, volume, issuer curve, spread ladder, liquidity, screener, RV positioning." },
-        { module: "Advanced Analytics", status: "partial", notes: "Peer RV, cross-issuer RV, attribution, historical range, curve shape, scenario shock are implemented with transparent approximations." },
-        { module: "AI / Export / Admin", status: "partial", notes: "Structured AI context, markdown export, and methodology metadata are available; live AI calls can be added after API-key governance is set." }
+        { module: "Core Dashboard", status: "ported", notes: "Spread trend, volume, issuer curve, spread ladder, liquidity, screener, RV positioning, CUSIP drilldown." },
+        { module: "Advanced Analytics", status: "partial", notes: "Peer RV, cross-issuer RV, attribution, historical range, curve shape, scenario shock, and benchmark audit are implemented with transparent approximations where needed." },
+        { module: "Watchlist / Drilldown", status: "ported", notes: "Client-side watchlist, selected CUSIP detail, trade path, and read-through are available." },
+        { module: "AI / Export / Admin", status: "partial", notes: "Structured AI context, rule narrative, markdown/HTML/chart-data exports, and methodology metadata are available; live AI calls can be added after API-key governance is set." }
       ]
     }
   };
@@ -1469,14 +1769,48 @@ function buildDashboardAnalytics(input: {
   const curveShape = buildCurveShape(issuerCurve);
   const payload = input.payload;
   const spreadAttribution = payload ? buildSpreadAttribution(payload, issuerCurve) : [];
+  const spreadTrend = buildSpreadTrend(input.spreadObs, input.issuer, input.maturityBucket);
+  const monthlyActivity = buildMonthlyActivity(input.trades, input.issuer);
+  const spreadMovement = buildSpreadMovementLadder(input.spreadObs, input.issuer);
+  const liquidity = buildLiquidityByBucket(input.trades, input.issuer, input.periodDays);
+  const peerRv = buildPeerRv(input.spreadObs, input.issuer);
+  const crossIssuerRv = buildCrossIssuerRv(input.trades, input.securityScreener);
+  const historicalPercentiles = buildHistoricalPercentiles(input.spreadObs, input.issuer);
+  const scenarioShock = buildScenarioShock(input.trades, input.issuer);
+  const dealerProxy = buildDealerProxy(input.trades, input.issuer, input.periodDays);
+  const securityDetails = buildSecurityDetails(input.trades, input.securityScreener, input.benchmarkCurve);
+  const benchmarkAudit = buildBenchmarkAudit(input.benchmarkCurve);
+  const recommendation = payload ? buildRecommendationNarrative(payload, input.securityScreener, peerRv) : emptyDashboard().recommendation;
+  const reportArtifacts = payload
+    ? buildReportArtifacts({
+        payload,
+        dataHealth: input.dataHealth,
+        recommendation,
+        candidates: input.securityScreener,
+        curveShape,
+        dashboardData: {
+          issuer_curve: issuerCurve,
+          spread_trend: spreadTrend,
+          monthly_activity: monthlyActivity,
+          spread_movement_ladder: spreadMovement,
+          liquidity,
+          peer_rv: peerRv,
+          cross_issuer_rv: crossIssuerRv,
+          historical_percentiles: historicalPercentiles,
+          scenario_shock: scenarioShock,
+          dealer_proxy: dealerProxy,
+          security_screener: input.securityScreener
+        }
+      })
+    : emptyDashboard().report_artifacts;
   return {
     ...emptyDashboard(),
     file_readiness: input.readiness,
     data_health: input.dataHealth,
     issuers: buildIssuerOptions(input.trades),
     issuer_curve: issuerCurve,
-    spread_trend: buildSpreadTrend(input.spreadObs, input.issuer, input.maturityBucket),
-    monthly_activity: buildMonthlyActivity(input.trades, input.issuer),
+    spread_trend: spreadTrend,
+    monthly_activity: monthlyActivity,
     positioning: input.securityScreener.slice(0, 80).map((candidate) => ({
       cusip: candidate.cusip,
       issuer: candidate.issuer,
@@ -1488,21 +1822,29 @@ function buildDashboardAnalytics(input: {
       total_trade_amount: candidate.total_trade_amount,
       signal: candidate.signal
     })),
-    spread_movement_ladder: buildSpreadMovementLadder(input.spreadObs, input.issuer),
-    liquidity: buildLiquidityByBucket(input.trades, input.issuer, input.periodDays),
-    peer_rv: buildPeerRv(input.spreadObs, input.issuer),
-    cross_issuer_rv: buildCrossIssuerRv(input.trades, input.securityScreener),
+    spread_movement_ladder: spreadMovement,
+    liquidity,
+    peer_rv: peerRv,
+    cross_issuer_rv: crossIssuerRv,
     spread_attribution: spreadAttribution,
-    historical_percentiles: buildHistoricalPercentiles(input.spreadObs, input.issuer),
+    historical_percentiles: historicalPercentiles,
     curve_shape: curveShape,
-    scenario_shock: buildScenarioShock(input.trades, input.issuer),
-    dealer_proxy: buildDealerProxy(input.trades, input.issuer, input.periodDays),
+    scenario_shock: scenarioShock,
+    dealer_proxy: dealerProxy,
+    security_details: securityDetails,
+    benchmark_audit: benchmarkAudit,
+    recommendation,
+    methodology_sections: buildMethodologySections(),
+    report_artifacts: reportArtifacts,
     analyst_context: {
       issuer: input.issuer,
       maturity_bucket: input.maturityBucket,
       data_health: input.dataHealth,
       payload_signals: payload?.signals ?? null,
-      top_candidates: input.securityScreener.slice(0, 10)
+      top_candidates: input.securityScreener.slice(0, 10),
+      recommendation,
+      selected_security: securityDetails[0] ?? null,
+      benchmark_audit: benchmarkAudit.slice(0, 20)
     },
     export_summary_markdown: payload ? buildExportSummary(payload, input.dataHealth, input.securityScreener, curveShape) : ""
   };

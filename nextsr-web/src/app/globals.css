@@ -241,6 +241,31 @@ select {
   color: #263343;
 }
 
+.mini-button,
+.link-button,
+.legend-button {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.mini-button {
+  background: #eef2f6;
+  border-radius: 6px;
+  color: #263343;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 9px;
+}
+
+.link-button {
+  background: transparent;
+  color: #0f766e;
+  font-weight: 700;
+  padding: 0;
+  text-align: left;
+}
+
 .button-row {
   display: flex;
   flex-wrap: wrap;
@@ -398,6 +423,24 @@ select {
   gap: 6px;
 }
 
+.legend-button {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: #475467;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 6px 9px;
+}
+
+.legend-button.active {
+  background: var(--soft);
+  border-color: #b7d8d3;
+  color: var(--accent-dark);
+}
+
 .legend-dot {
   border-radius: 50%;
   display: inline-block;
@@ -492,6 +535,7 @@ select {
 
 .bubble {
   fill: #2563eb;
+  cursor: pointer;
   opacity: 0.48;
   stroke: #1d4ed8;
   stroke-width: 1;
@@ -501,6 +545,12 @@ select {
   fill: #e11d48;
   opacity: 0.58;
   stroke: #be123c;
+}
+
+.bubble.selected {
+  opacity: 0.88;
+  stroke: #111827;
+  stroke-width: 2.4;
 }
 
 .empty-chart {
@@ -577,6 +627,48 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
+.selected-row td {
+  background: #ecfdf5;
+}
+
+.drilldown-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.readthrough-list,
+.split-list,
+.methodology-list {
+  display: grid;
+  gap: 10px;
+}
+
+.readthrough-list p,
+.split-list p,
+.methodology-list p {
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.split-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
+.split-list h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.methodology-list div {
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
 @media (max-width: 920px) {
   .workspace {
     grid-template-columns: 1fr;
@@ -623,5 +715,9 @@ tbody tr:last-child td {
   .toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .split-list {
+    grid-template-columns: 1fr;
   }
 }
