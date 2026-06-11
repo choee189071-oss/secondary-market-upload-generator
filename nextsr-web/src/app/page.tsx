@@ -10,6 +10,7 @@ import type {
   CurveShapeMetric,
   DashboardAnalytics,
   DealerProxyPoint,
+  DistributionPoint,
   HistoricalSpreadPoint,
   IssuerOption,
   LiquidityPoint,
@@ -24,6 +25,7 @@ import type {
   SpreadAttributionPoint,
   SpreadMovementPoint,
   StreamlitParityAuditItem,
+  TopCusipActivityPoint,
   TrendPoint
 } from "@/lib/nextsrPayload";
 
@@ -32,6 +34,37 @@ const lookbackOptions = [7, 30, 60, 90, 180, 365];
 const validationOrder = ["cusip", "trade_date", "yield", "maturity", "trade_amount", "index_rate", "spread", "trade_type", "price", "ratings"];
 const maxUiFileBytes = 25 * 1024 * 1024;
 const maxUiBundleBytes = 80 * 1024 * 1024;
+const templateDownloads = [
+  {
+    label: "Trade Template",
+    file: "nextsr_trade_template.csv",
+    csv: "cusip,trade_date,yield,maturity_date,trade_amount,index,index_rate,spread,trade_type,price,rating\n123456AB9,2026-05-12,4.25,2056-05-01,1000000,30Y,4.00,25.0,Buy,100.25,AA\n"
+  },
+  {
+    label: "Bond Reference",
+    file: "nextsr_bond_reference_template.csv",
+    csv: "cusip,issuer,sector,primary_type,description,maturity_date,coupon\n123456AB9,LADWP,Water & Power,Revenue,LADWP 5.00 2056,2056-05-01,5.00\n"
+  },
+  {
+    label: "Issuer Mapping",
+    file: "nextsr_issuer_mapping_template.csv",
+    csv: "issuer,sector,primary_type\nLADWP,Water & Power,Revenue\n"
+  },
+  {
+    label: "MMD Benchmark",
+    file: "nextsr_mmd_benchmark_template.csv",
+    csv: "date,1Y,2Y,5Y,10Y,20Y,30Y\n2026-05-12,2.90,2.95,3.10,3.35,3.75,4.00\n"
+  }
+].map((item) => ({
+  ...item,
+  href: `data:text/csv;charset=utf-8,${encodeURIComponent(item.csv)}`
+}));
+
+const methodologyChangelog = [
+  { version: "nextsr-parity.v3", change: "Added template downloads, workspace reset, data quality scorecard, liquidity distributions, curve spread mode, and drilldown history panels." },
+  { version: "nextsr-parity.v2", change: "Added Streamlit parity audit, desk snapshot, commentary studio, report center, and clearer workflow rail." },
+  { version: "nextsr-parity.v1", change: "Ported upload engine, screener, issuer curve, spread trend, liquidity, RV positioning, watchlist, and core exports." }
+];
 
 function formatNumber(value: number | null | undefined, suffix = "") {
   if (value === null || value === undefined) {
@@ -42,6 +75,34 @@ function formatNumber(value: number | null | undefined, suffix = "") {
 
 function formatPct(value: number | null | undefined) {
   return value === null || value === undefined ? "N/A" : `${value.toFixed(1)}%`;
+}
+
+function nearestTenorLabel(bucket: string | null | undefined) {
+  const year = Number(String(bucket ?? "").replace("Y", ""));
+  if (!Number.isFinite(year) || year < 1) return null;
+  if (year <= 2) return `${year}Y`;
+  if (year <= 7) return "5Y";
+  if (year <= 15) return "10Y";
+  if (year <= 25) return "20Y";
+  return "30Y";
+}
+
+function decisionLabel(row: CrossIssuerRvPoint | SecurityCandidate) {
+  const spread = "avg_spread_bps" in row ? row.avg_spread_bps : row.spread_to_benchmark_bps;
+  const liquidity = row.liquidity_score;
+  const rv = row.rv_score;
+  if ((spread ?? -Infinity) >= 25 && (liquidity ?? 0) >= 70 && (rv ?? 0) >= 70) return "Prioritize";
+  if ((spread ?? -Infinity) >= 15 && (liquidity ?? 0) >= 45) return "Watch";
+  if ((spread ?? Infinity) <= -10) return "Lower priority";
+  return "Monitor";
+}
+
+function heatmapTone(value: number | null | undefined) {
+  if (value === null || value === undefined) return "empty";
+  if (value >= 40) return "hot";
+  if (value >= 20) return "warm";
+  if (value <= -20) return "cool";
+  return "neutral";
 }
 
 type ChartTooltip = {
@@ -169,12 +230,14 @@ function MiniTable<T>({ columns, rows }: { columns: Array<{ key: string; header:
 
 function IssuerCurveChart({
   data,
+  mode = "yield",
   showIssuer = true,
   showBenchmark = true,
   activeBucket,
   onSelectBucket
 }: {
   data: CurvePoint[];
+  mode?: "yield" | "spread";
   showIssuer?: boolean;
   showBenchmark?: boolean;
   activeBucket?: string | null;
@@ -191,22 +254,28 @@ function IssuerCurveChart({
     setBrush(null);
     setCrosshair(null);
     setTooltip(null);
-  }, [data, showIssuer, showBenchmark]);
+  }, [data, mode, showIssuer, showBenchmark]);
 
+  const isSpreadMode = mode === "spread";
   const zoomStart = zoomRange?.[0] ?? 0;
   const plotData = zoomRange ? sortedData.slice(zoomRange[0], zoomRange[1] + 1) : sortedData;
   const values = plotData
-    .flatMap((point) => [
-      showIssuer ? point.issuer_yield : null,
-      showBenchmark ? point.benchmark_yield : null
-    ])
+    .flatMap((point) =>
+      isSpreadMode
+        ? [point.spread_bps]
+        : [
+            showIssuer ? point.issuer_yield : null,
+            showBenchmark ? point.benchmark_yield : null
+          ]
+    )
     .filter((value): value is number => value !== null && Number.isFinite(value));
 
   if (!plotData.length || !values.length) {
     return <EmptyChart />;
   }
-  const min = Math.min(...values) - 0.15;
-  const max = Math.max(...values) + 0.15;
+  const padding = isSpreadMode ? 5 : 0.15;
+  const min = Math.min(...values) - padding;
+  const max = Math.max(...values) + padding;
   const minYear = Math.min(...plotData.map((point) => point.maturity_year));
   const maxYear = Math.max(...plotData.map((point) => point.maturity_year));
   const x = (point: CurvePoint) => 42 + ((point.maturity_year - minYear) / (maxYear - minYear || 1)) * 716;
@@ -235,10 +304,15 @@ function IssuerCurveChart({
     });
     return nearestIndex;
   };
-  const visibleSeries = (point: CurvePoint) => [
-    ...(showIssuer && point.issuer_yield !== null ? [{ name: "Issuer", value: point.issuer_yield }] : []),
-    ...(showBenchmark && point.benchmark_yield !== null ? [{ name: "Benchmark", value: point.benchmark_yield }] : [])
-  ];
+  const visibleSeries = (point: CurvePoint) =>
+    isSpreadMode
+      ? point.spread_bps !== null
+        ? [{ name: "Spread", value: point.spread_bps }]
+        : []
+      : [
+          ...(showIssuer && point.issuer_yield !== null ? [{ name: "Issuer", value: point.issuer_yield }] : []),
+          ...(showBenchmark && point.benchmark_yield !== null ? [{ name: "Benchmark", value: point.benchmark_yield }] : [])
+        ];
   const updateCrosshair = (event: ReactMouseEvent<SVGSVGElement>) => {
     const index = indexFromSvgX(svgXFromEvent(event));
     const point = plotData[index];
@@ -311,7 +385,7 @@ function IssuerCurveChart({
           return (
             <g key={tick}>
               <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
-              <text className="axis-label" x="10" y={yy + 4}>{label.toFixed(2)}%</text>
+              <text className="axis-label" x="10" y={yy + 4}>{isSpreadMode ? label.toFixed(0) : `${label.toFixed(2)}%`}</text>
             </g>
           );
         })}
@@ -324,8 +398,10 @@ function IssuerCurveChart({
             height="244"
           />
         ) : null}
-        {showBenchmark ? <polyline className="line benchmark" points={linePath(plotData, x, (point) => y(point.benchmark_yield))} /> : null}
-        {showIssuer ? <polyline className="line issuer" points={linePath(plotData, x, (point) => y(point.issuer_yield))} /> : null}
+        {isSpreadMode ? <line className="zero-line" x1="42" x2="758" y1={y(0) ?? 300} y2={y(0) ?? 300} /> : null}
+        {isSpreadMode ? <polyline className="line spread" points={linePath(plotData, x, (point) => y(point.spread_bps))} /> : null}
+        {!isSpreadMode && showBenchmark ? <polyline className="line benchmark" points={linePath(plotData, x, (point) => y(point.benchmark_yield))} /> : null}
+        {!isSpreadMode && showIssuer ? <polyline className="line issuer" points={linePath(plotData, x, (point) => y(point.issuer_yield))} /> : null}
         {crosshair ? (
           <g className="crosshair">
             <line x1={crosshair.x} x2={crosshair.x} y1="56" y2="300" />
@@ -333,7 +409,7 @@ function IssuerCurveChart({
             <circle className={crosshair.series === "Benchmark" ? "benchmark-focus" : undefined} cx={crosshair.x} cy={crosshair.y} r="5" />
           </g>
         ) : null}
-        {showBenchmark
+        {!isSpreadMode && showBenchmark
           ? plotData.filter((point) => point.benchmark_yield !== null).map((point) => (
               <circle
                 className={`dot benchmark-dot ${point.maturity_bucket === activeBucket ? "selected" : ""}`}
@@ -345,7 +421,19 @@ function IssuerCurveChart({
               />
             ))
           : null}
-        {showIssuer
+        {isSpreadMode
+          ? plotData.filter((point) => point.spread_bps !== null).map((point) => (
+              <circle
+                className={`dot issuer-dot ${point.maturity_bucket === activeBucket ? "selected" : ""}`}
+                cx={x(point)}
+                cy={y(point.spread_bps) ?? 0}
+                key={`${point.maturity_bucket}-spread`}
+                onClick={() => onSelectBucket?.(point.maturity_bucket)}
+                r="3.4"
+              />
+            ))
+          : null}
+        {!isSpreadMode && showIssuer
           ? plotData.filter((point) => point.issuer_yield !== null).map((point) => (
               <circle
                 className={`dot issuer-dot ${point.maturity_bucket === activeBucket ? "selected" : ""}`}
@@ -568,28 +656,41 @@ function ActivityChart({ data }: { data: ActivityPoint[] }) {
   );
 }
 
-function PositioningChart({ data, selectedCusip, onSelect }: { data: PositionPoint[]; selectedCusip?: string; onSelect?: (cusip: string) => void }) {
-  const points = data.filter((point) => point.spread_bps !== null && point.liquidity_score !== null);
+function PositioningChart({
+  data,
+  selectedCusip,
+  yAxis = "spread",
+  onSelect
+}: {
+  data: PositionPoint[];
+  selectedCusip?: string;
+  yAxis?: "spread" | "yield";
+  onSelect?: (cusip: string) => void;
+}) {
+  const yMetric = (point: PositionPoint) => (yAxis === "yield" ? point.avg_yield : point.spread_bps);
+  const points = data.filter((point) => yMetric(point) !== null && point.liquidity_score !== null);
   const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   if (!points.length) {
     return <EmptyChart />;
   }
-  const spreads = points.map((point) => point.spread_bps ?? 0);
-  const minSpread = Math.min(...spreads) - 5;
-  const maxSpread = Math.max(...spreads) + 5;
+  const yValues = points.map((point) => yMetric(point) ?? 0);
+  const padding = yAxis === "yield" ? 0.15 : 5;
+  const minValue = Math.min(...yValues) - padding;
+  const maxValue = Math.max(...yValues) + padding;
+  const ySuffix = yAxis === "yield" ? "%" : " bps";
   const x = (value: number | null) => 42 + ((value ?? 0) / 100) * 716;
-  const y = (value: number | null) => 300 - (((value ?? 0) - minSpread) / (maxSpread - minSpread || 1)) * 244;
+  const y = (value: number | null) => 300 - (((value ?? 0) - minValue) / (maxValue - minValue || 1)) * 244;
   return (
     <div className="chart-frame">
       <svg className="chart-svg" viewBox="0 0 800 340" role="img" onMouseLeave={() => setTooltip(null)}>
         {[25, 50, 75].map((tick) => <line className="grid-line vertical" key={tick} x1={x(tick)} x2={x(tick)} y1="56" y2="300" />)}
         {[0, 1, 2, 3].map((tick) => {
           const yy = 300 - tick * 70;
-          const label = minSpread + ((maxSpread - minSpread) * tick) / 3;
+          const label = minValue + ((maxValue - minValue) * tick) / 3;
           return (
             <g key={tick}>
               <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
-              <text className="axis-label" x="8" y={yy + 4}>{label.toFixed(0)}</text>
+              <text className="axis-label" x="8" y={yy + 4}>{yAxis === "yield" ? label.toFixed(2) : label.toFixed(0)}</text>
             </g>
           );
         })}
@@ -597,12 +698,14 @@ function PositioningChart({ data, selectedCusip, onSelect }: { data: PositionPoi
           <circle
             className={`${point.signal.includes("Wide") ? "bubble hot" : "bubble"} ${point.cusip === selectedCusip ? "selected" : ""}`}
             cx={x(point.liquidity_score)}
-            cy={y(point.spread_bps)}
+            cy={y(yMetric(point))}
             key={point.cusip}
             onClick={() => onSelect?.(point.cusip)}
             onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, point.cusip, [
               `Signal: ${point.signal}`,
               `Spread: ${formatNumber(point.spread_bps, " bps")}`,
+              `Avg yield: ${formatNumber(point.avg_yield, "%")}`,
+              `${yAxis === "yield" ? "Y-axis yield" : "Y-axis spread"}: ${formatNumber(yMetric(point), ySuffix)}`,
               `Liquidity: ${formatNumber(point.liquidity_score)}`,
               `RV score: ${formatNumber(point.rv_score)}`,
               `Total par: ${point.total_trade_amount.toLocaleString()}`
@@ -824,12 +927,95 @@ function SecurityTradePathChart({ trades }: { trades: SecurityTradePoint[] }) {
   );
 }
 
+function SecurityMiniHistoryChart({ trades, metric }: { trades: SecurityTradePoint[]; metric: "yield" | "amount" }) {
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
+  const sortedTrades = [...trades]
+    .filter((trade) => metric === "yield" ? trade.yield !== null : trade.trade_amount > 0)
+    .sort((a, b) => {
+      const aTime = a.date ? new Date(`${a.date}T00:00:00Z`).getTime() : Number.MAX_SAFE_INTEGER;
+      const bTime = b.date ? new Date(`${b.date}T00:00:00Z`).getTime() : Number.MAX_SAFE_INTEGER;
+      return aTime - bTime;
+    });
+  if (sortedTrades.length < 2) {
+    return <EmptyChart />;
+  }
+  const value = (trade: SecurityTradePoint) => (metric === "yield" ? trade.yield : trade.trade_amount);
+  const values = sortedTrades.map(value).filter((item): item is number => item !== null && Number.isFinite(item));
+  if (!values.length) {
+    return <EmptyChart />;
+  }
+  const min = metric === "yield" ? Math.min(...values) - 0.12 : 0;
+  const max = Math.max(...values) + (metric === "yield" ? 0.12 : Math.max(...values) * 0.08);
+  const x = (_point: SecurityTradePoint, index: number) => 42 + (index / Math.max(sortedTrades.length - 1, 1)) * 716;
+  const y = (raw: number | null) => {
+    if (raw === null) return null;
+    return 230 - ((raw - min) / (max - min || 1)) * 174;
+  };
+  return (
+    <div className="chart-frame mini-history">
+      <svg className="chart-svg compact" viewBox="0 0 800 280" role="img" onMouseLeave={() => setTooltip(null)}>
+        {[0, 1, 2].map((tick) => {
+          const yy = 230 - tick * 72;
+          const label = min + ((max - min) * tick) / 2;
+          return (
+            <g key={tick}>
+              <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
+              <text className="axis-label" x="8" y={yy + 4}>{metric === "yield" ? `${label.toFixed(2)}%` : label.toLocaleString(undefined, { maximumFractionDigits: 0 })}</text>
+            </g>
+          );
+        })}
+        {metric === "yield" ? (
+          <polyline className="line issuer" points={linePath(sortedTrades, x, (trade) => y(value(trade)))} />
+        ) : (
+          sortedTrades.map((trade, index) => {
+            const barHeight = 230 - (y(value(trade)) ?? 230);
+            const barWidth = Math.max(4, Math.min(24, 650 / sortedTrades.length));
+            return (
+              <rect
+                className="bar activity"
+                height={barHeight}
+                key={`${trade.date ?? "undated"}-${index}`}
+                width={barWidth}
+                x={x(trade, index) - barWidth / 2}
+                y={230 - barHeight}
+              />
+            );
+          })
+        )}
+        {sortedTrades.map((trade, index) => {
+          const yy = y(value(trade));
+          if (yy === null) return null;
+          return (
+            <circle
+              className="dot issuer-dot"
+              cx={x(trade, index)}
+              cy={yy}
+              key={`${trade.date ?? "undated"}-${index}-point`}
+              onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, trade.date ?? "Undated trade", [
+                metric === "yield" ? `Yield: ${formatNumber(trade.yield, "%")}` : `Par: ${trade.trade_amount.toLocaleString()}`,
+                `Spread: ${formatNumber(trade.spread_bps, " bps")}`,
+                `Price: ${formatNumber(trade.price)}`,
+                `Side: ${trade.trade_type ?? "N/A"}`
+              ]))}
+              r="3"
+            />
+          );
+        })}
+        <text className="axis-label" x="42" y="258">{sortedTrades[0].date ?? "Undated"}</text>
+        <text className="axis-label" x="758" y="258" textAnchor="end">{sortedTrades[sortedTrades.length - 1].date ?? "Undated"}</text>
+      </svg>
+      <TooltipOverlay tooltip={tooltip} />
+    </div>
+  );
+}
+
 export default function Home() {
   const [tradeFiles, setTradeFiles] = useState<File[]>([]);
   const [bondReference, setBondReference] = useState<File | null>(null);
   const [issuerMapping, setIssuerMapping] = useState<File | null>(null);
   const [mmdBenchmark, setMmdBenchmark] = useState<File | null>(null);
   const [issuer, setIssuer] = useState("");
+  const [sectorOverride, setSectorOverride] = useState("");
   const [maturityBucket, setMaturityBucket] = useState("");
   const [periodDays, setPeriodDays] = useState(30);
   const [minSpread, setMinSpread] = useState(15);
@@ -842,13 +1028,19 @@ export default function Home() {
   const [selectedCusip, setSelectedCusip] = useState("");
   const [activeBucket, setActiveBucket] = useState<string | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [curveMode, setCurveMode] = useState<"yield" | "spread">("yield");
   const [showIssuerCurve, setShowIssuerCurve] = useState(true);
   const [showBenchmarkCurve, setShowBenchmarkCurve] = useState(true);
+  const [positioningYAxis, setPositioningYAxis] = useState<"spread" | "yield">("spread");
   const [trendRange, setTrendRange] = useState("90");
+  const [scenarioShockBps, setScenarioShockBps] = useState(25);
   const [candidateSort, setCandidateSort] = useState("rv_score");
   const [candidateLimit, setCandidateLimit] = useState(25);
   const [candidateView, setCandidateView] = useState("all");
   const [tableDensity, setTableDensity] = useState("compact");
+  const [performanceMode, setPerformanceMode] = useState("standard");
+  const [showDeveloperPayload, setShowDeveloperPayload] = useState(false);
+  const [fileInputVersion, setFileInputVersion] = useState(0);
   const [securitySearch, setSecuritySearch] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -898,6 +1090,16 @@ export default function Home() {
     cutoff.setUTCDate(cutoff.getUTCDate() - days);
     return source.filter((point) => new Date(`${point.date}T00:00:00Z`).getTime() >= cutoff.getTime());
   }, [activeTrendSource, trendRange]);
+  const visibleScenarioShock = useMemo(() => {
+    if (!dashboard?.scenario_shock.length) {
+      return [];
+    }
+    return dashboard.scenario_shock.map((point) => ({
+      ...point,
+      shock_bps: scenarioShockBps,
+      approx_price_impact_pct: point.duration_proxy === null ? null : Math.round(((-point.duration_proxy * scenarioShockBps) / 100) * 100) / 100
+    }));
+  }, [dashboard, scenarioShockBps]);
   const filteredCandidates = useMemo(
     () => {
       const sortValue = (candidate: SecurityCandidate) => {
@@ -921,6 +1123,24 @@ export default function Home() {
     },
     [candidateLimit, candidateSort, candidateView, candidates, minLiquidity, minSpread, minTrades, securitySearch, selectedCusip, watchlist]
   );
+  const topOpportunity = filteredCandidates[0] ?? candidates[0] ?? null;
+  const opportunityQuadrants = useMemo(() => {
+    const buckets = [
+      { label: "Wide + Liquid", test: (row: SecurityCandidate) => (row.spread_to_benchmark_bps ?? -Infinity) >= 25 && (row.liquidity_score ?? 0) >= 70 },
+      { label: "Wide / Check Liquidity", test: (row: SecurityCandidate) => (row.spread_to_benchmark_bps ?? -Infinity) >= 25 && (row.liquidity_score ?? 0) < 70 },
+      { label: "Rich / Lower Priority", test: (row: SecurityCandidate) => (row.spread_to_benchmark_bps ?? Infinity) <= -10 },
+      { label: "Monitor", test: (row: SecurityCandidate) => (row.spread_to_benchmark_bps ?? -Infinity) < 25 && (row.spread_to_benchmark_bps ?? Infinity) > -10 }
+    ];
+    return buckets.map((bucket) => {
+      const rows = candidates.filter(bucket.test);
+      return {
+        label: bucket.label,
+        count: rows.length,
+        totalPar: rows.reduce((sum, row) => sum + row.total_trade_amount, 0),
+        topCusip: rows.sort((a, b) => (b.rv_score ?? -Infinity) - (a.rv_score ?? -Infinity))[0]?.cusip ?? "N/A"
+      };
+    });
+  }, [candidates]);
   const downloadHref = useMemo(() => {
     if (!jsonText) {
       return "";
@@ -991,6 +1211,13 @@ export default function Home() {
     }
     return dashboard.security_details.find((item) => item.cusip === selectedCusip) ?? dashboard.security_details[0];
   }, [dashboard, selectedCusip]);
+  const selectedBenchmarkAuditRows = useMemo(() => {
+    const tenor = nearestTenorLabel(selectedSecurity?.maturity_bucket);
+    if (!tenor || !dashboard?.benchmark_audit.length) {
+      return [];
+    }
+    return dashboard.benchmark_audit.filter((row) => row.tenor === tenor).slice(0, 20);
+  }, [dashboard, selectedSecurity]);
   const selectedSecurityStats = useMemo(() => {
     if (!selectedSecurity) {
       return null;
@@ -1048,6 +1275,8 @@ export default function Home() {
     return warnings;
   }, [allUploadedFiles, tradeFiles.length, uploadBytes]);
   const canGenerate = tradeFiles.length > 0 && uploadWarnings.length === 0 && !isLoading;
+  const previewRowLimit = performanceMode === "lean" ? 12 : 40;
+  const chartRowLimit = performanceMode === "lean" ? 10 : 18;
   const workflowSteps = [
     {
       href: "#data-intake",
@@ -1141,6 +1370,42 @@ export default function Home() {
     }, 250);
   }
 
+  function resetWorkspace() {
+    setTradeFiles([]);
+    setBondReference(null);
+    setIssuerMapping(null);
+    setMmdBenchmark(null);
+    setIssuer("");
+    setSectorOverride("");
+    setMaturityBucket("");
+    setPeriodDays(30);
+    setMinSpread(15);
+    setMinLiquidity(40);
+    setMinTrades(2);
+    setPayload(null);
+    setValidation(null);
+    setCandidates([]);
+    setDashboard(null);
+    setSelectedCusip("");
+    setActiveBucket(null);
+    setCurveMode("yield");
+    setShowIssuerCurve(true);
+    setShowBenchmarkCurve(true);
+    setPositioningYAxis("spread");
+    setTrendRange("90");
+    setScenarioShockBps(25);
+    setCandidateSort("rv_score");
+    setCandidateLimit(25);
+    setCandidateView("all");
+    setTableDensity("compact");
+    setPerformanceMode("standard");
+    setShowDeveloperPayload(false);
+    setSecuritySearch("");
+    setError("");
+    setIsLoading(false);
+    setFileInputVersion((version) => version + 1);
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!tradeFiles.length) {
@@ -1166,6 +1431,7 @@ export default function Home() {
     if (issuerMapping) formData.set("issuerMapping", issuerMapping);
     if (mmdBenchmark) formData.set("mmdBenchmark", mmdBenchmark);
     formData.set("issuer", issuer);
+    formData.set("sectorOverride", sectorOverride);
     formData.set("maturityBucket", maturityBucket);
     formData.set("periodDays", String(periodDays));
 
@@ -1231,6 +1497,7 @@ export default function Home() {
               <input
                 id="trade-file"
                 accept=".csv,.xlsx,.xls,text/csv"
+                key={`trade-${fileInputVersion}`}
                 multiple
                 type="file"
                 onChange={(event) => setTradeFiles(Array.from(event.target.files ?? []))}
@@ -1248,15 +1515,22 @@ export default function Home() {
               <div className="form-stack compact-stack">
                 <div className="field">
                   <label htmlFor="bond-reference">Bond Reference</label>
-                  <input id="bond-reference" accept=".csv,.xlsx,.xls,text/csv" type="file" onChange={(event) => setBondReference(event.target.files?.[0] ?? null)} />
+                  <input id="bond-reference" accept=".csv,.xlsx,.xls,text/csv" key={`bond-${fileInputVersion}`} type="file" onChange={(event) => setBondReference(event.target.files?.[0] ?? null)} />
                 </div>
                 <div className="field">
                   <label htmlFor="issuer-mapping">Issuer / Sector Mapping</label>
-                  <input id="issuer-mapping" accept=".csv,.xlsx,.xls,text/csv" type="file" onChange={(event) => setIssuerMapping(event.target.files?.[0] ?? null)} />
+                  <input id="issuer-mapping" accept=".csv,.xlsx,.xls,text/csv" key={`issuer-map-${fileInputVersion}`} type="file" onChange={(event) => setIssuerMapping(event.target.files?.[0] ?? null)} />
                 </div>
                 <div className="field">
                   <label htmlFor="mmd-benchmark">MMD / Benchmark Curve</label>
-                  <input id="mmd-benchmark" accept=".csv,.xlsx,.xls,text/csv" type="file" onChange={(event) => setMmdBenchmark(event.target.files?.[0] ?? null)} />
+                  <input id="mmd-benchmark" accept=".csv,.xlsx,.xls,text/csv" key={`mmd-${fileInputVersion}`} type="file" onChange={(event) => setMmdBenchmark(event.target.files?.[0] ?? null)} />
+                </div>
+                <div className="template-grid">
+                  {templateDownloads.map((template) => (
+                    <a className="template-link" download={template.file} href={template.href} key={template.file}>
+                      {template.label}
+                    </a>
+                  ))}
                 </div>
               </div>
             </details>
@@ -1282,6 +1556,16 @@ export default function Home() {
                 value={issuer}
                 onChange={(event) => setIssuer(event.target.value)}
                 placeholder="Auto-detect from file name"
+              />
+            </div>
+
+            <div className="field">
+              <label htmlFor="sector-override">Sector Override</label>
+              <input
+                id="sector-override"
+                value={sectorOverride}
+                onChange={(event) => setSectorOverride(event.target.value)}
+                placeholder="Optional; applies when issuer override is set"
               />
             </div>
 
@@ -1343,6 +1627,32 @@ export default function Home() {
                 />
               </div>
             </div>
+
+            <details className="input-expander">
+              <summary>Performance / Workspace</summary>
+              <div className="form-stack compact-stack">
+                <div className="field">
+                  <label htmlFor="performance-mode">Display Mode</label>
+                  <select id="performance-mode" value={performanceMode} onChange={(event) => setPerformanceMode(event.target.value)}>
+                    <option value="standard">Standard</option>
+                    <option value="lean">Lean</option>
+                  </select>
+                  <span className="field-help">Lean mode keeps the same analytics but shows shorter preview tables in the browser.</span>
+                </div>
+                <label className="toggle-row" htmlFor="developer-payload-toggle">
+                  <input
+                    checked={showDeveloperPayload}
+                    id="developer-payload-toggle"
+                    type="checkbox"
+                    onChange={(event) => setShowDeveloperPayload(event.target.checked)}
+                  />
+                  Show developer diagnostics by default
+                </label>
+                <button className="secondary-button full-width" type="button" onClick={resetWorkspace}>
+                  Reset Workspace
+                </button>
+              </div>
+            </details>
 
             {uploadWarnings.length ? (
               <div className="validation-warning">{uploadWarnings.join(" ")}</div>
@@ -1490,7 +1800,7 @@ export default function Home() {
                   <strong>{payload.universe.cusip_count.toLocaleString()}</strong>
                 </div>
               </div>
-              <details className="developer-payload">
+              <details className="developer-payload" onToggle={(event) => setShowDeveloperPayload(event.currentTarget.open)} open={showDeveloperPayload}>
                 <summary>Developer Payload</summary>
                 <pre className="json-block">{jsonText}</pre>
               </details>
@@ -1554,6 +1864,20 @@ export default function Home() {
               <div className="metric"><span>Benchmark Match</span><strong>{formatPct(dashboard.data_audit_center.reconciliation.benchmark_match_rate_pct)}</strong></div>
               <div className="metric"><span>Reference Match</span><strong>{formatPct(dashboard.data_audit_center.reconciliation.cusip_reference_match_rate_pct)}</strong></div>
             </div>
+            <div className="quality-scorecard">
+              <div className={`quality-overall ${dashboard.data_quality_scorecard.status}`}>
+                <span>Quality Score</span>
+                <strong>{formatNumber(dashboard.data_quality_scorecard.overall_score)}</strong>
+                <em>{dashboard.data_quality_scorecard.status}</em>
+              </div>
+              {dashboard.data_quality_scorecard.metrics.map((metric) => (
+                <div className={`quality-metric ${metric.status}`} key={metric.metric} title={metric.detail}>
+                  <span>{metric.metric}</span>
+                  <strong>{formatPct(metric.score)}</strong>
+                  <em>{metric.detail}</em>
+                </div>
+              ))}
+            </div>
             {dashboard.data_audit_center.warnings.length ? (
               <div className="warning-list">
                 {dashboard.data_audit_center.warnings.map((warning) => <p key={warning}>{warning}</p>)}
@@ -1593,20 +1917,33 @@ export default function Home() {
             <div className="chart-header">
               <div>
                 <h2>{payload.issuer} Issuer Curve vs Benchmark</h2>
-                <p>Average issuer yield by maturity bucket over the selected lookback window.</p>
+                <p>{curveMode === "yield" ? "Average issuer yield by maturity bucket over the selected lookback window." : "Spread to benchmark by maturity bucket over the selected lookback window."}</p>
               </div>
-              <div className="legend">
-                <button className={showIssuerCurve ? "legend-button active" : "legend-button"} type="button" onClick={() => setShowIssuerCurve((value) => !value)}>
-                  <i className="legend-dot issuer-key" />Issuer
-                </button>
-                <button className={showBenchmarkCurve ? "legend-button active" : "legend-button"} type="button" onClick={() => setShowBenchmarkCurve((value) => !value)}>
-                  <i className="legend-dot benchmark-key" />Benchmark
-                </button>
+              <div className="chart-control-stack">
+                <div className="segmented-control">
+                  <button className={curveMode === "yield" ? "active" : ""} type="button" onClick={() => setCurveMode("yield")}>
+                    Yield
+                  </button>
+                  <button className={curveMode === "spread" ? "active" : ""} type="button" onClick={() => setCurveMode("spread")}>
+                    Spread
+                  </button>
+                </div>
+                {curveMode === "yield" ? (
+                  <div className="legend">
+                    <button className={showIssuerCurve ? "legend-button active" : "legend-button"} type="button" onClick={() => setShowIssuerCurve((value) => !value)}>
+                      <i className="legend-dot issuer-key" />Issuer
+                    </button>
+                    <button className={showBenchmarkCurve ? "legend-button active" : "legend-button"} type="button" onClick={() => setShowBenchmarkCurve((value) => !value)}>
+                      <i className="legend-dot benchmark-key" />Benchmark
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>
             <IssuerCurveChart
               activeBucket={activeBucket}
               data={dashboard.issuer_curve}
+              mode={curveMode}
               onSelectBucket={setActiveBucket}
               showIssuer={showIssuerCurve}
               showBenchmark={showBenchmarkCurve}
@@ -1661,10 +1998,39 @@ export default function Home() {
             <div className="chart-header">
               <div>
                 <h2>RV Positioning Map</h2>
-                <p>Liquidity score versus spread, sized by total par traded.</p>
+                <p>Liquidity score versus {positioningYAxis === "yield" ? "average yield" : "spread"}, sized by total par traded.</p>
+              </div>
+              <div className="segmented-control">
+                <button className={positioningYAxis === "spread" ? "active" : ""} type="button" onClick={() => setPositioningYAxis("spread")}>
+                  Spread
+                </button>
+                <button className={positioningYAxis === "yield" ? "active" : ""} type="button" onClick={() => setPositioningYAxis("yield")}>
+                  Yield
+                </button>
               </div>
             </div>
-            <PositioningChart data={dashboard.positioning} selectedCusip={selectedCusip} onSelect={selectCusip} />
+            <PositioningChart data={dashboard.positioning} selectedCusip={selectedCusip} yAxis={positioningYAxis} onSelect={selectCusip} />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Opportunity Map</h2>
+                <p>Candidate counts by rich/cheap and liquidity posture.</p>
+              </div>
+            </div>
+            <div className="quadrant-grid">
+              {opportunityQuadrants.map((quadrant) => (
+                <div className="quadrant-card" key={quadrant.label}>
+                  <span>{quadrant.label}</span>
+                  <strong>{quadrant.count.toLocaleString()}</strong>
+                  <em>{quadrant.totalPar.toLocaleString()} total par</em>
+                  <button className="link-button" type="button" onClick={() => quadrant.topCusip !== "N/A" && selectCusip(quadrant.topCusip)}>
+                    {quadrant.topCusip}
+                  </button>
+                </div>
+              ))}
+            </div>
           </article>
 
           <article className="panel chart-panel">
@@ -1675,7 +2041,7 @@ export default function Home() {
               </div>
             </div>
             <MiniTable<SpreadMovementPoint>
-              rows={dashboard.spread_movement_ladder.slice(0, 18)}
+              rows={dashboard.spread_movement_ladder.slice(0, chartRowLimit)}
               columns={[
                 { key: "bucket", header: "Bucket", render: (row) => row.maturity_bucket },
                 { key: "latest", header: "Latest", render: (row) => formatNumber(row.latest_spread_bps, " bps") },
@@ -1684,6 +2050,29 @@ export default function Home() {
                 { key: "y1", header: "1Y", render: (row) => formatNumber(row.move_1y_bps, " bps") }
               ]}
             />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Current Spread Heatmap</h2>
+                <p>Latest spread level by maturity bucket with movement context.</p>
+              </div>
+            </div>
+            <div className="heatmap-grid">
+              {dashboard.spread_movement_ladder.slice(0, 24).map((row) => (
+                <button
+                  className={`heatmap-cell ${heatmapTone(row.latest_spread_bps)} ${row.maturity_bucket === activeBucket ? "selected" : ""}`}
+                  key={row.maturity_bucket}
+                  type="button"
+                  onClick={() => setActiveBucket(row.maturity_bucket)}
+                >
+                  <span>{row.maturity_bucket}</span>
+                  <strong>{formatNumber(row.latest_spread_bps, " bps")}</strong>
+                  <em>1M {formatNumber(row.move_1m_bps, " bps")}</em>
+                </button>
+              ))}
+            </div>
           </article>
 
           <article className="panel chart-panel">
@@ -1699,11 +2088,60 @@ export default function Home() {
           <article className="panel chart-panel">
             <div className="chart-header">
               <div>
+                <h2>Trade Size Distribution</h2>
+                <p>Recent issuer trades grouped by par amount.</p>
+              </div>
+            </div>
+            <BarMetricChart<DistributionPoint> data={dashboard.trade_size_distribution} label={(row) => row.bucket} value={(row) => row.trade_count} tone="blue" />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Staleness Histogram</h2>
+                <p>CUSIPs grouped by days since last trade.</p>
+              </div>
+            </div>
+            <BarMetricChart<DistributionPoint> data={dashboard.staleness_distribution} label={(row) => row.bucket} value={(row) => row.cusip_count} tone="rose" />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Top CUSIP Activity</h2>
+                <p>Most frequently traded CUSIPs in the selected issuer universe.</p>
+              </div>
+            </div>
+            <MiniTable<TopCusipActivityPoint>
+              rows={dashboard.top_cusip_activity.slice(0, chartRowLimit)}
+              columns={[
+                { key: "cusip", header: "CUSIP", render: (row) => row.cusip },
+                { key: "bucket", header: "Bucket", render: (row) => row.maturity_bucket },
+                { key: "trades", header: "Trades", render: (row) => row.trade_count.toLocaleString() },
+                { key: "par", header: "Total Par", render: (row) => row.total_trade_amount.toLocaleString() },
+                { key: "stale", header: "Last Trade", render: (row) => row.days_since_last_trade === null ? "N/A" : `${row.days_since_last_trade}D` }
+              ]}
+            />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
                 <h2>Peer Relative Value</h2>
                 <p>Selected issuer spread versus peer median by bucket.</p>
               </div>
             </div>
             <BarMetricChart<PeerRvPoint> activeLabel={activeBucket} data={dashboard.peer_rv} label={(row) => row.maturity_bucket} onSelect={setActiveBucket} value={(row) => row.peer_gap_bps} tone="rose" />
+            <MiniTable<PeerRvPoint>
+              rows={[...dashboard.peer_rv].sort((a, b) => Math.abs(b.peer_gap_bps ?? 0) - Math.abs(a.peer_gap_bps ?? 0)).slice(0, 8)}
+              columns={[
+                { key: "bucket", header: "Bucket", render: (row) => row.maturity_bucket },
+                { key: "issuer", header: "Issuer Spread", render: (row) => formatNumber(row.issuer_spread_bps, " bps") },
+                { key: "peer", header: "Peer Median", render: (row) => formatNumber(row.peer_median_spread_bps, " bps") },
+                { key: "gap", header: "Gap", render: (row) => formatNumber(row.peer_gap_bps, " bps") },
+                { key: "n", header: "Peers", render: (row) => row.peer_issuer_count.toLocaleString() }
+              ]}
+            />
           </article>
 
           <article className="panel chart-panel">
@@ -1720,7 +2158,8 @@ export default function Home() {
                 { key: "spread", header: "Avg Spread", render: (row) => formatNumber(row.avg_spread_bps, " bps") },
                 { key: "liq", header: "Liquidity", render: (row) => formatNumber(row.liquidity_score) },
                 { key: "rv", header: "RV", render: (row) => formatNumber(row.rv_score) },
-                { key: "trades", header: "Trades", render: (row) => row.trade_count.toLocaleString() }
+                { key: "trades", header: "Trades", render: (row) => row.trade_count.toLocaleString() },
+                { key: "action", header: "Action", render: (row) => decisionLabel(row) }
               ]}
             />
           </article>
@@ -1752,6 +2191,7 @@ export default function Home() {
                 { key: "n", header: "Obs", render: (row) => row.observations.toLocaleString() }
               ]}
             />
+            <BarMetricChart<HistoricalSpreadPoint> activeLabel={activeBucket} data={dashboard.historical_percentiles} label={(row) => row.maturity_bucket} onSelect={setActiveBucket} value={(row) => row.percentile} tone="blue" />
           </article>
 
           <article className="panel chart-panel">
@@ -1769,16 +2209,29 @@ export default function Home() {
                 { key: "read", header: "Read-through", render: (row) => row.readthrough }
               ]}
             />
+            <BarMetricChart<CurveShapeMetric> data={dashboard.curve_shape} label={(row) => row.metric} value={(row) => row.value} tone="teal" />
           </article>
 
           <article className="panel chart-panel">
             <div className="chart-header">
               <div>
                 <h2>Scenario Shock Analysis</h2>
-                <p>Approximate price impact by maturity bucket for a +25 bp shock.</p>
+                <p>Approximate price impact by maturity bucket for a {scenarioShockBps >= 0 ? "+" : ""}{scenarioShockBps} bp shock.</p>
+              </div>
+              <div className="shock-control">
+                <label htmlFor="scenario-shock">Shock</label>
+                <input
+                  id="scenario-shock"
+                  max="150"
+                  min="-150"
+                  step="5"
+                  type="number"
+                  value={scenarioShockBps}
+                  onChange={(event) => setScenarioShockBps(Number(event.target.value))}
+                />
               </div>
             </div>
-            <BarMetricChart<ScenarioShockPoint> data={dashboard.scenario_shock} label={(row) => row.maturity_bucket} value={(row) => row.approx_price_impact_pct} tone="rose" />
+            <BarMetricChart<ScenarioShockPoint> data={visibleScenarioShock} label={(row) => row.maturity_bucket} value={(row) => row.approx_price_impact_pct} tone="rose" />
           </article>
 
           <article className="panel chart-panel">
@@ -1837,6 +2290,20 @@ export default function Home() {
               </select>
             </div>
           </div>
+          {topOpportunity ? (
+            <div className="opportunity-readthrough">
+              <div>
+                <span className="eyebrow">Top Opportunity</span>
+                <strong>{topOpportunity.cusip} · {topOpportunity.signal}</strong>
+                <p>
+                  {decisionLabel(topOpportunity)} based on spread {formatNumber(topOpportunity.spread_to_benchmark_bps, " bps")}, liquidity {formatNumber(topOpportunity.liquidity_score)}, RV score {formatNumber(topOpportunity.rv_score)}, and {topOpportunity.trade_count.toLocaleString()} trade(s).
+                </p>
+              </div>
+              <button className="secondary-button" type="button" onClick={() => selectCusip(topOpportunity.cusip)}>
+                Open Drilldown
+              </button>
+            </div>
+          ) : null}
           {filteredCandidates.length ? (
             <div className={`table-wrap ${tableDensity}`}>
               <table>
@@ -1932,6 +2399,16 @@ export default function Home() {
                   {selectedSecurity.evidence.length ? selectedSecurity.evidence.map((item) => <p key={item}>{item}</p>) : <p>No CUSIP-level evidence was generated.</p>}
                 </div>
                 <SecurityTradePathChart trades={selectedSecurity.trades} />
+                <div className="drilldown-chart-grid">
+                  <div className="mini-chart-panel">
+                    <h3>Yield History</h3>
+                    <SecurityMiniHistoryChart trades={selectedSecurity.trades} metric="yield" />
+                  </div>
+                  <div className="mini-chart-panel">
+                    <h3>Par Amount History</h3>
+                    <SecurityMiniHistoryChart trades={selectedSecurity.trades} metric="amount" />
+                  </div>
+                </div>
                 <MiniTable<SecurityCandidate>
                   rows={sameBucketComparables}
                   columns={[
@@ -1943,6 +2420,19 @@ export default function Home() {
                     { key: "trades", header: "Trades", render: (row) => row.trade_count.toLocaleString() }
                   ]}
                 />
+                <details className="developer-payload" open>
+                  <summary>Selected CUSIP Benchmark Audit</summary>
+                  <MiniTable<BenchmarkAuditRow>
+                    rows={selectedBenchmarkAuditRows}
+                    columns={[
+                      { key: "date", header: "Date", render: (row) => row.date },
+                      { key: "tenor", header: "Tenor", render: (row) => row.tenor },
+                      { key: "yield", header: "Benchmark Yield", render: (row) => formatNumber(row.benchmark_yield, "%") },
+                      { key: "source", header: "Source", render: (row) => row.benchmark_source },
+                      { key: "n", header: "Obs", render: (row) => row.observation_count.toLocaleString() }
+                    ]}
+                  />
+                </details>
                 <MiniTable<SecurityTradePoint>
                   rows={selectedSecurity.trades.slice(-20).reverse()}
                   columns={[
@@ -2138,7 +2628,7 @@ export default function Home() {
             <details className="developer-payload">
               <summary>Benchmark Audit</summary>
               <MiniTable<BenchmarkAuditRow>
-                rows={dashboard.benchmark_audit.slice(0, 40)}
+                rows={dashboard.benchmark_audit.slice(0, previewRowLimit)}
                 columns={[
                   { key: "date", header: "Date", render: (row) => row.date },
                   { key: "tenor", header: "Tenor", render: (row) => row.tenor },
@@ -2147,6 +2637,35 @@ export default function Home() {
                   { key: "n", header: "Obs", render: (row) => row.observation_count.toLocaleString() }
                 ]}
               />
+            </details>
+            <details className="developer-payload" open={showDeveloperPayload}>
+              <summary>Diagnostics Table Browser</summary>
+              <div className="split-list">
+                <div>
+                  <h3>Processed Candidate Preview</h3>
+                  <MiniTable<SecurityCandidate>
+                    rows={candidates.slice(0, previewRowLimit)}
+                    columns={[
+                      { key: "cusip", header: "CUSIP", render: (row) => row.cusip },
+                      { key: "issuer", header: "Issuer", render: (row) => row.issuer },
+                      { key: "bucket", header: "Bucket", render: (row) => row.maturity_bucket },
+                      { key: "spread", header: "Spread", render: (row) => formatNumber(row.spread_to_benchmark_bps, " bps") },
+                      { key: "liq", header: "Liquidity", render: (row) => formatNumber(row.liquidity_score) }
+                    ]}
+                  />
+                </div>
+                <div>
+                  <h3>Field Coverage Preview</h3>
+                  <MiniTable
+                    rows={dashboard.data_audit_center.field_coverage}
+                    columns={[
+                      { key: "field", header: "Field", render: (row) => row.field },
+                      { key: "column", header: "Column", render: (row) => row.detected_column },
+                      { key: "coverage", header: "Coverage", render: (row) => `${row.coverage_pct}%` }
+                    ]}
+                  />
+                </div>
+              </div>
             </details>
             <details className="developer-payload">
               <summary>Methodology Sections</summary>
@@ -2158,6 +2677,16 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+            </details>
+            <details className="developer-payload">
+              <summary>Version Changelog</summary>
+              <MiniTable
+                rows={methodologyChangelog}
+                columns={[
+                  { key: "version", header: "Version", render: (row) => row.version },
+                  { key: "change", header: "Change", render: (row) => row.change }
+                ]}
+              />
             </details>
             <MiniTable
               rows={dashboard.admin.module_status}

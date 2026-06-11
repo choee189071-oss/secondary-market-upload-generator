@@ -116,6 +116,19 @@ export type DataAuditCenter = {
   warnings: string[];
 };
 
+export type DataQualityScorecard = {
+  overall_score: number | null;
+  status: "pass" | "review" | "blocked";
+  metrics: Array<{
+    metric: string;
+    score: number | null;
+    status: "pass" | "review" | "blocked";
+    numerator: number | null;
+    denominator: number | null;
+    detail: string;
+  }>;
+};
+
 export type BenchmarkGovernance = {
   active_source: string | null;
   policy: string;
@@ -186,6 +199,7 @@ export type PositionPoint = {
   cusip: string;
   issuer?: string;
   maturity_bucket: string | null;
+  avg_yield: number | null;
   spread_bps: number | null;
   liquidity_score: number | null;
   rv_score: number | null;
@@ -212,6 +226,24 @@ export type LiquidityPoint = {
   latest_trade_date: string | null;
   days_since_last_trade: number | null;
   liquidity_score: number | null;
+};
+
+export type DistributionPoint = {
+  bucket: string;
+  trade_count: number;
+  cusip_count: number;
+  total_trade_amount: number;
+  share_pct: number;
+};
+
+export type TopCusipActivityPoint = {
+  cusip: string;
+  maturity_bucket: string | null;
+  trade_count: number;
+  total_trade_amount: number;
+  days_since_last_trade: number | null;
+  liquidity_score: number | null;
+  spread_bps: number | null;
 };
 
 export type PeerRvPoint = {
@@ -383,6 +415,7 @@ export type DashboardAnalytics = {
   file_readiness: FileReadinessReport[];
   data_health: DataHealth;
   data_audit_center: DataAuditCenter;
+  data_quality_scorecard: DataQualityScorecard;
   benchmark_governance: BenchmarkGovernance;
   issuers: IssuerOption[];
   issuer_curve: CurvePoint[];
@@ -392,6 +425,9 @@ export type DashboardAnalytics = {
   positioning: PositionPoint[];
   spread_movement_ladder: SpreadMovementPoint[];
   liquidity: LiquidityPoint[];
+  trade_size_distribution: DistributionPoint[];
+  staleness_distribution: DistributionPoint[];
+  top_cusip_activity: TopCusipActivityPoint[];
   peer_rv: PeerRvPoint[];
   cross_issuer_rv: CrossIssuerRvPoint[];
   spread_attribution: SpreadAttributionPoint[];
@@ -1435,6 +1471,97 @@ function buildDataAuditCenter(input: {
   };
 }
 
+function scoreStatus(score: number | null): "pass" | "review" | "blocked" {
+  if (score === null) {
+    return "review";
+  }
+  if (score >= 90) {
+    return "pass";
+  }
+  if (score >= 70) {
+    return "review";
+  }
+  return "blocked";
+}
+
+function buildDataQualityScorecard(dataAudit: DataAuditCenter): DataQualityScorecard {
+  const coverageByField = new Map(dataAudit.field_coverage.map((row) => [row.field, row.coverage_pct]));
+  const requiredFields = ["cusip", "trade_date", "yield"]
+    .map((field) => coverageByField.get(field))
+    .filter((value): value is number => value !== undefined);
+  const requiredScore = requiredFields.length ? requiredFields.reduce((sum, value) => sum + value, 0) / requiredFields.length : null;
+  const maturityScore = coverageByField.get("maturity") ?? null;
+  const amountScore = coverageByField.get("trade_amount") ?? null;
+  const benchmarkScore = dataAudit.reconciliation.benchmark_match_rate_pct;
+  const cusipReferenceScore = dataAudit.reconciliation.cusip_reference_match_rate_pct;
+  const issuerMappingScore = dataAudit.reconciliation.issuer_mapping_match_rate_pct;
+  const metrics: DataQualityScorecard["metrics"] = [
+    {
+      metric: "Required Field Coverage",
+      score: roundOrNull(requiredScore, 1),
+      status: scoreStatus(requiredScore),
+      numerator: dataAudit.reconciliation.model_ready_rows,
+      denominator: dataAudit.reconciliation.raw_rows,
+      detail: "Average coverage across CUSIP, trade date, and yield fields."
+    },
+    {
+      metric: "Maturity Quality",
+      score: roundOrNull(maturityScore, 1),
+      status: scoreStatus(maturityScore),
+      numerator: null,
+      denominator: dataAudit.reconciliation.raw_rows,
+      detail: "Coverage of maturity data used to bucket securities and build curves."
+    },
+    {
+      metric: "Trade Amount Coverage",
+      score: roundOrNull(amountScore, 1),
+      status: scoreStatus(amountScore),
+      numerator: null,
+      denominator: dataAudit.reconciliation.raw_rows,
+      detail: "Coverage of par amount used for liquidity, activity, and bubble sizing."
+    },
+    {
+      metric: "Benchmark Match",
+      score: roundOrNull(benchmarkScore, 1),
+      status: scoreStatus(benchmarkScore),
+      numerator: dataAudit.reconciliation.model_ready_rows - dataAudit.reconciliation.unmatched_benchmark_rows,
+      denominator: dataAudit.reconciliation.model_ready_rows,
+      detail: "Share of eligible issuer/date/bucket observations matched to a benchmark tenor."
+    },
+    {
+      metric: "CUSIP Reference Match",
+      score: roundOrNull(cusipReferenceScore, 1),
+      status: scoreStatus(cusipReferenceScore),
+      numerator: null,
+      denominator: null,
+      detail: cusipReferenceScore === null ? "No bond reference file was uploaded; optional match is not included in the overall score." : "Share of CUSIPs matched to uploaded bond reference metadata."
+    },
+    {
+      metric: "Issuer Mapping Match",
+      score: roundOrNull(issuerMappingScore, 1),
+      status: scoreStatus(issuerMappingScore),
+      numerator: null,
+      denominator: null,
+      detail: issuerMappingScore === null ? "No issuer mapping file or manual sector override was uploaded; optional match is not included in the overall score." : "Share of issuer names matched to sector mapping metadata."
+    }
+  ];
+  const weightedMetrics = [
+    { score: requiredScore, weight: 0.3 },
+    { score: maturityScore, weight: 0.15 },
+    { score: amountScore, weight: 0.15 },
+    { score: benchmarkScore, weight: 0.3 },
+    { score: cusipReferenceScore, weight: 0.05 },
+    { score: issuerMappingScore, weight: 0.05 }
+  ].filter((item): item is { score: number; weight: number } => item.score !== null && Number.isFinite(item.score));
+  const weightTotal = weightedMetrics.reduce((sum, item) => sum + item.weight, 0);
+  const overall = weightTotal ? weightedMetrics.reduce((sum, item) => sum + item.score * item.weight, 0) / weightTotal : null;
+  return {
+    overall_score: roundOrNull(overall, 1),
+    status: scoreStatus(overall),
+    metrics
+  };
+}
+
 function buildBenchmarkGovernance(input: {
   tradeIndexCurve: BenchmarkRow[];
   uploadedMmdCurve: BenchmarkRow[];
@@ -1541,6 +1668,91 @@ function buildLiquidityByBucket(trades: TradeRow[], issuer: string, periodDays: 
     };
   });
   return points.filter((point): point is LiquidityPoint => point !== null);
+}
+
+function tradeWindowRows(trades: TradeRow[], issuer: string, periodDays: number): TradeRow[] {
+  const issuerRows = trades.filter((trade) => trade.issuer === issuer && trade.trade_date);
+  if (!issuerRows.length) {
+    return [];
+  }
+  const latest = new Date(Math.max(...issuerRows.map((row) => row.trade_date?.getTime() ?? 0)));
+  const cutoff = new Date(latest);
+  cutoff.setUTCDate(cutoff.getUTCDate() - periodDays);
+  const windowRows = issuerRows.filter((row) => (row.trade_date?.getTime() ?? 0) >= cutoff.getTime());
+  return windowRows.length ? windowRows : issuerRows;
+}
+
+function bucketDistribution(rows: TradeRow[], buckets: Array<{ label: string; test: (row: TradeRow) => boolean }>): DistributionPoint[] {
+  const totalRows = Math.max(rows.length, 1);
+  return buckets.map((bucket) => {
+    const bucketRows = rows.filter(bucket.test);
+    return {
+      bucket: bucket.label,
+      trade_count: bucketRows.length,
+      cusip_count: new Set(bucketRows.map((row) => row.cusip).filter(Boolean)).size,
+      total_trade_amount: Math.round(bucketRows.reduce((sum, row) => sum + (row.trade_amount ?? 0), 0)),
+      share_pct: roundOrNull((bucketRows.length / totalRows) * 100, 1) ?? 0
+    };
+  }).filter((point) => point.trade_count > 0);
+}
+
+function buildTradeSizeDistribution(trades: TradeRow[], issuer: string, periodDays: number): DistributionPoint[] {
+  const rows = tradeWindowRows(trades, issuer, periodDays).filter((row) => row.trade_amount !== null);
+  return bucketDistribution(rows, [
+    { label: "<100k", test: (row) => (row.trade_amount ?? 0) < 100_000 },
+    { label: "100k-250k", test: (row) => (row.trade_amount ?? 0) >= 100_000 && (row.trade_amount ?? 0) < 250_000 },
+    { label: "250k-500k", test: (row) => (row.trade_amount ?? 0) >= 250_000 && (row.trade_amount ?? 0) < 500_000 },
+    { label: "500k-1mm", test: (row) => (row.trade_amount ?? 0) >= 500_000 && (row.trade_amount ?? 0) < 1_000_000 },
+    { label: "1mm-5mm", test: (row) => (row.trade_amount ?? 0) >= 1_000_000 && (row.trade_amount ?? 0) < 5_000_000 },
+    { label: "5mm+", test: (row) => (row.trade_amount ?? 0) >= 5_000_000 }
+  ]);
+}
+
+function buildStalenessDistribution(candidates: SecurityCandidate[], issuer: string): DistributionPoint[] {
+  const rows = candidates
+    .filter((candidate) => candidate.issuer === issuer && candidate.days_since_last_trade !== null)
+    .map((candidate) => ({
+      trade_date: null,
+      cusip: candidate.cusip,
+      trade_amount: candidate.total_trade_amount,
+      days_since_last_trade: candidate.days_since_last_trade
+    }));
+  const totalRows = Math.max(rows.length, 1);
+  return [
+    { label: "0-7D", min: 0, max: 7 },
+    { label: "8-30D", min: 8, max: 30 },
+    { label: "31-90D", min: 31, max: 90 },
+    { label: "91-180D", min: 91, max: 180 },
+    { label: "180D+", min: 181, max: Infinity }
+  ].map((bucket) => {
+    const bucketRows = rows.filter((row) => {
+      const days = row.days_since_last_trade ?? Infinity;
+      return days >= bucket.min && days <= bucket.max;
+    });
+    return {
+      bucket: bucket.label,
+      trade_count: bucketRows.length,
+      cusip_count: bucketRows.length,
+      total_trade_amount: Math.round(bucketRows.reduce((sum, row) => sum + row.trade_amount, 0)),
+      share_pct: roundOrNull((bucketRows.length / totalRows) * 100, 1) ?? 0
+    };
+  }).filter((point) => point.trade_count > 0);
+}
+
+function buildTopCusipActivity(candidates: SecurityCandidate[], issuer: string): TopCusipActivityPoint[] {
+  return candidates
+    .filter((candidate) => candidate.issuer === issuer)
+    .sort((a, b) => b.trade_count - a.trade_count || b.total_trade_amount - a.total_trade_amount)
+    .slice(0, 15)
+    .map((candidate) => ({
+      cusip: candidate.cusip,
+      maturity_bucket: candidate.maturity_bucket,
+      trade_count: candidate.trade_count,
+      total_trade_amount: candidate.total_trade_amount,
+      days_since_last_trade: candidate.days_since_last_trade,
+      liquidity_score: candidate.liquidity_score,
+      spread_bps: candidate.spread_to_benchmark_bps
+    }));
 }
 
 function latestSpreadByIssuerBucket(spreadObs: SpreadObservation[]) {
@@ -2332,6 +2544,7 @@ function buildReportArtifacts(input: {
   payload: NextsrPayload;
   dataHealth: DataHealth;
   dataAudit: DataAuditCenter;
+  dataQualityScorecard: DataQualityScorecard;
   benchmarkGovernance: BenchmarkGovernance;
   recommendation: RecommendationNarrative;
   deskSnapshot: DeskSnapshot;
@@ -2350,6 +2563,7 @@ function buildReportArtifacts(input: {
     audit_data_json: JSON.stringify({
       data_health: input.dataHealth,
       data_audit_center: input.dataAudit,
+      data_quality_scorecard: input.dataQualityScorecard,
       benchmark_governance: input.benchmarkGovernance
     }, null, 2),
     security_detail_csv: buildSecurityDetailCsv(input.securityDetails),
@@ -2404,7 +2618,7 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       status: "ported",
       priority: "High",
       notes: "Multi-file trade upload, required/recommended field detection, readiness status, and safe missing-field handling are implemented.",
-      next_step: "Add blank template downloads to match Streamlit sidebar utilities."
+      next_step: "Keep testing additional vendor export formats."
     },
     {
       area: "Data Intake / Governance",
@@ -2413,28 +2627,28 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Optional Reference Files expander",
       status: "ported",
       priority: "High",
-      notes: "Bond reference, issuer mapping, and MMD benchmark uploads are supported in the Next API.",
-      next_step: "Add issuer-sector override workflow and template examples."
+      notes: "Bond reference, issuer mapping, MMD benchmark uploads, manual sector override, and template examples are supported in the Next API/UI.",
+      next_step: "Persist issuer-sector defaults if a backend datastore is introduced."
     },
     {
       area: "Data Intake / Governance",
       streamlit_surface: "Download blank templates",
       source_anchor: "sidebar download blank templates",
-      next_surface: "Not built",
-      status: "missing",
+      next_surface: "Template downloads in Optional Reference Files",
+      status: "ported",
       priority: "Medium",
-      notes: "Streamlit provides blank trade, bond reference, and benchmark curve templates. Next currently accepts files but does not generate templates.",
-      next_step: "Add template CSV downloads beside Optional Reference Files."
+      notes: "Blank trade, bond reference, issuer mapping, and MMD benchmark CSV templates are downloadable from the input panel.",
+      next_step: "Add richer sample workbooks if users need Excel-formatted templates."
     },
     {
       area: "Data Intake / Governance",
       streamlit_surface: "Performance controls / clear cached calculations",
       source_anchor: "sidebar performance",
-      next_surface: "Upload limits and serverless timeout guardrails",
-      status: "missing",
+      next_surface: "Performance / Workspace controls",
+      status: "ported",
       priority: "Low",
-      notes: "Streamlit exposes table row limits, performance mode, full raw table toggles, and cache clearing. Next has serverless-safe upload limits but no user-facing performance controls.",
-      next_step: "Add display-density/performance settings and a reset-workspace action if needed."
+      notes: "Next exposes upload limits, display mode, diagnostics toggle, table density, row limits, and reset-workspace controls.",
+      next_step: "Add server-side caching only if uploads grow beyond Vercel synchronous limits."
     },
     {
       area: "Data Intake / Governance",
@@ -2450,11 +2664,11 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       area: "Data Intake / Governance",
       streamlit_surface: "Data Quality Scorecard",
       source_anchor: "data-quality-scorecard",
-      next_surface: "Data Audit Center",
-      status: "partial",
+      next_surface: "Data Quality Scorecard + Data Audit Center",
+      status: "ported",
       priority: "High",
-      notes: "Row reconciliation, coverage, warnings, and match rates exist; weighted scorecard presentation is not yet one-to-one.",
-      next_step: "Add weighted score tiles for CUSIP match, maturity quality, benchmark coverage, and amount coverage."
+      notes: "Weighted score tiles now cover required fields, maturity quality, amount coverage, benchmark match, CUSIP reference match, and issuer mapping match.",
+      next_step: "Tune score weights after more desk-approved sample files are reviewed."
     },
     {
       area: "Executive / Navigation",
@@ -2471,10 +2685,10 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       streamlit_surface: "Sidebar desk navigation / contents",
       source_anchor: "dashboard-contents / sidebar-nav-small",
       next_surface: "Sticky workflow rail",
-      status: "partial",
+      status: "ported",
       priority: "High",
-      notes: "Navigation exists, but the previous Next layout was too dense and mixed exports into the first output view.",
-      next_step: "Keep top rail focused on core journey and move downloads into Export Center."
+      notes: "Top rail now follows Intake, Snapshot, Audit, Charts, CUSIPs, and Export / Parity, with downloads moved out of the first output view.",
+      next_step: "Revisit naming after user testing with real analyst workflows."
     },
     {
       area: "Benchmark / Spread Framework",
@@ -2493,8 +2707,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Issuer Curve vs Benchmark",
       status: "ported",
       priority: "High",
-      notes: "Issuer and benchmark curve display with legend toggle, brush zoom, crosshair, and bucket selection is implemented.",
-      next_step: "Add spread-curve mode in addition to yield-curve mode."
+      notes: "Issuer/benchmark yield curve, spread-curve mode, legend toggle, brush zoom, crosshair, and bucket selection are implemented.",
+      next_step: "Add multi-rating benchmark overlays after the rating policy is finalized."
     },
     {
       area: "Benchmark / Spread Framework",
@@ -2503,8 +2717,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Spread Trend reference lines + Spread Movement Ladder",
       status: "partial",
       priority: "High",
-      notes: "Baseline/current/sector/all-issuer references exist; Streamlit's spread level heatmap or rating ladder is not fully replicated.",
-      next_step: "Add current-spread heatmap by maturity bucket and benchmark rating."
+      notes: "Baseline/current/sector/all-issuer references, movement ladder, and current spread heatmap by maturity bucket are implemented; rating ladder controls are still partial.",
+      next_step: "Add benchmark-rating selector once rating-specific curve governance is approved."
     },
     {
       area: "Benchmark / Spread Framework",
@@ -2523,8 +2737,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Peer Relative Value",
       status: "partial",
       priority: "High",
-      notes: "Peer gap by bucket exists; peer spread curve comparison, heatmap/ladder, and full ranking table need more parity.",
-      next_step: "Add peer curve matrix and peer ranking table."
+      notes: "Peer gap by bucket, peer gap bar chart, and peer ranking table are implemented; peer curve matrix is still partial.",
+      next_step: "Add peer curve matrix with issuer selection controls."
     },
     {
       area: "Relative Value Signals",
@@ -2533,8 +2747,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Cross-Issuer RV Ranking",
       status: "partial",
       priority: "High",
-      notes: "Cross-issuer ranking exists; peer gap matrix, opportunity map, and decision table are not fully replicated.",
-      next_step: "Add opportunity map and decision table with action labels."
+      notes: "Cross-issuer ranking, opportunity map, and decision table action labels are implemented; full peer gap matrix remains partial.",
+      next_step: "Add issuer-by-issuer peer gap matrix."
     },
     {
       area: "Relative Value Signals",
@@ -2543,8 +2757,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Historical Spread Range",
       status: "partial",
       priority: "Medium",
-      notes: "Current/median/percentile table exists; distribution chart and window controls are not one-to-one.",
-      next_step: "Add histogram/distribution view and raw/rolling window toggle."
+      notes: "Current/median/percentile table and percentile chart exist; raw/rolling window controls are still partial.",
+      next_step: "Add rolling-window selector and full raw spread distribution view."
     },
     {
       area: "Relative Value Signals",
@@ -2553,8 +2767,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Curve Shape Analytics",
       status: "partial",
       priority: "Medium",
-      notes: "Slope/butterfly diagnostics exist; Streamlit's yield/spread curve basis toggle and richer read-through are partial.",
-      next_step: "Add yield/spread basis toggle and curve-shape chart."
+      notes: "Slope/butterfly diagnostics, curve-shape bar chart, and issuer curve yield/spread basis toggle exist; richer curve decomposition is partial.",
+      next_step: "Add historical curve-shape trend and richer read-through rules."
     },
     {
       area: "Relative Value Signals",
@@ -2563,8 +2777,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Desk Snapshot + AI Commentary Studio + RV Positioning",
       status: "partial",
       priority: "Medium",
-      notes: "Narrative and opportunity positioning exist, but Streamlit's timeline and rich/cheap quadrant tabs are not fully replicated.",
-      next_step: "Add explicit trading activity timeline and rich/cheap quadrant panel."
+      notes: "Narrative, opportunity positioning, and rich/cheap quadrant opportunity map exist; explicit trading timeline tabs are still partial.",
+      next_step: "Add trading activity timeline with selectable event buckets."
     },
     {
       area: "CUSIP Workflow",
@@ -2573,8 +2787,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Security Screener",
       status: "ported",
       priority: "High",
-      notes: "CUSIP score, filters, sorting, table controls, and CSV export are implemented.",
-      next_step: "Add Streamlit-style opportunity read-through card above the table."
+      notes: "CUSIP score, filters, sorting, table controls, opportunity read-through card, drilldown link, and CSV export are implemented.",
+      next_step: "Tune signal language against desk-approved examples."
     },
     {
       area: "CUSIP Workflow",
@@ -2583,8 +2797,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "CUSIP Opportunity Drilldown",
       status: "partial",
       priority: "High",
-      notes: "Security detail, trade path, read-through, comparable CUSIPs, and latest trades exist; benchmark/rating drilldown controls and separate yield/amount charts are partial.",
-      next_step: "Add yield history, amount history, and benchmark audit tabs for selected CUSIP."
+      notes: "Security detail, trade path, yield history, par amount history, benchmark audit, read-through, comparable CUSIPs, and latest trades exist; rating drilldown controls remain partial.",
+      next_step: "Add rating-specific drilldown controls when rating curve governance is finalized."
     },
     {
       area: "CUSIP Workflow",
@@ -2593,8 +2807,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "RV Positioning Map",
       status: "ported",
       priority: "High",
-      notes: "Liquidity-vs-spread bubble map with selected CUSIP interaction is implemented.",
-      next_step: "Add y-axis toggle between spread and average yield."
+      notes: "Liquidity-vs-spread/yield bubble map with selected CUSIP interaction and y-axis toggle is implemented.",
+      next_step: "Add issuer comparison selection if multi-issuer positioning becomes a core workflow."
     },
     {
       area: "CUSIP Workflow",
@@ -2611,10 +2825,10 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       streamlit_surface: "Liquidity / Trading Frequency Analysis",
       source_anchor: "liquidity",
       next_surface: "Monthly Activity + Liquidity by Bucket",
-      status: "partial",
+      status: "ported",
       priority: "Medium",
-      notes: "Monthly activity, bucket liquidity, and trade frequency exist; trade size distribution, staleness histogram, and top CUSIP bar chart are partial.",
-      next_step: "Add trade-size distribution and days-since-last-trade histogram."
+      notes: "Monthly activity, bucket liquidity, trade frequency, trade-size distribution, staleness histogram, and top CUSIP activity are implemented.",
+      next_step: "Add liquidity trend overlays if users need time-series liquidity scoring."
     },
     {
       area: "Risk / Liquidity",
@@ -2633,8 +2847,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Scenario Shock Analysis",
       status: "partial",
       priority: "Medium",
-      notes: "Bucket-level +25 bp impact is implemented; custom shock curve and CUSIP-level shock detail are not fully replicated.",
-      next_step: "Add custom short/10Y/20Y/30Y shock controls and CUSIP exposure map."
+      notes: "Bucket-level impact and custom uniform shock control are implemented; custom short/10Y/20Y/30Y curve shocks and CUSIP exposure map remain partial.",
+      next_step: "Add tenor-specific shock curve controls and CUSIP exposure map."
     },
     {
       area: "Risk / Liquidity",
@@ -2643,8 +2857,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Spread Movement Ladder",
       status: "partial",
       priority: "Medium",
-      notes: "Movement ladder is implemented; Streamlit/DuckDB heatmap and rating selector are not fully replicated.",
-      next_step: "Add heatmap view with rating/tenor controls."
+      notes: "Movement ladder and current-spread heatmap are implemented; rating selector remains partial.",
+      next_step: "Add rating/tenor controls once benchmark rating policy is finalized."
     },
     {
       area: "AI / Narrative",
@@ -2693,8 +2907,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Security Detail CSV + Benchmark CSV + Developer Payload",
       status: "partial",
       priority: "Medium",
-      notes: "Selected detail exports exist; full raw/processed table viewer and merged market data downloads are partial.",
-      next_step: "Add raw/processed table browser behind a collapsed diagnostics section."
+      notes: "Selected detail exports, benchmark CSV, developer payload, and diagnostics table browser exist; full merged-market raw downloads remain partial.",
+      next_step: "Add processed merged-market CSV export if file size remains Vercel-safe."
     },
     {
       area: "Export / Admin",
@@ -2703,8 +2917,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Admin / Benchmark Policy + Module Status",
       status: "partial",
       priority: "Low",
-      notes: "Methodology blocks and module status exist; full assumption tables and changelog are partial.",
-      next_step: "Add versioned assumption tables and methodology changelog."
+      notes: "Methodology blocks, benchmark assumption table, module status, and version changelog are implemented; full Streamlit expander copy is still partial.",
+      next_step: "Backfill any remaining Streamlit methodology prose after final product wording is approved."
     }
   ];
 }
@@ -2739,6 +2953,11 @@ function emptyDashboard(): DashboardAnalytics {
       },
       warnings: []
     },
+    data_quality_scorecard: {
+      overall_score: null,
+      status: "blocked",
+      metrics: []
+    },
     benchmark_governance: {
       active_source: null,
       policy: "Trade Sheet Index / Index Rate first; uploaded MMD is fallback when trade index is unavailable.",
@@ -2759,6 +2978,9 @@ function emptyDashboard(): DashboardAnalytics {
     positioning: [],
     spread_movement_ladder: [],
     liquidity: [],
+    trade_size_distribution: [],
+    staleness_distribution: [],
+    top_cusip_activity: [],
     peer_rv: [],
     cross_issuer_rv: [],
     spread_attribution: [],
@@ -2810,12 +3032,12 @@ function emptyDashboard(): DashboardAnalytics {
     analyst_context: {},
     export_summary_markdown: "",
     admin: {
-      methodology_version: "nextsr-parity.v2",
+      methodology_version: "nextsr-parity.v3",
       benchmark_policy: "Trade Sheet Index / Index Rate first; uploaded MMD is fallback when trade index is unavailable.",
       module_status: [
-        { module: "Data Engine", status: "ported", notes: "Multi-trade upload, optional bond reference, issuer mapping, MMD fallback, merged trade universe." },
-        { module: "Core Dashboard", status: "ported", notes: "Spread trend, volume, issuer curve, spread ladder, liquidity, screener, RV positioning, CUSIP drilldown." },
-        { module: "Advanced Analytics", status: "partial", notes: "Peer RV, cross-issuer RV, attribution, historical range, curve shape, scenario shock, and benchmark audit are implemented with transparent approximations where needed." },
+        { module: "Data Engine", status: "ported", notes: "Multi-trade upload, optional bond reference, issuer mapping, sector override, MMD fallback, templates, quality scorecard, and merged trade universe." },
+        { module: "Core Dashboard", status: "ported", notes: "Desk snapshot, spread trend, volume, issuer curve yield/spread mode, spread ladder, heatmap, liquidity, screener, RV positioning, CUSIP drilldown." },
+        { module: "Advanced Analytics", status: "partial", notes: "Peer RV, cross-issuer RV, opportunity map, attribution, historical range, curve shape, scenario shock, and benchmark audit are implemented with transparent approximations where needed." },
         { module: "Watchlist / Drilldown", status: "ported", notes: "Client-side watchlist, selected CUSIP detail, trade path, and read-through are available." },
         { module: "AI / Export / Admin", status: "partial", notes: "Desk snapshot, commentary studio, markdown/HTML/chart-data exports, PPT outline, report manifest, and methodology metadata are available; live AI/PDF/PPTX services can be added after governance is set." }
       ]
@@ -2837,12 +3059,14 @@ function buildDashboardAnalytics(input: {
   periodDays: number;
   payload?: NextsrPayload;
 }): DashboardAnalytics {
+  const dataQualityScorecard = buildDataQualityScorecard(input.dataAudit);
   if (!input.issuer) {
     return {
       ...emptyDashboard(),
       file_readiness: input.readiness,
       data_health: input.dataHealth,
       data_audit_center: input.dataAudit,
+      data_quality_scorecard: dataQualityScorecard,
       benchmark_governance: input.benchmarkGovernance,
       issuers: buildIssuerOptions(input.trades)
     };
@@ -2860,6 +3084,9 @@ function buildDashboardAnalytics(input: {
   const monthlyActivity = buildMonthlyActivity(input.trades, input.issuer);
   const spreadMovement = buildSpreadMovementLadder(input.spreadObs, input.issuer);
   const liquidity = buildLiquidityByBucket(input.trades, input.issuer, input.periodDays);
+  const tradeSizeDistribution = buildTradeSizeDistribution(input.trades, input.issuer, input.periodDays);
+  const stalenessDistribution = buildStalenessDistribution(input.securityScreener, input.issuer);
+  const topCusipActivity = buildTopCusipActivity(input.securityScreener, input.issuer);
   const peerRv = buildPeerRv(input.spreadObs, input.issuer);
   const crossIssuerRv = buildCrossIssuerRv(input.trades, input.securityScreener);
   const historicalPercentiles = buildHistoricalPercentiles(input.spreadObs, input.issuer);
@@ -2909,6 +3136,9 @@ function buildDashboardAnalytics(input: {
     monthly_activity: monthlyActivity,
     spread_movement_ladder: spreadMovement.slice(0, 50),
     liquidity,
+    trade_size_distribution: tradeSizeDistribution,
+    staleness_distribution: stalenessDistribution,
+    top_cusip_activity: topCusipActivity,
     peer_rv: peerRv,
     cross_issuer_rv: crossIssuerRv.slice(0, 50),
     historical_percentiles: historicalPercentiles,
@@ -2921,6 +3151,7 @@ function buildDashboardAnalytics(input: {
         payload,
         dataHealth: input.dataHealth,
         dataAudit: input.dataAudit,
+        dataQualityScorecard,
         benchmarkGovernance: input.benchmarkGovernance,
         recommendation,
         deskSnapshot,
@@ -2939,6 +3170,7 @@ function buildDashboardAnalytics(input: {
     file_readiness: input.readiness,
     data_health: input.dataHealth,
     data_audit_center: input.dataAudit,
+    data_quality_scorecard: dataQualityScorecard,
     benchmark_governance: input.benchmarkGovernance,
     issuers: buildIssuerOptions(input.trades),
     issuer_curve: issuerCurve,
@@ -2949,6 +3181,7 @@ function buildDashboardAnalytics(input: {
       cusip: candidate.cusip,
       issuer: candidate.issuer,
       maturity_bucket: candidate.maturity_bucket,
+      avg_yield: candidate.avg_yield,
       spread_bps: candidate.spread_to_benchmark_bps,
       liquidity_score: candidate.liquidity_score,
       rv_score: candidate.rv_score,
@@ -2958,6 +3191,9 @@ function buildDashboardAnalytics(input: {
     })),
     spread_movement_ladder: spreadMovement,
     liquidity,
+    trade_size_distribution: tradeSizeDistribution,
+    staleness_distribution: stalenessDistribution,
+    top_cusip_activity: topCusipActivity,
     peer_rv: peerRv,
     cross_issuer_rv: crossIssuerRv,
     spread_attribution: spreadAttribution,
@@ -3073,6 +3309,7 @@ function buildPreparedResult(input: {
         file_readiness: input.readiness,
         data_health: input.dataHealth,
         data_audit_center: dataAudit,
+        data_quality_scorecard: buildDataQualityScorecard(dataAudit),
         benchmark_governance: input.benchmarkGovernance
       }
     };
@@ -3298,8 +3535,8 @@ export function buildNextsrPayloadFromFiles(input: {
     benchmarkGovernance,
     tradesBeforeDedupe: enrichedTrades.length,
     duplicateRowsRemoved: removed,
-    bondReferenceCusips: new Set(bondReference.keys()),
-    issuerMappingIssuers: new Set(issuerMapping.keys()),
+    bondReferenceCusips: input.bondRows?.length ? new Set(bondReference.keys()) : undefined,
+    issuerMappingIssuers: input.issuerMappingRows?.length ? new Set(issuerMapping.keys()) : undefined,
     issuer: input.issuer,
     maturityBucket: input.maturityBucket,
     periodDays: input.periodDays

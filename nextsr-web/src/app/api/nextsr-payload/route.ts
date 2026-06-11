@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     const issuer = formData.get("issuer");
     const maturityBucket = formData.get("maturityBucket");
     const periodDaysRaw = formData.get("periodDays");
+    const sectorOverride = formData.get("sectorOverride");
     const bondReference = formData.get("bondReference");
     const issuerMapping = formData.get("issuerMapping");
     const mmdBenchmark = formData.get("mmdBenchmark");
@@ -56,11 +57,21 @@ export async function POST(request: Request) {
         rows: await readTabularFile(file)
       });
     }
+    const issuerMappingRows = issuerMapping instanceof File ? await readTabularFile(issuerMapping) : [];
+    const issuerOverrideText = typeof issuer === "string" ? issuer.trim() : "";
+    const sectorOverrideText = typeof sectorOverride === "string" ? sectorOverride.trim() : "";
+    if (issuerOverrideText && sectorOverrideText) {
+      issuerMappingRows.push({
+        issuer: issuerOverrideText,
+        sector: sectorOverrideText,
+        primary_type: "Manual Override"
+      });
+    }
 
     const result = buildNextsrPayloadFromFiles({
       tradeFiles: parsedTradeFiles,
       bondRows: bondReference instanceof File ? await readTabularFile(bondReference) : undefined,
-      issuerMappingRows: issuerMapping instanceof File ? await readTabularFile(issuerMapping) : undefined,
+      issuerMappingRows: issuerMappingRows.length ? issuerMappingRows : undefined,
       mmdRows: mmdBenchmark instanceof File ? await readTabularFile(mmdBenchmark) : undefined,
       issuer: typeof issuer === "string" ? issuer : null,
       maturityBucket: typeof maturityBucket === "string" ? maturityBucket : null,
