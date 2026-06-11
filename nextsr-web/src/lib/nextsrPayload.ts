@@ -704,6 +704,41 @@ function buildReadinessReport(rows: RawRow[], trades: TradeRow[], sourceFile: st
   };
 }
 
+function buildMmdReadinessReport(rows: RawRow[], benchmarkCurve: BenchmarkRow[]): FileReadinessReport {
+  const dateColumn = detectedField(rows, ["date", "trade_date", "pricing_date", "curve_date", "mmd_date"]);
+  const tenorColumns = new Set<string>();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      const tenorMatch =
+        key.toUpperCase().match(/(?:^|_)([1-9]|[1-3][0-9]|40)_?(?:Y|YR|YEAR|YEARS)$/) ??
+        key.toUpperCase().match(/([1-9]|[1-3][0-9]|40)_?(?:Y|YR|YEAR|YEARS)/);
+      if (tenorMatch) {
+        tenorColumns.add(key);
+      }
+    }
+  }
+  const warnings = [
+    ...(rows.length && !dateColumn ? ["No date column was detected."] : []),
+    ...(rows.length && !tenorColumns.size ? ["No tenor columns were detected."] : []),
+    ...(rows.length && !benchmarkCurve.length ? ["No usable AAA MMD curve points were produced."] : [])
+  ];
+  return {
+    source_file: "AAA MMD Benchmark",
+    raw_rows: rows.length,
+    model_ready_rows: benchmarkCurve.length,
+    detected_fields: {
+      curve_date: dateColumn,
+      tenor_columns: tenorColumns.size ? `${tenorColumns.size} tenor column(s)` : null,
+      benchmark_yield: tenorColumns.size ? "tenor values" : null
+    },
+    missing_required: rows.length && (!dateColumn || !tenorColumns.size) ? ["curve_date_or_tenor"] : [],
+    missing_recommended: [],
+    dataset: "AAA MMD Benchmark",
+    can_run: benchmarkCurve.length > 0,
+    warnings
+  };
+}
+
 function maturityBucket(maturity: Date | null, tradeDate: Date | null): string | null {
   if (!maturity || !tradeDate) {
     return null;
@@ -865,7 +900,7 @@ function parseMmdBenchmarkCurve(rows: RawRow[]): BenchmarkRow[] {
         date: dateLabel,
         tenor: `${Number(tenorMatch[1])}Y`,
         benchmark_yield: benchmarkYield,
-        benchmark_source: "Uploaded MMD",
+        benchmark_source: "Uploaded AAA MMD",
         observation_count: 1
       });
     }
@@ -1686,31 +1721,31 @@ function buildBenchmarkGovernance(input: {
   const uploadedMmdActive = input.uploadedMmdCurve.length > 0;
   return {
     active_source: activeSource,
-    policy: "Use uploaded MMD as the primary benchmark curve. Use Trade Sheet Index / Index Rate only as a fallback when no uploaded MMD curve is available.",
+    policy: "Use uploaded AAA MMD as the primary benchmark curve. Use Trade Sheet Index / Index Rate only as a fallback when no uploaded AAA MMD curve is available.",
     trade_index_points: input.tradeIndexCurve.length,
     uploaded_mmd_points: input.uploadedMmdCurve.length,
     active_points: input.activeCurve.length,
     fallback_points_used: uploadedMmdActive ? 0 : input.tradeIndexCurve.length,
     missing_active_tenors: missingActiveTenors,
-    rating_curve_selector: "Uploaded MMD primary curve; rating assumptions are used for peer grouping and attribution only, not embedded into benchmark spread.",
+    rating_curve_selector: "Uploaded AAA MMD primary curve; rating assumptions are used for peer grouping and attribution only, not embedded into benchmark spread.",
     spread_assumptions: [
-      { rating: "AAA", spread_bps: 0, source: "Base benchmark curve" },
+      { rating: "AAA", spread_bps: 0, source: "Uploaded AAA MMD base curve" },
       { rating: "AA", spread_bps: 8, source: "Transparent screening assumption" },
       { rating: "A", spread_bps: 25, source: "Transparent screening assumption" },
       { rating: "BBB", spread_bps: 60, source: "Transparent screening assumption" }
     ],
     source_priority: [
       {
-        source: "Uploaded MMD",
+        source: "Uploaded AAA MMD",
         status: input.uploadedMmdCurve.length ? "active" : "missing",
         points: input.uploadedMmdCurve.length,
-        notes: input.uploadedMmdCurve.length ? "Primary source used for benchmark-dependent analytics." : "No uploaded MMD benchmark points detected."
+        notes: input.uploadedMmdCurve.length ? "Primary AAA source used for benchmark-dependent analytics." : "No uploaded AAA MMD benchmark points detected."
       },
       {
         source: "Trade Sheet Index / Index Rate",
         status: input.uploadedMmdCurve.length ? (input.tradeIndexCurve.length ? "fallback" : "missing") : input.tradeIndexCurve.length ? "active" : "missing",
         points: input.tradeIndexCurve.length,
-        notes: input.uploadedMmdCurve.length ? "Available only for audit/fallback review." : "Used only because uploaded MMD is unavailable."
+        notes: input.uploadedMmdCurve.length ? "Available only for audit/fallback review." : "Used only because uploaded AAA MMD is unavailable."
       }
     ]
   };
@@ -1973,7 +2008,7 @@ function buildSpreadAttribution(input: {
     {
       component: "Active benchmark yield",
       value_bps: roundOrNull(benchmarkBps, 2) ?? 0,
-      detail: `Active benchmark source: ${payload.universe.benchmark_source ?? "Unavailable"}. Uploaded MMD is primary when supplied.`
+      detail: `Active benchmark source: ${payload.universe.benchmark_source ?? "Unavailable"}. Uploaded AAA MMD is primary when supplied.`
     },
     {
       component: "Rating premium",
@@ -2337,7 +2372,7 @@ function buildDeskSnapshot(input: {
     next_steps: [
       topCandidate ? `Open ${topCandidate.cusip} drilldown and review trade path / side mix.` : "Run CUSIP screener after adding enough benchmarkable rows.",
       "Compare selected bucket against peer and all-issuer reference lines.",
-      "Confirm benchmark source and any MMD fallback before external distribution.",
+      "Confirm AAA MMD benchmark source and any Trade Index fallback before external distribution.",
       "Export HTML report or chart bundle after analyst review."
     ],
     risk_flags: riskFlags.length ? riskFlags : ["No additional rule-based risk flags beyond standard screening caveats."]
@@ -2699,11 +2734,11 @@ function buildMethodologySections(): MethodologySection[] {
   return [
     {
       title: "Benchmark Source Governance",
-      body: "Uploaded MMD is the primary benchmark curve. Trade Sheet Index / Index Rate is used only as fallback when no uploaded MMD curve is available. Issuer spreads are calculated relative to the active benchmark curve."
+      body: "Uploaded AAA MMD is treated as the primary benchmark curve. Trade Sheet Index / Index Rate is used only as fallback when no uploaded AAA MMD curve is available. Issuer spreads are calculated as spread versus AAA MMD."
     },
     {
       title: "Rating, Sector, and Attribution",
-      body: "Ratings are used for peer grouping and spread attribution when available. If ratings are missing, peer comparisons fall back to sector and maturity bucket. Callable, liquidity, and sector effects are displayed separately in attribution and are not embedded into the benchmark spread."
+      body: "Ratings are used for peer grouping and spread attribution when available. If ratings are missing, peer comparisons fall back to sector and maturity bucket. Callable, liquidity, sector, and rating effects are displayed separately in attribution and are not embedded into the AAA MMD benchmark spread."
     },
     {
       title: "Security Screener",
@@ -2841,7 +2876,7 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Benchmark Governance + Benchmark Audit",
       status: "partial",
       priority: "High",
-      notes: "Uploaded MMD primary, Trade Index fallback, disclosed rating assumptions, and benchmark audit table are implemented; full interactive rating curve selector remains partial.",
+      notes: "Uploaded AAA MMD primary, Trade Index fallback, disclosed rating assumptions, and benchmark audit table are implemented; full interactive rating curve selector remains partial.",
       next_step: "Validate AAA/AA/A/BBB assumption values against the user's expected-output sample."
     },
     {
@@ -3144,13 +3179,13 @@ function emptyDashboard(): DashboardAnalytics {
     },
     benchmark_governance: {
       active_source: null,
-      policy: "Uploaded MMD primary; Trade Sheet Index / Index Rate is fallback when uploaded MMD is unavailable.",
+      policy: "Uploaded AAA MMD primary; Trade Sheet Index / Index Rate is fallback when uploaded AAA MMD is unavailable.",
       trade_index_points: 0,
       uploaded_mmd_points: 0,
       active_points: 0,
       fallback_points_used: 0,
       missing_active_tenors: [],
-      rating_curve_selector: "General market curve",
+      rating_curve_selector: "AAA MMD market curve",
       spread_assumptions: [],
       source_priority: []
     },
@@ -3216,10 +3251,10 @@ function emptyDashboard(): DashboardAnalytics {
     analyst_context: {},
     export_summary_markdown: "",
     admin: {
-      methodology_version: "nextsr-methodology.v4",
-      benchmark_policy: "Uploaded MMD primary; Trade Sheet Index / Index Rate is fallback when uploaded MMD is unavailable. Ratings support peer grouping and attribution when available; sector and maturity are fallback peer dimensions.",
+      methodology_version: "nextsr-methodology.v5",
+      benchmark_policy: "Uploaded AAA MMD primary; Trade Sheet Index / Index Rate is fallback when uploaded AAA MMD is unavailable. Ratings support peer grouping and attribution when available; sector and maturity are fallback peer dimensions.",
       module_status: [
-        { module: "Data Engine", status: "ported", notes: "Multi-trade upload, optional bond reference, issuer mapping, sector override, MMD-primary benchmark, Trade Index fallback, templates, quality scorecard, and merged trade universe." },
+        { module: "Data Engine", status: "ported", notes: "Multi-trade upload, optional bond reference, issuer mapping, sector override, AAA MMD-primary benchmark, Trade Index fallback, templates, quality scorecard, and merged trade universe." },
         { module: "Core Dashboard", status: "ported", notes: "Desk snapshot, spread trend, volume, issuer curve yield/spread mode, spread ladder, heatmap, liquidity, screener, RV positioning, CUSIP drilldown." },
         { module: "Advanced Analytics", status: "partial", notes: "Rating-aware Peer RV, cross-issuer RV, opportunity map, disclosed attribution components, historical range, curve shape, scenario shock, and benchmark audit are implemented with transparent approximations where needed." },
         { module: "Watchlist / Drilldown", status: "ported", notes: "Client-side watchlist, selected CUSIP detail, trade path, and read-through are available." },
@@ -3708,12 +3743,7 @@ export function buildNextsrPayloadFromFiles(input: {
         } satisfies FileReadinessReport]
       : []),
     ...(input.mmdRows?.length
-      ? [{
-          ...buildValidation(input.mmdRows, [], "MMD Benchmark"),
-          dataset: "MMD Benchmark",
-          can_run: uploadedMmdCurve.length > 0,
-          warnings: uploadedMmdCurve.length ? [] : ["No date/tenor benchmark columns were detected."]
-        } satisfies FileReadinessReport]
+      ? [buildMmdReadinessReport(input.mmdRows, uploadedMmdCurve)]
       : [])
   ];
 

@@ -10,7 +10,7 @@ Required:
 
 Optional:
 - Issuer / sector mapping file
-- MMD curve file
+- AAA MMD curve file
 
 ## Run locally
 

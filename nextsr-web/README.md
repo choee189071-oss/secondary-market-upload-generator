@@ -29,7 +29,8 @@ The app uses the Next.js App Router and exposes `POST /api/nextsr-payload`.
 - CSV trade files from MuniPro-style exports
 - Excel `.xlsx` / `.xls` trade files
 - Filename-based issuer inference
-- Trade-sheet benchmark source via `Bnch Year` / `Bnch Rate`
+- Uploaded AAA MMD benchmark curve as the primary spread benchmark
+- Trade-sheet benchmark source via `Bnch Year` / `Bnch Rate` as fallback
 - Readiness panel for detected fields, missing required fields, and missing recommended fields
 
 ## Deployment Checklist

@@ -51,8 +51,8 @@ const templateDownloads = [
     csv: "issuer,sector,primary_type\nLADWP,Water & Power,Revenue\n"
   },
   {
-    label: "MMD Benchmark",
-    file: "nextsr_mmd_benchmark_template.csv",
+    label: "AAA MMD Benchmark",
+    file: "nextsr_aaa_mmd_benchmark_template.csv",
     csv: "date,1Y,2Y,5Y,10Y,20Y,30Y\n2026-05-12,2.90,2.95,3.10,3.35,3.75,4.00\n"
   }
 ].map((item) => ({
@@ -61,6 +61,7 @@ const templateDownloads = [
 }));
 
 const methodologyChangelog = [
+  { version: "nextsr-methodology.v5", change: "Confirmed uploaded MMD is the AAA MMD curve, so issuer spreads are presented versus AAA MMD with rating/liquidity/callable/sector effects shown separately." },
   { version: "nextsr-methodology.v4", change: "Set uploaded MMD as primary benchmark, moved Trade Index to fallback, kept AI rule-based, and separated rating/liquidity/callable/sector attribution components." },
   { version: "nextsr-parity.v3", change: "Added template downloads, workspace reset, data quality scorecard, liquidity distributions, curve spread mode, and drilldown history panels." },
   { version: "nextsr-parity.v2", change: "Added Streamlit parity audit, desk snapshot, commentary studio, report center, and clearer workflow rail." },
@@ -1665,7 +1666,7 @@ export default function Home() {
                   <input id="issuer-mapping" accept=".csv,.xlsx,.xls,text/csv" key={`issuer-map-${fileInputVersion}`} type="file" onChange={(event) => setIssuerMapping(event.target.files?.[0] ?? null)} />
                 </div>
                 <div className="field">
-                  <label htmlFor="mmd-benchmark">MMD / Benchmark Curve</label>
+                  <label htmlFor="mmd-benchmark">AAA MMD / Benchmark Curve</label>
                   <input id="mmd-benchmark" accept=".csv,.xlsx,.xls,text/csv" key={`mmd-${fileInputVersion}`} type="file" onChange={(event) => setMmdBenchmark(event.target.files?.[0] ?? null)} />
                 </div>
                 <div className="template-grid">
@@ -2784,7 +2785,7 @@ export default function Home() {
               <div className="metrics dense">
                 <div className="metric"><span>Active Benchmark</span><strong>{dashboard.benchmark_governance.active_source ?? "N/A"}</strong></div>
                 <div className="metric"><span>Trade Index Points</span><strong>{dashboard.benchmark_governance.trade_index_points.toLocaleString()}</strong></div>
-                <div className="metric"><span>Uploaded MMD Points</span><strong>{dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()}</strong></div>
+                <div className="metric"><span>Uploaded AAA MMD Points</span><strong>{dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()}</strong></div>
                 <div className="metric"><span>Fallback Used</span><strong>{dashboard.benchmark_governance.fallback_points_used.toLocaleString()}</strong></div>
               </div>
             </details>
