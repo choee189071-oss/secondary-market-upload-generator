@@ -151,6 +151,7 @@ select {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
+  min-width: 0;
   padding: 18px;
 }
 
@@ -172,6 +173,38 @@ select {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.selected-file-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.selected-file-pill {
+  align-items: center;
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px 10px;
+}
+
+.selected-file-pill span {
+  color: #344054;
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-file-pill strong {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .input-expander {
@@ -426,6 +459,7 @@ select {
   background: #fbfcfe;
   border: 1px solid var(--line);
   border-radius: 8px;
+  min-width: 0;
   padding: 12px;
 }
 
@@ -437,7 +471,9 @@ select {
 }
 
 .metric strong {
+  display: block;
   font-size: 20px;
+  overflow-wrap: anywhere;
 }
 
 .content-grid {
@@ -587,6 +623,7 @@ select {
 
 .developer-payload {
   border-top: 1px solid var(--line);
+  min-width: 0;
   padding-top: 4px;
 }
 
@@ -623,6 +660,11 @@ select {
   display: flex;
   gap: 10px;
   justify-content: space-between;
+  min-width: 0;
+}
+
+.toolbar > div {
+  min-width: 0;
 }
 
 .screener-panel {
@@ -638,6 +680,18 @@ select {
 
 .final-band {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.drilldown-band {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.drilldown-panel {
+  overflow: hidden;
+}
+
+.watchlist-panel {
+  align-self: start;
 }
 
 .visual-grid {
@@ -1167,11 +1221,14 @@ select {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
 }
 
 .mini-chart-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
+  min-width: 0;
+  overflow: hidden;
   padding: 10px;
 }
 
@@ -1308,6 +1365,7 @@ select {
 .table-wrap {
   border: 1px solid var(--line);
   border-radius: 8px;
+  max-width: 100%;
   overflow: auto;
 }
 
@@ -1348,6 +1406,7 @@ select {
   display: grid;
   gap: 10px;
   margin-top: 12px;
+  min-width: 0;
 }
 
 .screener-panel .analyst-readthrough {
@@ -1367,6 +1426,7 @@ select {
   color: #174a7c;
   font-size: 14px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
   padding: 12px 14px;
 }
 
@@ -1377,6 +1437,7 @@ select {
 .readthrough-details {
   border: 1px solid var(--line);
   border-radius: 8px;
+  min-width: 0;
   padding: 0 12px;
 }
 
@@ -1399,6 +1460,7 @@ select {
   font-size: 13px;
   line-height: 1.45;
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .shock-control {
@@ -1487,6 +1549,7 @@ tbody tr:last-child td {
 .drilldown-stack {
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .readthrough-list,
@@ -1503,6 +1566,7 @@ tbody tr:last-child td {
   font-size: 13px;
   line-height: 1.45;
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .split-list {

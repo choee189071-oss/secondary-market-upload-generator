@@ -1641,6 +1641,16 @@ export default function Home() {
                   Upload bundle: {(uploadBytes / 1024 / 1024).toFixed(1)}MB across {allUploadedFiles.length} file(s).
                 </span>
               ) : null}
+              {tradeFiles.length ? (
+                <div className="selected-file-list">
+                  {tradeFiles.map((file) => (
+                    <div className="selected-file-pill" key={`${file.name}-${file.size}-${file.lastModified}`}>
+                      <span>{file.name}</span>
+                      <strong>{(file.size / 1024 / 1024).toFixed(1)}MB</strong>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
 
             <details className="input-expander">
@@ -2524,8 +2534,8 @@ export default function Home() {
       ) : null}
 
       {payload && dashboard ? (
-        <section className="parity-band final-band" id="cusip-drilldown">
-          <article className="panel">
+        <section className="parity-band final-band drilldown-band" id="cusip-drilldown">
+          <article className="panel drilldown-panel">
             <div className="toolbar">
               <div>
                 <h2>CUSIP Opportunity Drilldown</h2>
@@ -2628,7 +2638,7 @@ export default function Home() {
             )}
           </article>
 
-          <article className="panel">
+          <article className="panel watchlist-panel">
             <div className="toolbar">
               <div>
                 <h2>Watchlist / Saved Candidates</h2>
