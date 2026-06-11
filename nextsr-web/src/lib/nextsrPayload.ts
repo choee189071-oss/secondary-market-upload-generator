@@ -31,6 +31,12 @@ export type NextsrPayload = {
   evidence: string[];
 };
 
+const MAX_TREND_POINTS = 240;
+const MAX_SECURITY_DETAILS = 100;
+const MAX_TRADE_PATH_POINTS = 45;
+const MAX_BENCHMARK_AUDIT_ROWS = 120;
+const MAX_EXPORT_SCREENER_ROWS = 60;
+
 export type PayloadValidation = {
   source_file: string | null;
   raw_rows: number;
@@ -1182,7 +1188,7 @@ function buildSpreadTrend(spreadObs: SpreadObservation[], issuer: string, maturi
   return spreadObs
     .filter((row) => row.issuer === issuer && row.maturity_bucket === maturityBucket)
     .sort((a, b) => a.trade_date.localeCompare(b.trade_date))
-    .slice(-365)
+    .slice(-MAX_TREND_POINTS)
     .map((row) => ({
       date: row.trade_date,
       spread_bps: roundOrNull(row.spread_to_benchmark_bps, 2) ?? 0,
@@ -1668,7 +1674,7 @@ function buildBenchmarkAudit(benchmarkCurve: BenchmarkRow[]): BenchmarkAuditRow[
   return benchmarkCurve
     .slice()
     .sort((a, b) => `${b.date}|${a.tenor}`.localeCompare(`${a.date}|${b.tenor}`))
-    .slice(0, 200)
+    .slice(0, MAX_BENCHMARK_AUDIT_ROWS)
     .map((row) => ({
       date: row.date,
       tenor: row.tenor,
@@ -1687,8 +1693,17 @@ function buildSecurityDetails(trades: TradeRow[], securityScreener: SecurityCand
     byCusip.set(trade.cusip, [...(byCusip.get(trade.cusip) ?? []), trade]);
   }
   const candidateByCusip = new Map(securityScreener.map((candidate) => [candidate.cusip, candidate]));
+  const prioritizedCusips = securityScreener
+    .map((candidate) => candidate.cusip)
+    .filter((cusip, index, list) => cusip && list.indexOf(cusip) === index)
+    .slice(0, MAX_SECURITY_DETAILS);
+  const detailEntries = prioritizedCusips.length
+    ? prioritizedCusips
+        .map((cusip) => [cusip, byCusip.get(cusip)] as const)
+        .filter((entry): entry is readonly [string, TradeRow[]] => Boolean(entry[1]?.length))
+    : Array.from(byCusip.entries()).slice(0, MAX_SECURITY_DETAILS);
 
-  return Array.from(byCusip.entries())
+  return detailEntries
     .map(([cusip, rows]) => {
       const sortedRows = rows
         .filter((row) => row.trade_date)
@@ -1701,7 +1716,7 @@ function buildSecurityDetails(trades: TradeRow[], securityScreener: SecurityCand
       const totalAmount = sourceRows.reduce((sum, row) => sum + (row.trade_amount ?? 0), 0);
       const benchmark = latest?.trade_date ? latestBenchmarkForBucket(benchmarkCurve, latest.trade_date, latest.maturity_bucket) : null;
       const latestSpread = latest?.yield !== null && latest?.yield !== undefined && benchmark?.benchmark_yield !== undefined ? (latest.yield - benchmark.benchmark_yield) * 100 : candidate?.spread_to_benchmark_bps ?? null;
-      const tradePoints = sourceRows.slice(-80).map((row) => {
+      const tradePoints = sourceRows.slice(-MAX_TRADE_PATH_POINTS).map((row) => {
         const rowBenchmark = row.trade_date ? latestBenchmarkForBucket(benchmarkCurve, row.trade_date, row.maturity_bucket) : null;
         const spread = row.yield !== null && rowBenchmark?.benchmark_yield !== undefined ? (row.yield - rowBenchmark.benchmark_yield) * 100 : null;
         return {
@@ -1745,7 +1760,7 @@ function buildSecurityDetails(trades: TradeRow[], securityScreener: SecurityCand
       };
     })
     .sort((a, b) => (b.rv_score ?? -Infinity) - (a.rv_score ?? -Infinity))
-    .slice(0, 300);
+    .slice(0, MAX_SECURITY_DETAILS);
 }
 
 function buildRecommendationNarrative(payload: NextsrPayload, candidates: SecurityCandidate[], peerRv: PeerRvPoint[]): RecommendationNarrative {
@@ -2085,6 +2100,19 @@ function buildDashboardAnalytics(input: {
   const securityDetails = buildSecurityDetails(input.trades, input.securityScreener, input.benchmarkCurve);
   const benchmarkAudit = buildBenchmarkAudit(input.benchmarkCurve);
   const recommendation = payload ? buildRecommendationNarrative(payload, input.securityScreener, peerRv) : emptyDashboard().recommendation;
+  const compactDashboardData = {
+    issuer_curve: issuerCurve,
+    spread_trend: spreadTrend,
+    monthly_activity: monthlyActivity,
+    spread_movement_ladder: spreadMovement.slice(0, 50),
+    liquidity,
+    peer_rv: peerRv,
+    cross_issuer_rv: crossIssuerRv.slice(0, 50),
+    historical_percentiles: historicalPercentiles,
+    scenario_shock: scenarioShock,
+    dealer_proxy: dealerProxy,
+    security_screener: input.securityScreener.slice(0, MAX_EXPORT_SCREENER_ROWS)
+  };
   const reportArtifacts = payload
     ? buildReportArtifacts({
         payload,
@@ -2096,20 +2124,7 @@ function buildDashboardAnalytics(input: {
         securityDetails,
         benchmarkAudit,
         curveShape,
-        dashboardData: {
-          issuer_curve: issuerCurve,
-          spread_trend: spreadTrend,
-          linked_spread_trends: linkedSpreadTrends,
-          monthly_activity: monthlyActivity,
-          spread_movement_ladder: spreadMovement,
-          liquidity,
-          peer_rv: peerRv,
-          cross_issuer_rv: crossIssuerRv,
-          historical_percentiles: historicalPercentiles,
-          scenario_shock: scenarioShock,
-          dealer_proxy: dealerProxy,
-          security_screener: input.securityScreener
-        }
+        dashboardData: compactDashboardData
       })
     : emptyDashboard().report_artifacts;
   return {

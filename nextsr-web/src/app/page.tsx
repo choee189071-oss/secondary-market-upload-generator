@@ -1117,7 +1117,11 @@ export default function Home() {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error ?? `Payload generation failed with HTTP ${response.status}.`);
+        const fallbackMessage =
+          response.status === 504
+            ? "Dashboard generation timed out before the server returned a response. Large XLSX files can take longer to parse; this version now sends a lighter initial dashboard, so retry once after refreshing."
+            : `Payload generation failed with HTTP ${response.status}.`;
+        throw new Error(data?.error ?? fallbackMessage);
       }
       if (!data) {
         throw new Error("Payload generation returned an empty response.");
