@@ -484,6 +484,8 @@ type BenchmarkRow = {
   observation_count?: number;
 };
 
+type BenchmarkLookup = Map<string, Array<{ time: number; row: BenchmarkRow }>>;
+
 type SpreadObservation = {
   issuer: string;
   trade_date: string;
@@ -914,7 +916,12 @@ function buildTradeIndexCurve(trades: TradeRow[]): BenchmarkRow[] {
       continue;
     }
     const key = `${dateKey(trade.trade_date)}|${tenor}`;
-    buckets.set(key, [...(buckets.get(key) ?? []), trade.index_rate]);
+    const values = buckets.get(key);
+    if (values) {
+      values.push(trade.index_rate);
+    } else {
+      buckets.set(key, [trade.index_rate]);
+    }
   }
 
   return Array.from(buckets.entries())
@@ -946,7 +953,12 @@ function buildSpreadObservations(trades: TradeRow[], benchmarkCurve: BenchmarkRo
       continue;
     }
     const key = `${trade.issuer}|${dateKey(trade.trade_date)}|${trade.maturity_bucket}`;
-    groups.set(key, [...(groups.get(key) ?? []), trade]);
+    const rows = groups.get(key);
+    if (rows) {
+      rows.push(trade);
+    } else {
+      groups.set(key, [trade]);
+    }
   }
 
   return Array.from(groups.entries())
@@ -1016,7 +1028,12 @@ function ratingSpreadAssumption(rating: string | null): number | null {
 function issuerProfiles(trades: TradeRow[]) {
   const byIssuer = new Map<string, TradeRow[]>();
   for (const trade of trades) {
-    byIssuer.set(trade.issuer, [...(byIssuer.get(trade.issuer) ?? []), trade]);
+    const rows = byIssuer.get(trade.issuer);
+    if (rows) {
+      rows.push(trade);
+    } else {
+      byIssuer.set(trade.issuer, [trade]);
+    }
   }
   return new Map(
     Array.from(byIssuer.entries()).map(([issuer, rows]) => [
@@ -1130,16 +1147,54 @@ function median(values: number[]): number | null {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
-function latestBenchmarkForBucket(benchmarkCurve: BenchmarkRow[], latestDate: Date, bucket: string | null): BenchmarkRow | null {
+function dateTimeFromKey(date: string): number {
+  return new Date(`${date}T00:00:00Z`).getTime();
+}
+
+function buildBenchmarkLookup(benchmarkCurve: BenchmarkRow[]): BenchmarkLookup {
+  const lookup: BenchmarkLookup = new Map();
+  for (const row of benchmarkCurve) {
+    const time = dateTimeFromKey(row.date);
+    if (!Number.isFinite(time)) {
+      continue;
+    }
+    const rows = lookup.get(row.tenor);
+    if (rows) {
+      rows.push({ time, row });
+    } else {
+      lookup.set(row.tenor, [{ time, row }]);
+    }
+  }
+  for (const rows of lookup.values()) {
+    rows.sort((a, b) => a.time - b.time);
+  }
+  return lookup;
+}
+
+function latestBenchmarkForBucket(benchmarkLookup: BenchmarkLookup, latestDate: Date, bucket: string | null): BenchmarkRow | null {
   if (!bucket) {
     return null;
   }
   const tenor = nearestBenchmarkTenor(bucket);
   const latestTime = latestDate.getTime();
-  const candidates = benchmarkCurve
-    .filter((row) => row.tenor === tenor && new Date(`${row.date}T00:00:00Z`).getTime() <= latestTime)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  return candidates[candidates.length - 1] ?? null;
+  const candidates = benchmarkLookup.get(tenor);
+  if (!candidates?.length || !Number.isFinite(latestTime)) {
+    return null;
+  }
+
+  let low = 0;
+  let high = candidates.length - 1;
+  let matchIndex = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (candidates[mid].time <= latestTime) {
+      matchIndex = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return matchIndex >= 0 ? candidates[matchIndex].row : null;
 }
 
 function classifyCandidate(candidate: SecurityCandidate): string {
@@ -1165,6 +1220,7 @@ function buildSecurityScreener(trades: TradeRow[], benchmarkCurve: BenchmarkRow[
   if (!dated.length) {
     return [];
   }
+  const benchmarkLookup = buildBenchmarkLookup(benchmarkCurve);
   const globalLatestTime = Math.max(...dated.map((trade) => trade.trade_date?.getTime() ?? 0));
   const globalLatest = new Date(globalLatestTime);
   const cutoff = new Date(globalLatest);
@@ -1177,14 +1233,19 @@ function buildSecurityScreener(trades: TradeRow[], benchmarkCurve: BenchmarkRow[
     if (!trade.cusip) {
       continue;
     }
-    byCusip.set(trade.cusip, [...(byCusip.get(trade.cusip) ?? []), trade]);
+    const rows = byCusip.get(trade.cusip);
+    if (rows) {
+      rows.push(trade);
+    } else {
+      byCusip.set(trade.cusip, [trade]);
+    }
   }
 
   const base = Array.from(byCusip.entries()).map(([cusip, rows]) => {
     const latestTradeTime = Math.max(...rows.map((row) => row.trade_date?.getTime() ?? 0));
     const latestTradeDate = new Date(latestTradeTime);
     const maturity = mode(rows.map((row) => row.maturity_bucket ?? ""));
-    const benchmark = latestBenchmarkForBucket(benchmarkCurve, latestTradeDate, maturity);
+    const benchmark = latestBenchmarkForBucket(benchmarkLookup, latestTradeDate, maturity);
     const yields = rows.map((row) => row.yield).filter((value): value is number => value !== null);
     const prices = rows.map((row) => row.price).filter((value): value is number => value !== null);
     const avgYield = yields.length ? yields.reduce((sum, value) => sum + value, 0) / yields.length : null;
@@ -1275,6 +1336,7 @@ function buildIssuerCurve(trades: TradeRow[], benchmarkCurve: BenchmarkRow[], is
   if (!issuerRows.length) {
     return [];
   }
+  const benchmarkLookup = buildBenchmarkLookup(benchmarkCurve);
   const latestDate = new Date(Math.max(...issuerRows.map((trade) => trade.trade_date?.getTime() ?? 0)));
   const cutoff = new Date(latestDate);
   cutoff.setUTCDate(cutoff.getUTCDate() - periodDays);
@@ -1285,14 +1347,19 @@ function buildIssuerCurve(trades: TradeRow[], benchmarkCurve: BenchmarkRow[], is
     if (!trade.maturity_bucket) {
       continue;
     }
-    byBucket.set(trade.maturity_bucket, [...(byBucket.get(trade.maturity_bucket) ?? []), trade]);
+    const rows = byBucket.get(trade.maturity_bucket);
+    if (rows) {
+      rows.push(trade);
+    } else {
+      byBucket.set(trade.maturity_bucket, [trade]);
+    }
   }
 
   return MATURITY_BUCKET_ORDER.map((bucket) => {
     const rows = byBucket.get(bucket) ?? [];
     const yields = rows.map((row) => row.yield).filter((value): value is number => value !== null);
     const issuerYield = yields.length ? yields.reduce((sum, value) => sum + value, 0) / yields.length : null;
-    const benchmark = latestBenchmarkForBucket(benchmarkCurve, latestDate, bucket);
+    const benchmark = latestBenchmarkForBucket(benchmarkLookup, latestDate, bucket);
     const benchmarkYield = benchmark?.benchmark_yield ?? null;
     return {
       maturity_bucket: bucket,
@@ -1348,7 +1415,12 @@ function buildMonthlyActivity(trades: TradeRow[], issuer: string): ActivityPoint
 function buildIssuerOptions(trades: TradeRow[]): IssuerOption[] {
   const byIssuer = new Map<string, TradeRow[]>();
   for (const trade of trades) {
-    byIssuer.set(trade.issuer, [...(byIssuer.get(trade.issuer) ?? []), trade]);
+    const rows = byIssuer.get(trade.issuer);
+    if (rows) {
+      rows.push(trade);
+    } else {
+      byIssuer.set(trade.issuer, [trade]);
+    }
   }
   return Array.from(byIssuer.entries())
     .map(([issuer, rows]) => {
@@ -1848,7 +1920,12 @@ function buildPeerRv(spreadObs: SpreadObservation[], trades: TradeRow[], issuer:
 function buildCrossIssuerRv(trades: TradeRow[], securityScreener: SecurityCandidate[]): CrossIssuerRvPoint[] {
   const byIssuer = new Map<string, SecurityCandidate[]>();
   for (const candidate of securityScreener) {
-    byIssuer.set(candidate.issuer, [...(byIssuer.get(candidate.issuer) ?? []), candidate]);
+    const rows = byIssuer.get(candidate.issuer);
+    if (rows) {
+      rows.push(candidate);
+    } else {
+      byIssuer.set(candidate.issuer, [candidate]);
+    }
   }
   const options = buildIssuerOptions(trades);
   return options.map((option) => {
@@ -2043,11 +2120,17 @@ function buildBenchmarkAudit(benchmarkCurve: BenchmarkRow[]): BenchmarkAuditRow[
 
 function buildSecurityDetails(trades: TradeRow[], securityScreener: SecurityCandidate[], benchmarkCurve: BenchmarkRow[]): SecurityDetail[] {
   const byCusip = new Map<string, TradeRow[]>();
+  const benchmarkLookup = buildBenchmarkLookup(benchmarkCurve);
   for (const trade of trades) {
     if (!trade.cusip) {
       continue;
     }
-    byCusip.set(trade.cusip, [...(byCusip.get(trade.cusip) ?? []), trade]);
+    const rows = byCusip.get(trade.cusip);
+    if (rows) {
+      rows.push(trade);
+    } else {
+      byCusip.set(trade.cusip, [trade]);
+    }
   }
   const candidateByCusip = new Map(securityScreener.map((candidate) => [candidate.cusip, candidate]));
   const prioritizedCusips = securityScreener
@@ -2071,10 +2154,10 @@ function buildSecurityDetails(trades: TradeRow[], securityScreener: SecurityCand
       const yields = sourceRows.map((row) => row.yield).filter((value): value is number => value !== null);
       const prices = sourceRows.map((row) => row.price).filter((value): value is number => value !== null);
       const totalAmount = sourceRows.reduce((sum, row) => sum + (row.trade_amount ?? 0), 0);
-      const benchmark = latest?.trade_date ? latestBenchmarkForBucket(benchmarkCurve, latest.trade_date, latest.maturity_bucket) : null;
+      const benchmark = latest?.trade_date ? latestBenchmarkForBucket(benchmarkLookup, latest.trade_date, latest.maturity_bucket) : null;
       const latestSpread = latest?.yield !== null && latest?.yield !== undefined && benchmark?.benchmark_yield !== undefined ? (latest.yield - benchmark.benchmark_yield) * 100 : candidate?.spread_to_benchmark_bps ?? null;
       const tradePoints = sourceRows.slice(-MAX_TRADE_PATH_POINTS).map((row) => {
-        const rowBenchmark = row.trade_date ? latestBenchmarkForBucket(benchmarkCurve, row.trade_date, row.maturity_bucket) : null;
+        const rowBenchmark = row.trade_date ? latestBenchmarkForBucket(benchmarkLookup, row.trade_date, row.maturity_bucket) : null;
         const spread = row.yield !== null && rowBenchmark?.benchmark_yield !== undefined ? (row.yield - rowBenchmark.benchmark_yield) * 100 : null;
         return {
           date: row.trade_date ? dateKey(row.trade_date) : null,
