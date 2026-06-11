@@ -13,14 +13,10 @@ import pandas as pd
 
 def clean_colname(col: object) -> str:
     """Normalize uploaded column names into snake_case."""
-    return (
-        str(col)
-        .strip()
-        .lower()
-        .replace("/", "_")
-        .replace(" ", "_")
-        .replace("-", "_")
-    )
+    text = str(col).strip().lower()
+    text = re.sub(r"[^0-9a-z]+", "_", text)
+    text = re.sub(r"_+", "_", text)
+    return text.strip("_")
 
 
 def clean_money_series(s: pd.Series) -> pd.Series:
@@ -152,32 +148,81 @@ def standardize_trades(df: pd.DataFrame, source_file: Optional[str] = None) -> p
     df.columns = [clean_colname(c) for c in df.columns]
 
     rename_map = {
+        # Common MuniPro export headers
+        "td_time": "trade_datetime",
+        "trade_date_time": "trade_datetime",
         "trade_date_time": "trade_datetime",
         "trade_datetime": "trade_datetime",
         "trade_time": "trade_datetime",
+        "datetime": "trade_datetime",
         "cusip9": "cusip",
         "cusip": "cusip",
+        "security_id": "cusip",
+        "security_description": "description",
+        "bond_description": "description",
         "description": "description",
+        "mty": "maturity",
         "maturity_date": "maturity",
         "maturity": "maturity",
         "trade_date": "trade_date",
+        "date": "trade_date",
+        "transaction_date": "trade_date",
+        "settle_date": "settlement_date",
         "settlement_date": "settlement_date",
+        "cpn": "coupon",
         "coupon": "coupon",
+        "coupon_rate": "coupon",
+        "ytw": "yield",
+        "ytm": "yield",
+        "yt_par": "yield",
+        "yt_prm": "yield",
+        "yt_sink": "yield",
+        "msrb_yld": "yield",
+        "yield_to_worst": "yield",
+        "yield_to_maturity": "yield",
         "yield": "yield",
         "yield_": "yield",
         "price": "price",
+        "trade_price": "price",
+        "execution_price": "price",
+        "qty_m": "trade_amount",
+        "quantity": "trade_amount",
+        "amount": "trade_amount",
+        "par_traded": "trade_amount",
         "trade_amount": "trade_amount",
         "par_amount": "trade_amount",
         "calculation_date": "calculation_date",
         "calculation_price": "calculation_price",
+        "bnch_year": "index",
+        "benchmark_year": "index",
+        "benchmark": "index",
         "index": "index",
+        "bnch_rate": "index_rate",
+        "benchmark_rate": "index_rate",
         "index_rate": "index_rate",
+        "spread_bp": "spread",
+        "spread_bps": "spread",
+        "spread_to_benchmark": "spread",
         "spread": "spread",
+        "tde_type": "trade_type",
+        "side": "trade_type",
+        "buy_sell": "trade_type",
         "trade_type": "trade_type",
+        "m_s_f": "ratings_m_s_f",
         "ratings_m_s_f": "ratings_m_s_f",
         "ratings": "ratings_m_s_f",
+        "rating": "ratings_m_s_f",
     }
+    amount_was_qty_m = "qty_m" in df.columns and "trade_amount" not in df.columns
     df = df.rename(columns={c: rename_map.get(c, c) for c in df.columns})
+    if df.columns.duplicated().any():
+        df = df.T.groupby(level=0, sort=False).first().T
+    if "ratings_m_s_f" not in df.columns and {"m", "s", "f"}.issubset(df.columns):
+        rating_parts = df[["m", "s", "f"]].astype(str).replace({"nan": "", "None": "", "<NA>": ""})
+        df["ratings_m_s_f"] = rating_parts.apply(
+            lambda row: "/".join([part for part in row.tolist() if part.strip()]),
+            axis=1,
+        ).replace({"": pd.NA})
 
     required_cols = [
         "trade_datetime", "cusip", "description", "maturity", "trade_date",
@@ -199,6 +244,8 @@ def standardize_trades(df: pd.DataFrame, source_file: Optional[str] = None) -> p
 
     for col in ["coupon", "yield", "price", "trade_amount", "calculation_price", "index_rate", "spread"]:
         df[col] = clean_numeric(df[col])
+    if amount_was_qty_m:
+        df["trade_amount"] = df["trade_amount"] * 1000
 
     df["source_file"] = source_file or pd.NA
     df["source_issuer_guess"] = infer_issuer_from_filename(source_file)
