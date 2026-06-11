@@ -1130,7 +1130,7 @@ function buildSpreadTrend(spreadObs: SpreadObservation[], issuer: string, maturi
   return spreadObs
     .filter((row) => row.issuer === issuer && row.maturity_bucket === maturityBucket)
     .sort((a, b) => a.trade_date.localeCompare(b.trade_date))
-    .slice(-90)
+    .slice(-365)
     .map((row) => ({
       date: row.trade_date,
       spread_bps: roundOrNull(row.spread_to_benchmark_bps, 2) ?? 0,

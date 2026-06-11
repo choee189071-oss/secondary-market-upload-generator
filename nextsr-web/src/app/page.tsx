@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, MouseEvent as ReactMouseEvent, useEffect, useMemo, useState } from "react";
 import type {
   ActivityPoint,
   BenchmarkAuditRow,
@@ -36,6 +36,38 @@ function formatNumber(value: number | null | undefined, suffix = "") {
   return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}${suffix}`;
 }
 
+type ChartTooltip = {
+  x: number;
+  y: number;
+  title: string;
+  lines: string[];
+};
+
+function chartTooltipFromEvent(event: ReactMouseEvent<SVGElement>, title: string, lines: string[]): ChartTooltip {
+  const svg = event.currentTarget.ownerSVGElement ?? event.currentTarget;
+  const rect = svg.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left + 14,
+    y: event.clientY - rect.top + 14,
+    title,
+    lines
+  };
+}
+
+function TooltipOverlay({ tooltip }: { tooltip: ChartTooltip | null }) {
+  if (!tooltip) {
+    return null;
+  }
+  return (
+    <div className="chart-tooltip" style={{ left: tooltip.x, top: tooltip.y }}>
+      <strong>{tooltip.title}</strong>
+      {tooltip.lines.map((line) => (
+        <span key={line}>{line}</span>
+      ))}
+    </div>
+  );
+}
+
 function linePath<T>(data: T[], x: (point: T, index: number) => number, y: (point: T) => number | null) {
   return data
     .map((point, index) => {
@@ -55,29 +87,38 @@ function EmptyChart() {
 
 function BarMetricChart<T>({ data, label, value, tone = "teal" }: { data: T[]; label: (point: T) => string; value: (point: T) => number | null; tone?: "teal" | "rose" | "blue" }) {
   const values = data.map(value).filter((item): item is number => item !== null && Number.isFinite(item));
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   if (!data.length || !values.length) {
     return <EmptyChart />;
   }
   const max = Math.max(...values.map((item) => Math.abs(item)), 1);
   const barWidth = 700 / data.length;
   return (
-    <svg className="chart-svg compact" viewBox="0 0 800 280" role="img">
-      <line className="grid-line" x1="42" x2="758" y1="230" y2="230" />
-      {data.map((point, index) => {
-        const rawValue = value(point) ?? 0;
-        const height = (Math.abs(rawValue) / max) * 180;
-        const x = 52 + index * barWidth;
-        return (
-          <g key={`${label(point)}-${index}`}>
-            <rect className={`bar ${tone}`} height={height} width={Math.max(7, barWidth - 8)} x={x} y={230 - height}>
-              <title>{`${label(point)}: ${formatNumber(rawValue)}`}</title>
-            </rect>
-            {index % Math.ceil(data.length / 12 || 1) === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{label(point)}</text> : null}
-          </g>
-        );
-      })}
-      <text className="axis-label" x="10" y="36">{formatNumber(max)}</text>
-    </svg>
+    <div className="chart-frame">
+      <svg className="chart-svg compact" viewBox="0 0 800 280" role="img" onMouseLeave={() => setTooltip(null)}>
+        <line className="grid-line" x1="42" x2="758" y1="230" y2="230" />
+        {data.map((point, index) => {
+          const rawValue = value(point) ?? 0;
+          const height = (Math.abs(rawValue) / max) * 180;
+          const x = 52 + index * barWidth;
+          return (
+            <g key={`${label(point)}-${index}`}>
+              <rect
+                className={`bar ${tone}`}
+                height={height}
+                width={Math.max(7, barWidth - 8)}
+                x={x}
+                y={230 - height}
+                onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, label(point), [`Value: ${formatNumber(rawValue)}`]))}
+              />
+              {index % Math.ceil(data.length / 12 || 1) === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{label(point)}</text> : null}
+            </g>
+          );
+        })}
+        <text className="axis-label" x="10" y="36">{formatNumber(max)}</text>
+      </svg>
+      <TooltipOverlay tooltip={tooltip} />
+    </div>
   );
 }
 
@@ -105,6 +146,7 @@ function MiniTable<T>({ columns, rows }: { columns: Array<{ key: string; header:
 
 function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { data: CurvePoint[]; showIssuer?: boolean; showBenchmark?: boolean }) {
   const values = data.flatMap((point) => [point.issuer_yield, point.benchmark_yield]).filter((value): value is number => value !== null);
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   if (!data.length || !values.length) {
     return <EmptyChart />;
   }
@@ -116,34 +158,65 @@ function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { d
     return 300 - ((value - min) / (max - min || 1)) * 244;
   };
   return (
-    <svg className="chart-svg" viewBox="0 0 800 340" role="img">
-      {[0, 1, 2, 3].map((tick) => {
-        const yy = 300 - tick * 70;
-        const label = min + ((max - min) * tick) / 3;
-        return (
-          <g key={tick}>
-            <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
-            <text className="axis-label" x="10" y={yy + 4}>{label.toFixed(2)}%</text>
-          </g>
-        );
-      })}
-      {showBenchmark ? <polyline className="line benchmark" points={linePath(data, x, (point) => y(point.benchmark_yield))} /> : null}
-      {showIssuer ? <polyline className="line issuer" points={linePath(data, x, (point) => y(point.issuer_yield))} /> : null}
-      {showIssuer
-        ? data.filter((point) => point.issuer_yield !== null).map((point) => (
-            <circle className="dot issuer-dot" cx={x(point)} cy={y(point.issuer_yield) ?? 0} key={point.maturity_bucket} r="3.4">
-              <title>{`${point.maturity_bucket}: issuer ${point.issuer_yield ?? "N/A"}%, benchmark ${point.benchmark_yield ?? "N/A"}%, spread ${point.spread_bps ?? "N/A"} bps`}</title>
-            </circle>
-          ))
-        : null}
-      {[1, 5, 10, 15, 20, 25, 30, 35, 40].map((year) => (
-        <text className="axis-label" key={year} x={42 + ((year - 1) / 39) * 716} y="324" textAnchor="middle">{year}Y</text>
-      ))}
-    </svg>
+    <div className="chart-frame">
+      <svg className="chart-svg" viewBox="0 0 800 340" role="img" onMouseLeave={() => setTooltip(null)}>
+        {[0, 1, 2, 3].map((tick) => {
+          const yy = 300 - tick * 70;
+          const label = min + ((max - min) * tick) / 3;
+          return (
+            <g key={tick}>
+              <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
+              <text className="axis-label" x="10" y={yy + 4}>{label.toFixed(2)}%</text>
+            </g>
+          );
+        })}
+        {showBenchmark ? <polyline className="line benchmark" points={linePath(data, x, (point) => y(point.benchmark_yield))} /> : null}
+        {showIssuer ? <polyline className="line issuer" points={linePath(data, x, (point) => y(point.issuer_yield))} /> : null}
+        {showBenchmark
+          ? data.filter((point) => point.benchmark_yield !== null).map((point) => (
+              <circle
+                className="dot benchmark-dot"
+                cx={x(point)}
+                cy={y(point.benchmark_yield) ?? 0}
+                key={`${point.maturity_bucket}-benchmark`}
+                r="3.2"
+                onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, `${point.maturity_bucket} Benchmark`, [
+                  `Benchmark yield: ${formatNumber(point.benchmark_yield, "%")}`,
+                  `Issuer yield: ${formatNumber(point.issuer_yield, "%")}`,
+                  `Spread: ${formatNumber(point.spread_bps, " bps")}`,
+                  `Trades: ${point.trade_count.toLocaleString()}`
+                ]))}
+              />
+            ))
+          : null}
+        {showIssuer
+          ? data.filter((point) => point.issuer_yield !== null).map((point) => (
+              <circle
+                className="dot issuer-dot"
+                cx={x(point)}
+                cy={y(point.issuer_yield) ?? 0}
+                key={point.maturity_bucket}
+                r="3.4"
+                onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, `${point.maturity_bucket} Issuer`, [
+                  `Issuer yield: ${formatNumber(point.issuer_yield, "%")}`,
+                  `Benchmark yield: ${formatNumber(point.benchmark_yield, "%")}`,
+                  `Spread: ${formatNumber(point.spread_bps, " bps")}`,
+                  `Total par: ${point.total_trade_amount.toLocaleString()}`
+                ]))}
+              />
+            ))
+          : null}
+        {[1, 5, 10, 15, 20, 25, 30, 35, 40].map((year) => (
+          <text className="axis-label" key={year} x={42 + ((year - 1) / 39) * 716} y="324" textAnchor="middle">{year}Y</text>
+        ))}
+      </svg>
+      <TooltipOverlay tooltip={tooltip} />
+    </div>
   );
 }
 
 function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   if (data.length < 2) {
     return <EmptyChart />;
   }
@@ -153,58 +226,84 @@ function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
   const x = (_point: TrendPoint, index: number) => 42 + (index / Math.max(data.length - 1, 1)) * 716;
   const y = (value: number) => 300 - ((value - min) / (max - min || 1)) * 244;
   return (
-    <svg className="chart-svg" viewBox="0 0 800 340" role="img">
-      {[0, 1, 2, 3].map((tick) => {
-        const yy = 300 - tick * 70;
-        const label = min + ((max - min) * tick) / 3;
-        return (
-          <g key={tick}>
-            <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
-            <text className="axis-label" x="8" y={yy + 4}>{label.toFixed(0)}</text>
-          </g>
-        );
-      })}
-      <line className="zero-line" x1="42" x2="758" y1={y(0)} y2={y(0)} />
-      <polyline className="line spread" points={linePath(data, x, (point) => y(point.spread_bps))} />
-      {data.map((point, index) => (
-        <circle className="dot issuer-dot" cx={x(point, index)} cy={y(point.spread_bps)} key={`${point.date}-${index}`} r="3">
-          <title>{`${point.date}: ${point.spread_bps} bps; yield ${point.avg_yield}%; benchmark ${point.benchmark_yield}%`}</title>
-        </circle>
-      ))}
-      <text className="axis-label" x="42" y="324">{data[0].date}</text>
-      <text className="axis-label" x="758" y="324" textAnchor="end">{data[data.length - 1].date}</text>
-    </svg>
+    <div className="chart-frame">
+      <svg className="chart-svg" viewBox="0 0 800 340" role="img" onMouseLeave={() => setTooltip(null)}>
+        {[0, 1, 2, 3].map((tick) => {
+          const yy = 300 - tick * 70;
+          const label = min + ((max - min) * tick) / 3;
+          return (
+            <g key={tick}>
+              <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
+              <text className="axis-label" x="8" y={yy + 4}>{label.toFixed(0)}</text>
+            </g>
+          );
+        })}
+        <line className="zero-line" x1="42" x2="758" y1={y(0)} y2={y(0)} />
+        <polyline className="line spread" points={linePath(data, x, (point) => y(point.spread_bps))} />
+        {data.map((point, index) => (
+          <circle
+            className="dot issuer-dot"
+            cx={x(point, index)}
+            cy={y(point.spread_bps)}
+            key={`${point.date}-${index}`}
+            r="3"
+            onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, point.date, [
+              `Spread: ${formatNumber(point.spread_bps, " bps")}`,
+              `Avg yield: ${formatNumber(point.avg_yield, "%")}`,
+              `Benchmark: ${formatNumber(point.benchmark_yield, "%")}`,
+              `Trades: ${point.trade_count.toLocaleString()}`
+            ]))}
+          />
+        ))}
+        <text className="axis-label" x="42" y="324">{data[0].date}</text>
+        <text className="axis-label" x="758" y="324" textAnchor="end">{data[data.length - 1].date}</text>
+      </svg>
+      <TooltipOverlay tooltip={tooltip} />
+    </div>
   );
 }
 
 function ActivityChart({ data }: { data: ActivityPoint[] }) {
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   if (!data.length) {
     return <EmptyChart />;
   }
   const max = Math.max(...data.map((point) => point.trade_count), 1);
   const barWidth = 700 / data.length;
   return (
-    <svg className="chart-svg" viewBox="0 0 800 280" role="img">
-      <line className="grid-line" x1="42" x2="758" y1="230" y2="230" />
-      {data.map((point, index) => {
-        const height = (point.trade_count / max) * 190;
-        const x = 52 + index * barWidth;
-        return (
-          <g key={point.month}>
-            <rect className="bar activity" height={height} width={Math.max(8, barWidth - 8)} x={x} y={230 - height}>
-              <title>{`${point.month}: ${point.trade_count.toLocaleString()} trades; ${point.total_trade_amount.toLocaleString()} par`}</title>
-            </rect>
-            {index % 2 === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{point.month.slice(5)}</text> : null}
-          </g>
-        );
-      })}
-      <text className="axis-label" x="10" y="36">{max.toLocaleString()} trades</text>
-    </svg>
+    <div className="chart-frame">
+      <svg className="chart-svg" viewBox="0 0 800 280" role="img" onMouseLeave={() => setTooltip(null)}>
+        <line className="grid-line" x1="42" x2="758" y1="230" y2="230" />
+        {data.map((point, index) => {
+          const height = (point.trade_count / max) * 190;
+          const x = 52 + index * barWidth;
+          return (
+            <g key={point.month}>
+              <rect
+                className="bar activity"
+                height={height}
+                width={Math.max(8, barWidth - 8)}
+                x={x}
+                y={230 - height}
+                onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, point.month, [
+                  `Trades: ${point.trade_count.toLocaleString()}`,
+                  `Total par: ${point.total_trade_amount.toLocaleString()}`
+                ]))}
+              />
+              {index % 2 === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{point.month.slice(5)}</text> : null}
+            </g>
+          );
+        })}
+        <text className="axis-label" x="10" y="36">{max.toLocaleString()} trades</text>
+      </svg>
+      <TooltipOverlay tooltip={tooltip} />
+    </div>
   );
 }
 
 function PositioningChart({ data, selectedCusip, onSelect }: { data: PositionPoint[]; selectedCusip?: string; onSelect?: (cusip: string) => void }) {
   const points = data.filter((point) => point.spread_bps !== null && point.liquidity_score !== null);
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   if (!points.length) {
     return <EmptyChart />;
   }
@@ -214,33 +313,41 @@ function PositioningChart({ data, selectedCusip, onSelect }: { data: PositionPoi
   const x = (value: number | null) => 42 + ((value ?? 0) / 100) * 716;
   const y = (value: number | null) => 300 - (((value ?? 0) - minSpread) / (maxSpread - minSpread || 1)) * 244;
   return (
-    <svg className="chart-svg" viewBox="0 0 800 340" role="img">
-      {[25, 50, 75].map((tick) => <line className="grid-line vertical" key={tick} x1={x(tick)} x2={x(tick)} y1="56" y2="300" />)}
-      {[0, 1, 2, 3].map((tick) => {
-        const yy = 300 - tick * 70;
-        const label = minSpread + ((maxSpread - minSpread) * tick) / 3;
-        return (
-          <g key={tick}>
-            <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
-            <text className="axis-label" x="8" y={yy + 4}>{label.toFixed(0)}</text>
-          </g>
-        );
-      })}
-      {points.slice(0, 60).map((point) => (
-        <circle
-          className={`${point.signal.includes("Wide") ? "bubble hot" : "bubble"} ${point.cusip === selectedCusip ? "selected" : ""}`}
-          cx={x(point.liquidity_score)}
-          cy={y(point.spread_bps)}
-          key={point.cusip}
-          onClick={() => onSelect?.(point.cusip)}
-          r={Math.max(4, Math.min(13, Math.sqrt(point.total_trade_amount || 1) / 850))}
-        >
-          <title>{`${point.cusip}: spread ${point.spread_bps ?? "N/A"} bps; liquidity ${point.liquidity_score ?? "N/A"}; RV ${point.rv_score ?? "N/A"}`}</title>
-        </circle>
-      ))}
-      <text className="axis-label" x="42" y="324">Liquidity 0</text>
-      <text className="axis-label" x="758" y="324" textAnchor="end">Liquidity 100</text>
-    </svg>
+    <div className="chart-frame">
+      <svg className="chart-svg" viewBox="0 0 800 340" role="img" onMouseLeave={() => setTooltip(null)}>
+        {[25, 50, 75].map((tick) => <line className="grid-line vertical" key={tick} x1={x(tick)} x2={x(tick)} y1="56" y2="300" />)}
+        {[0, 1, 2, 3].map((tick) => {
+          const yy = 300 - tick * 70;
+          const label = minSpread + ((maxSpread - minSpread) * tick) / 3;
+          return (
+            <g key={tick}>
+              <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
+              <text className="axis-label" x="8" y={yy + 4}>{label.toFixed(0)}</text>
+            </g>
+          );
+        })}
+        {points.slice(0, 60).map((point) => (
+          <circle
+            className={`${point.signal.includes("Wide") ? "bubble hot" : "bubble"} ${point.cusip === selectedCusip ? "selected" : ""}`}
+            cx={x(point.liquidity_score)}
+            cy={y(point.spread_bps)}
+            key={point.cusip}
+            onClick={() => onSelect?.(point.cusip)}
+            onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, point.cusip, [
+              `Signal: ${point.signal}`,
+              `Spread: ${formatNumber(point.spread_bps, " bps")}`,
+              `Liquidity: ${formatNumber(point.liquidity_score)}`,
+              `RV score: ${formatNumber(point.rv_score)}`,
+              `Total par: ${point.total_trade_amount.toLocaleString()}`
+            ]))}
+            r={Math.max(4, Math.min(13, Math.sqrt(point.total_trade_amount || 1) / 850))}
+          />
+        ))}
+        <text className="axis-label" x="42" y="324">Liquidity 0</text>
+        <text className="axis-label" x="758" y="324" textAnchor="end">Liquidity 100</text>
+      </svg>
+      <TooltipOverlay tooltip={tooltip} />
+    </div>
   );
 }
 
@@ -263,6 +370,12 @@ export default function Home() {
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [showIssuerCurve, setShowIssuerCurve] = useState(true);
   const [showBenchmarkCurve, setShowBenchmarkCurve] = useState(true);
+  const [trendRange, setTrendRange] = useState("90");
+  const [candidateSort, setCandidateSort] = useState("rv_score");
+  const [candidateLimit, setCandidateLimit] = useState(25);
+  const [candidateView, setCandidateView] = useState("all");
+  const [tableDensity, setTableDensity] = useState("compact");
+  const [securitySearch, setSecuritySearch] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
@@ -285,14 +398,39 @@ export default function Home() {
   }, [watchlist]);
 
   const jsonText = useMemo(() => (payload ? JSON.stringify(payload, null, 2) : ""), [payload]);
+  const visibleSpreadTrend = useMemo(() => {
+    const source = dashboard?.spread_trend ?? [];
+    if (trendRange === "all" || source.length < 2) {
+      return source;
+    }
+    const days = Number(trendRange);
+    const latest = new Date(`${source[source.length - 1].date}T00:00:00Z`);
+    const cutoff = new Date(latest);
+    cutoff.setUTCDate(cutoff.getUTCDate() - days);
+    return source.filter((point) => new Date(`${point.date}T00:00:00Z`).getTime() >= cutoff.getTime());
+  }, [dashboard, trendRange]);
   const filteredCandidates = useMemo(
-    () =>
-      candidates
+    () => {
+      const sortValue = (candidate: SecurityCandidate) => {
+        if (candidateSort === "spread") return candidate.spread_to_benchmark_bps ?? -Infinity;
+        if (candidateSort === "liquidity") return candidate.liquidity_score ?? -Infinity;
+        if (candidateSort === "trades") return candidate.trade_count;
+        if (candidateSort === "par") return candidate.total_trade_amount;
+        if (candidateSort === "latest") return candidate.latest_trade_date ? new Date(`${candidate.latest_trade_date}T00:00:00Z`).getTime() : -Infinity;
+        return candidate.rv_score ?? -Infinity;
+      };
+      const search = securitySearch.trim().toLowerCase();
+      return candidates
         .filter((candidate) => (candidate.spread_to_benchmark_bps ?? -Infinity) >= minSpread)
         .filter((candidate) => (candidate.liquidity_score ?? -Infinity) >= minLiquidity)
         .filter((candidate) => candidate.trade_count >= minTrades)
-        .slice(0, 25),
-    [candidates, minLiquidity, minSpread, minTrades]
+        .filter((candidate) => (candidateView === "watchlist" ? watchlist.includes(candidate.cusip) : true))
+        .filter((candidate) => (candidateView === "selected" ? candidate.cusip === selectedCusip : true))
+        .filter((candidate) => (search ? `${candidate.cusip} ${candidate.issuer} ${candidate.signal}`.toLowerCase().includes(search) : true))
+        .sort((a, b) => sortValue(b) - sortValue(a))
+        .slice(0, candidateLimit);
+    },
+    [candidateLimit, candidateSort, candidateView, candidates, minLiquidity, minSpread, minTrades, securitySearch, selectedCusip, watchlist]
   );
   const downloadHref = useMemo(() => {
     if (!jsonText) {
@@ -706,10 +844,23 @@ export default function Home() {
             <div className="chart-header">
               <div>
                 <h2>Spread Trend</h2>
-                <p>{payload.maturity_bucket ?? "Selected bucket"} spread to benchmark.</p>
+                <p>{payload.maturity_bucket ?? "Selected bucket"} spread to benchmark · {visibleSpreadTrend.length.toLocaleString()} point(s).</p>
+              </div>
+              <div className="segmented-control">
+                {[
+                  ["30", "30D"],
+                  ["90", "90D"],
+                  ["180", "180D"],
+                  ["365", "1Y"],
+                  ["all", "All"]
+                ].map(([value, label]) => (
+                  <button className={trendRange === value ? "active" : ""} key={value} type="button" onClick={() => setTrendRange(value)}>
+                    {label}
+                  </button>
+                ))}
               </div>
             </div>
-            <SpreadTrendChart data={dashboard.spread_trend} />
+            <SpreadTrendChart data={visibleSpreadTrend} />
           </article>
 
           <article className="panel chart-panel">
@@ -864,8 +1015,46 @@ export default function Home() {
             <h2>Security Screener</h2>
             <span className="table-count">{filteredCandidates.length.toLocaleString()} shown / {candidates.length.toLocaleString()} scored</span>
           </div>
+          <div className="table-controls">
+            <div className="field">
+              <label htmlFor="security-search">Search</label>
+              <input id="security-search" value={securitySearch} onChange={(event) => setSecuritySearch(event.target.value)} placeholder="CUSIP, issuer, signal" />
+            </div>
+            <div className="field">
+              <label htmlFor="candidate-sort">Sort</label>
+              <select id="candidate-sort" value={candidateSort} onChange={(event) => setCandidateSort(event.target.value)}>
+                <option value="rv_score">RV Score</option>
+                <option value="spread">Spread</option>
+                <option value="liquidity">Liquidity</option>
+                <option value="trades">Trades</option>
+                <option value="par">Total Par</option>
+                <option value="latest">Latest Trade</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="candidate-limit">Rows</label>
+              <select id="candidate-limit" value={candidateLimit} onChange={(event) => setCandidateLimit(Number(event.target.value))}>
+                {[10, 25, 50, 100].map((count) => <option key={count} value={count}>{count}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="candidate-view">View</label>
+              <select id="candidate-view" value={candidateView} onChange={(event) => setCandidateView(event.target.value)}>
+                <option value="all">All</option>
+                <option value="watchlist">Watchlist</option>
+                <option value="selected">Selected CUSIP</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="table-density">Density</label>
+              <select id="table-density" value={tableDensity} onChange={(event) => setTableDensity(event.target.value)}>
+                <option value="compact">Compact</option>
+                <option value="comfortable">Comfortable</option>
+              </select>
+            </div>
+          </div>
           {filteredCandidates.length ? (
-            <div className="table-wrap">
+            <div className={`table-wrap ${tableDensity}`}>
               <table>
                 <thead>
                   <tr>
