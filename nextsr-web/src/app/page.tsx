@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import type { NextsrPayload, PayloadValidation } from "@/lib/nextsrPayload";
+import type { NextsrPayload, PayloadValidation, SecurityCandidate } from "@/lib/nextsrPayload";
 
 const maturityBuckets = ["", ...Array.from({ length: 40 }, (_, index) => `${index + 1}Y`)];
 const lookbackOptions = [7, 30, 60, 90, 180, 365];
@@ -19,12 +19,25 @@ export default function Home() {
   const [issuer, setIssuer] = useState("");
   const [maturityBucket, setMaturityBucket] = useState("");
   const [periodDays, setPeriodDays] = useState(30);
+  const [minSpread, setMinSpread] = useState(15);
+  const [minLiquidity, setMinLiquidity] = useState(40);
+  const [minTrades, setMinTrades] = useState(2);
   const [payload, setPayload] = useState<NextsrPayload | null>(null);
   const [validation, setValidation] = useState<PayloadValidation | null>(null);
+  const [candidates, setCandidates] = useState<SecurityCandidate[]>([]);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
   const jsonText = useMemo(() => (payload ? JSON.stringify(payload, null, 2) : ""), [payload]);
+  const filteredCandidates = useMemo(
+    () =>
+      candidates
+        .filter((candidate) => (candidate.spread_to_benchmark_bps ?? -Infinity) >= minSpread)
+        .filter((candidate) => (candidate.liquidity_score ?? -Infinity) >= minLiquidity)
+        .filter((candidate) => candidate.trade_count >= minTrades)
+        .slice(0, 25),
+    [candidates, minLiquidity, minSpread, minTrades]
+  );
   const downloadHref = useMemo(() => {
     if (!jsonText) {
       return "";
@@ -43,6 +56,7 @@ export default function Home() {
     setIsLoading(true);
     setPayload(null);
     setValidation(null);
+    setCandidates([]);
 
     const formData = new FormData();
     formData.set("file", file);
@@ -61,6 +75,7 @@ export default function Home() {
       }
       setPayload(data.payload);
       setValidation(data.validation);
+      setCandidates(data.security_screener ?? []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Payload generation failed.");
     } finally {
@@ -122,6 +137,43 @@ export default function Home() {
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div className="filter-grid">
+              <div className="field">
+                <label htmlFor="min-spread">Min Spread</label>
+                <input
+                  id="min-spread"
+                  min="-100"
+                  step="5"
+                  type="number"
+                  value={minSpread}
+                  onChange={(event) => setMinSpread(Number(event.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="min-liquidity">Min Liquidity</label>
+                <input
+                  id="min-liquidity"
+                  max="100"
+                  min="0"
+                  step="5"
+                  type="number"
+                  value={minLiquidity}
+                  onChange={(event) => setMinLiquidity(Number(event.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="min-trades">Min Trades</label>
+                <input
+                  id="min-trades"
+                  min="1"
+                  step="1"
+                  type="number"
+                  value={minTrades}
+                  onChange={(event) => setMinTrades(Number(event.target.value))}
+                />
+              </div>
             </div>
 
             <button className="primary-button" type="submit" disabled={isLoading}>
@@ -218,6 +270,51 @@ export default function Home() {
           ) : null}
         </section>
       </div>
+
+      {payload ? (
+        <section className="panel screener-panel">
+          <div className="toolbar">
+            <h2>Security Screener</h2>
+            <span className="table-count">{filteredCandidates.length.toLocaleString()} shown / {candidates.length.toLocaleString()} scored</span>
+          </div>
+          {filteredCandidates.length ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Signal</th>
+                    <th>CUSIP</th>
+                    <th>Bucket</th>
+                    <th>Spread</th>
+                    <th>Liquidity</th>
+                    <th>RV Score</th>
+                    <th>Trades</th>
+                    <th>Total Par</th>
+                    <th>Latest</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredCandidates.map((candidate) => (
+                    <tr key={candidate.cusip}>
+                      <td>{candidate.signal}</td>
+                      <td>{candidate.cusip}</td>
+                      <td>{candidate.maturity_bucket ?? "N/A"}</td>
+                      <td>{formatNumber(candidate.spread_to_benchmark_bps, " bps")}</td>
+                      <td>{formatNumber(candidate.liquidity_score)}</td>
+                      <td>{formatNumber(candidate.rv_score)}</td>
+                      <td>{candidate.trade_count.toLocaleString()}</td>
+                      <td>{candidate.total_trade_amount.toLocaleString()}</td>
+                      <td>{candidate.latest_trade_date ?? "N/A"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="empty-state">No securities match the current screener filters.</div>
+          )}
+        </section>
+      ) : null}
     </main>
   );
 }

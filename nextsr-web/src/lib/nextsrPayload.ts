@@ -43,9 +43,29 @@ export type PayloadValidation = {
 export type PayloadBuildResult = {
   payload: NextsrPayload;
   validation: PayloadValidation;
+  security_screener: SecurityCandidate[];
 };
 
 export type RawRow = Record<string, string>;
+export type SecurityCandidate = {
+  cusip: string;
+  issuer: string;
+  maturity_bucket: string | null;
+  latest_trade_date: string | null;
+  trade_count: number;
+  avg_yield: number | null;
+  benchmark_yield: number | null;
+  spread_to_benchmark_bps: number | null;
+  liquidity_score: number | null;
+  total_trade_amount: number;
+  avg_trade_amount: number;
+  avg_price: number | null;
+  days_since_last_trade: number | null;
+  rv_score: number | null;
+  signal: string;
+  evidence: string[];
+};
+
 type TradeRow = {
   trade_datetime: Date | null;
   cusip: string | null;
@@ -511,6 +531,170 @@ function labelSignal(spreadChange: number | null, percentile: number | null, liq
   return "Neutral / Needs More Evidence";
 }
 
+function percentileRanks(values: Array<number | null>): Array<number | null> {
+  const valid = values
+    .map((value, index) => ({ value, index }))
+    .filter((item): item is { value: number; index: number } => item.value !== null && Number.isFinite(item.value))
+    .sort((a, b) => a.value - b.value);
+  const ranks = Array<number | null>(values.length).fill(null);
+  if (!valid.length) {
+    return ranks;
+  }
+  valid.forEach((item, sortedIndex) => {
+    ranks[item.index] = valid.length === 1 ? 1 : (sortedIndex + 1) / valid.length;
+  });
+  return ranks;
+}
+
+function median(values: number[]): number | null {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) {
+    return null;
+  }
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function latestBenchmarkForBucket(benchmarkCurve: BenchmarkRow[], latestDate: Date, bucket: string | null): BenchmarkRow | null {
+  if (!bucket) {
+    return null;
+  }
+  const tenor = nearestBenchmarkTenor(bucket);
+  const latestTime = latestDate.getTime();
+  const candidates = benchmarkCurve
+    .filter((row) => row.tenor === tenor && new Date(`${row.date}T00:00:00Z`).getTime() <= latestTime)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  return candidates[candidates.length - 1] ?? null;
+}
+
+function classifyCandidate(candidate: SecurityCandidate): string {
+  const spread = candidate.spread_to_benchmark_bps;
+  const liquidity = candidate.liquidity_score;
+  if (spread !== null && spread >= 25 && liquidity !== null && liquidity >= 70) {
+    return "Wide + Liquid";
+  }
+  if (spread !== null && spread >= 25) {
+    return "Wide / Liquidity Check";
+  }
+  if (spread !== null && spread <= -10 && liquidity !== null && liquidity >= 50) {
+    return "Rich / Lower Priority";
+  }
+  if (liquidity !== null && liquidity < 35) {
+    return "Liquidity Constrained";
+  }
+  return "Monitor";
+}
+
+function buildSecurityScreener(trades: TradeRow[], benchmarkCurve: BenchmarkRow[], periodDays: number): SecurityCandidate[] {
+  const dated = trades.filter((trade) => trade.cusip && trade.trade_date && trade.yield !== null);
+  if (!dated.length) {
+    return [];
+  }
+  const globalLatestTime = Math.max(...dated.map((trade) => trade.trade_date?.getTime() ?? 0));
+  const globalLatest = new Date(globalLatestTime);
+  const cutoff = new Date(globalLatest);
+  cutoff.setUTCDate(cutoff.getUTCDate() - periodDays);
+  const windowRows = dated.filter((trade) => (trade.trade_date?.getTime() ?? 0) >= cutoff.getTime());
+  const sourceRows = windowRows.length ? windowRows : dated;
+
+  const byCusip = new Map<string, TradeRow[]>();
+  for (const trade of sourceRows) {
+    if (!trade.cusip) {
+      continue;
+    }
+    byCusip.set(trade.cusip, [...(byCusip.get(trade.cusip) ?? []), trade]);
+  }
+
+  const base = Array.from(byCusip.entries()).map(([cusip, rows]) => {
+    const latestTradeTime = Math.max(...rows.map((row) => row.trade_date?.getTime() ?? 0));
+    const latestTradeDate = new Date(latestTradeTime);
+    const maturity = mode(rows.map((row) => row.maturity_bucket ?? ""));
+    const benchmark = latestBenchmarkForBucket(benchmarkCurve, latestTradeDate, maturity);
+    const yields = rows.map((row) => row.yield).filter((value): value is number => value !== null);
+    const prices = rows.map((row) => row.price).filter((value): value is number => value !== null);
+    const avgYield = yields.length ? yields.reduce((sum, value) => sum + value, 0) / yields.length : null;
+    const benchmarkYield = benchmark?.benchmark_yield ?? null;
+    const spread = avgYield !== null && benchmarkYield !== null ? (avgYield - benchmarkYield) * 100 : null;
+    const totalAmount = rows.reduce((sum, row) => sum + (row.trade_amount ?? 0), 0);
+    const latestRow = rows.find((row) => row.trade_date?.getTime() === latestTradeTime) ?? rows[rows.length - 1];
+    return {
+      cusip,
+      issuer: latestRow.issuer,
+      maturity_bucket: maturity,
+      latest_trade_date: latestTradeTime ? dateKey(latestTradeDate) : null,
+      trade_count: rows.length,
+      avg_yield: roundOrNull(avgYield, 3),
+      benchmark_yield: roundOrNull(benchmarkYield, 3),
+      spread_to_benchmark_bps: roundOrNull(spread, 2),
+      liquidity_score: null,
+      total_trade_amount: Math.round(totalAmount),
+      avg_trade_amount: rows.length ? Math.round(totalAmount / rows.length) : 0,
+      avg_price: roundOrNull(prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null, 3),
+      days_since_last_trade: Math.max(0, Math.floor((globalLatest.getTime() - latestTradeTime) / (24 * 60 * 60 * 1000))),
+      rv_score: null,
+      signal: "Monitor",
+      evidence: [] as string[]
+    } satisfies SecurityCandidate;
+  });
+
+  const countRanks = percentileRanks(base.map((row) => row.trade_count));
+  const amountRanks = percentileRanks(base.map((row) => row.total_trade_amount));
+  const recencyRanks = percentileRanks(base.map((row) => (row.days_since_last_trade === null ? null : -row.days_since_last_trade)));
+  const spreadRanks = percentileRanks(base.map((row) => row.spread_to_benchmark_bps));
+
+  const withLiquidity = base.map((candidate, index) => {
+    const liquidity =
+      (countRanks[index] ?? 0) * 35 +
+      (amountRanks[index] ?? 0) * 35 +
+      (recencyRanks[index] ?? 0) * 30;
+    return {
+      ...candidate,
+      liquidity_score: roundOrNull(liquidity, 1)
+    };
+  });
+
+  const liquidityRanks = percentileRanks(withLiquidity.map((row) => row.liquidity_score));
+  const rvScored = withLiquidity.map((candidate, index) => {
+    const rv =
+      (spreadRanks[index] ?? 0) * 45 +
+      (liquidityRanks[index] ?? 0) * 35 +
+      (countRanks[index] ?? 0) * 10 +
+      (amountRanks[index] ?? 0) * 10;
+    const scored = {
+      ...candidate,
+      rv_score: roundOrNull(rv, 1)
+    };
+    const signal = classifyCandidate(scored);
+    const evidence = [
+      scored.spread_to_benchmark_bps === null
+        ? "Spread unavailable because no matching benchmark was found."
+        : `Spread is ${scored.spread_to_benchmark_bps >= 0 ? "+" : ""}${scored.spread_to_benchmark_bps.toFixed(1)} bps.`,
+      `Liquidity score is ${scored.liquidity_score?.toFixed(1) ?? "N/A"} from ${scored.trade_count} trade(s).`,
+      `Total par traded is ${scored.total_trade_amount.toLocaleString()}.`
+    ];
+    return { ...scored, signal, evidence };
+  });
+
+  const peerSpreads = rvScored
+    .map((row) => row.spread_to_benchmark_bps)
+    .filter((value): value is number => value !== null);
+  const peerMedian = median(peerSpreads);
+
+  return rvScored
+    .map((candidate) => ({
+      ...candidate,
+      evidence:
+        peerMedian === null || candidate.spread_to_benchmark_bps === null
+          ? candidate.evidence
+          : [
+              ...candidate.evidence,
+              `Peer-median gap is ${(candidate.spread_to_benchmark_bps - peerMedian) >= 0 ? "+" : ""}${(candidate.spread_to_benchmark_bps - peerMedian).toFixed(1)} bps.`
+            ]
+    }))
+    .sort((a, b) => (b.rv_score ?? -Infinity) - (a.rv_score ?? -Infinity))
+    .slice(0, 100);
+}
+
 export function buildNextsrPayloadFromRows(input: {
   rows: RawRow[];
   sourceFile: string | null;
@@ -523,6 +707,7 @@ export function buildNextsrPayloadFromRows(input: {
   const validation = buildValidation(rows, trades, input.sourceFile);
   const benchmarkCurve = buildTradeIndexCurve(trades);
   const spreadObs = buildSpreadObservations(trades, benchmarkCurve);
+  const securityScreener = buildSecurityScreener(trades, benchmarkCurve, input.periodDays ?? 30);
   const periodDays = input.periodDays ?? 30;
   let issuer = textValue(input.issuer) ?? mode(trades.map((trade) => trade.issuer));
   let maturityBucket = textValue(input.maturityBucket);
@@ -562,7 +747,7 @@ export function buildNextsrPayloadFromRows(input: {
 
   if (!trades.length) {
     payload.evidence.push("No model-ready trade rows were available.");
-    return { payload, validation };
+    return { payload, validation, security_screener: securityScreener };
   }
 
   issuer = issuer ?? "Unknown";
@@ -581,7 +766,7 @@ export function buildNextsrPayloadFromRows(input: {
 
   if (!obs.length) {
     payload.evidence.push("No spread observations matched the selected issuer and maturity bucket.");
-    return { payload, validation };
+    return { payload, validation, security_screener: securityScreener };
   }
 
   const latest = obs[obs.length - 1];
@@ -622,7 +807,7 @@ export function buildNextsrPayloadFromRows(input: {
     payload.evidence.push(`Liquidity score is ${liquidity.liquidity_score.toFixed(1)} from ${liquidity.trade_count} trade(s) in the selected window.`);
   }
 
-  return { payload, validation };
+  return { payload, validation, security_screener: securityScreener };
 }
 
 export function buildNextsrPayloadFromCsv(input: {

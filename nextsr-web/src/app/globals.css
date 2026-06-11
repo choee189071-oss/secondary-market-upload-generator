@@ -166,6 +166,12 @@ select {
   gap: 6px;
 }
 
+.filter-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .field label {
   color: #344054;
   font-size: 13px;
@@ -277,10 +283,58 @@ select {
   justify-content: space-between;
 }
 
+.screener-panel {
+  margin: 0 28px 28px;
+}
+
+.table-count {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.table-wrap {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: auto;
+}
+
+table {
+  border-collapse: collapse;
+  min-width: 980px;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  padding: 10px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  background: #f8fafc;
+  color: #475467;
+  font-weight: 700;
+}
+
+td {
+  color: #1f2937;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
 @media (max-width: 920px) {
   .workspace {
     grid-template-columns: 1fr;
     padding: 18px;
+  }
+
+  .screener-panel {
+    margin: 0 18px 18px;
   }
 
   .topbar {
@@ -300,6 +354,7 @@ select {
   }
 
   .field-grid,
+  .filter-grid,
   .validation-summary {
     grid-template-columns: 1fr;
   }
