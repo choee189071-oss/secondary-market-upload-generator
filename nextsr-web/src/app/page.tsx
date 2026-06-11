@@ -61,6 +61,7 @@ const templateDownloads = [
 }));
 
 const methodologyChangelog = [
+  { version: "nextsr-methodology.v4", change: "Set uploaded MMD as primary benchmark, moved Trade Index to fallback, kept AI rule-based, and separated rating/liquidity/callable/sector attribution components." },
   { version: "nextsr-parity.v3", change: "Added template downloads, workspace reset, data quality scorecard, liquidity distributions, curve spread mode, and drilldown history panels." },
   { version: "nextsr-parity.v2", change: "Added Streamlit parity audit, desk snapshot, commentary studio, report center, and clearer workflow rail." },
   { version: "nextsr-parity.v1", change: "Ported upload engine, screener, issuer curve, spread trend, liquidity, RV positioning, watchlist, and core exports." }
@@ -2172,6 +2173,14 @@ export default function Home() {
               </div>
             </div>
             <BarMetricChart<SpreadAttributionPoint> data={dashboard.spread_attribution} label={(row) => row.component} value={(row) => row.value_bps} tone="blue" />
+            <MiniTable<SpreadAttributionPoint>
+              rows={dashboard.spread_attribution}
+              columns={[
+                { key: "component", header: "Component", render: (row) => row.component },
+                { key: "value", header: "Value", render: (row) => formatNumber(row.value_bps, " bps") },
+                { key: "detail", header: "Methodology", render: (row) => row.detail }
+              ]}
+            />
           </article>
 
           <article className="panel chart-panel">

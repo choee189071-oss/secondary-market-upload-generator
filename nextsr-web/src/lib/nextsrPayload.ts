@@ -269,6 +269,7 @@ export type CrossIssuerRvPoint = {
 export type SpreadAttributionPoint = {
   component: string;
   value_bps: number;
+  detail: string;
 };
 
 export type HistoricalSpreadPoint = {
@@ -848,7 +849,9 @@ function parseMmdBenchmarkCurve(rows: RawRow[]): BenchmarkRow[] {
       if (["date", "trade_date", "pricing_date", "curve_date", "mmd_date"].includes(key)) {
         continue;
       }
-      const tenorMatch = key.toUpperCase().match(/(?:^|_)([1-9]|[1-3][0-9]|40)Y$/) ?? key.toUpperCase().match(/([1-9]|[1-3][0-9]|40)Y/);
+      const tenorMatch =
+        key.toUpperCase().match(/(?:^|_)([1-9]|[1-3][0-9]|40)_?(?:Y|YR|YEAR|YEARS)$/) ??
+        key.toUpperCase().match(/([1-9]|[1-3][0-9]|40)_?(?:Y|YR|YEAR|YEARS)/);
       if (!tenorMatch) {
         continue;
       }
@@ -860,7 +863,7 @@ function parseMmdBenchmarkCurve(rows: RawRow[]): BenchmarkRow[] {
         date: dateLabel,
         tenor: `${Number(tenorMatch[1])}Y`,
         benchmark_yield: benchmarkYield,
-        benchmark_source: "Uploaded MMD fallback",
+        benchmark_source: "Uploaded MMD",
         observation_count: 1
       });
     }
@@ -986,6 +989,44 @@ function mode(values: string[]): string | null {
     counts.set(value, (counts.get(value) ?? 0) + 1);
   }
   return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+function normalizeRating(value: string | null | undefined): "AAA" | "AA" | "A" | "BBB" | "Below IG" | null {
+  const text = String(value ?? "").toUpperCase();
+  if (!text.trim()) {
+    return null;
+  }
+  if (text.includes("AAA")) return "AAA";
+  if (text.includes("AA")) return "AA";
+  if (text.includes("BBB")) return "BBB";
+  if (/\bA[+-]?\b/.test(text) || text.includes("/A/") || text.endsWith("/A")) return "A";
+  if (/(BB|B|CCC|CC|C|D)/.test(text)) return "Below IG";
+  return null;
+}
+
+function ratingSpreadAssumption(rating: string | null): number | null {
+  if (rating === "AAA") return 0;
+  if (rating === "AA") return 8;
+  if (rating === "A") return 25;
+  if (rating === "BBB") return 60;
+  if (rating === "Below IG") return 100;
+  return null;
+}
+
+function issuerProfiles(trades: TradeRow[]) {
+  const byIssuer = new Map<string, TradeRow[]>();
+  for (const trade of trades) {
+    byIssuer.set(trade.issuer, [...(byIssuer.get(trade.issuer) ?? []), trade]);
+  }
+  return new Map(
+    Array.from(byIssuer.entries()).map(([issuer, rows]) => [
+      issuer,
+      {
+        sector: mode(rows.map((row) => row.sector ?? "Unknown")) ?? "Unknown",
+        rating: mode(rows.map((row) => normalizeRating(row.ratings_m_s_f) ?? ""))
+      }
+    ])
+  );
 }
 
 function buildLiquiditySignal(trades: TradeRow[], latestDate: string, periodDays: number) {
@@ -1570,16 +1611,16 @@ function buildBenchmarkGovernance(input: {
   const activeSource = input.activeCurve[0]?.benchmark_source ?? null;
   const activeTenors = new Set(input.activeCurve.map((row) => row.tenor));
   const missingActiveTenors = ["1Y", "2Y", "5Y", "10Y", "20Y", "30Y"].filter((tenor) => !activeTenors.has(tenor));
-  const tradeIndexActive = input.tradeIndexCurve.length > 0;
+  const uploadedMmdActive = input.uploadedMmdCurve.length > 0;
   return {
     active_source: activeSource,
-    policy: "Use Trade Sheet Index / Index Rate first because it is directly tied to uploaded trades; use uploaded MMD only when no trade-index curve can be formed.",
+    policy: "Use uploaded MMD as the primary benchmark curve. Use Trade Sheet Index / Index Rate only as a fallback when no uploaded MMD curve is available.",
     trade_index_points: input.tradeIndexCurve.length,
     uploaded_mmd_points: input.uploadedMmdCurve.length,
     active_points: input.activeCurve.length,
-    fallback_points_used: tradeIndexActive ? 0 : input.uploadedMmdCurve.length,
+    fallback_points_used: uploadedMmdActive ? 0 : input.tradeIndexCurve.length,
     missing_active_tenors: missingActiveTenors,
-    rating_curve_selector: "General market curve; rating-specific spread assumptions are disclosed below and not silently applied.",
+    rating_curve_selector: "Uploaded MMD primary curve; rating assumptions are used for peer grouping and attribution only, not embedded into benchmark spread.",
     spread_assumptions: [
       { rating: "AAA", spread_bps: 0, source: "Base benchmark curve" },
       { rating: "AA", spread_bps: 8, source: "Transparent screening assumption" },
@@ -1588,16 +1629,16 @@ function buildBenchmarkGovernance(input: {
     ],
     source_priority: [
       {
-        source: "Trade Sheet Index / Index Rate",
-        status: input.tradeIndexCurve.length ? "active" : "missing",
-        points: input.tradeIndexCurve.length,
-        notes: input.tradeIndexCurve.length ? "Primary source used for benchmark-dependent analytics." : "No usable trade-index benchmark points detected."
+        source: "Uploaded MMD",
+        status: input.uploadedMmdCurve.length ? "active" : "missing",
+        points: input.uploadedMmdCurve.length,
+        notes: input.uploadedMmdCurve.length ? "Primary source used for benchmark-dependent analytics." : "No uploaded MMD benchmark points detected."
       },
       {
-        source: "Uploaded MMD",
-        status: input.tradeIndexCurve.length ? (input.uploadedMmdCurve.length ? "fallback" : "missing") : input.uploadedMmdCurve.length ? "active" : "missing",
-        points: input.uploadedMmdCurve.length,
-        notes: input.tradeIndexCurve.length ? "Available only for audit/fallback review." : "Used when trade-index benchmark is unavailable."
+        source: "Trade Sheet Index / Index Rate",
+        status: input.uploadedMmdCurve.length ? (input.tradeIndexCurve.length ? "fallback" : "missing") : input.tradeIndexCurve.length ? "active" : "missing",
+        points: input.tradeIndexCurve.length,
+        notes: input.uploadedMmdCurve.length ? "Available only for audit/fallback review." : "Used only because uploaded MMD is unavailable."
       }
     ]
   };
@@ -1767,15 +1808,29 @@ function latestSpreadByIssuerBucket(spreadObs: SpreadObservation[]) {
   return out;
 }
 
-function buildPeerRv(spreadObs: SpreadObservation[], issuer: string): PeerRvPoint[] {
+function buildPeerRv(spreadObs: SpreadObservation[], trades: TradeRow[], issuer: string): PeerRvPoint[] {
   const latest = latestSpreadByIssuerBucket(spreadObs);
+  const profiles = issuerProfiles(trades);
+  const issuerProfile = profiles.get(issuer);
   return MATURITY_BUCKET_ORDER.map((bucket) => {
     const issuerPoint = latest.get(`${issuer}|${bucket}`);
     if (!issuerPoint) {
       return null;
     }
     const peerValues = Array.from(latest.values())
-      .filter((row) => row.maturity_bucket === bucket && row.issuer !== issuer)
+      .filter((row) => {
+        if (row.maturity_bucket !== bucket || row.issuer === issuer) {
+          return false;
+        }
+        const peerProfile = profiles.get(row.issuer);
+        if (issuerProfile?.rating) {
+          return peerProfile?.rating === issuerProfile.rating;
+        }
+        if (issuerProfile?.sector && issuerProfile.sector !== "Unknown") {
+          return peerProfile?.sector === issuerProfile.sector;
+        }
+        return true;
+      })
       .map((row) => row.spread_to_benchmark_bps)
       .filter((value) => Number.isFinite(value));
     const peerMedian = median(peerValues);
@@ -1814,7 +1869,14 @@ function buildCrossIssuerRv(trades: TradeRow[], securityScreener: SecurityCandid
   }).sort((a, b) => (b.rv_score ?? -Infinity) - (a.rv_score ?? -Infinity));
 }
 
-function buildSpreadAttribution(payload: NextsrPayload, dashboardCurve: CurvePoint[]): SpreadAttributionPoint[] {
+function buildSpreadAttribution(input: {
+  payload: NextsrPayload;
+  dashboardCurve: CurvePoint[];
+  trades: TradeRow[];
+  issuer: string;
+  maturityBucket: string | null;
+}): SpreadAttributionPoint[] {
+  const { payload, dashboardCurve, trades, issuer, maturityBucket } = input;
   const bucket = payload.maturity_bucket;
   const curvePoint = dashboardCurve.find((point) => point.maturity_bucket === bucket);
   if (!curvePoint || curvePoint.issuer_yield === null) {
@@ -1822,10 +1884,45 @@ function buildSpreadAttribution(payload: NextsrPayload, dashboardCurve: CurvePoi
   }
   const benchmarkBps = (curvePoint.benchmark_yield ?? 0) * 100;
   const spreadBps = curvePoint.spread_bps ?? 0;
+  const selectedRows = trades.filter((trade) => trade.issuer === issuer && (!maturityBucket || trade.maturity_bucket === maturityBucket));
+  const rating = mode(selectedRows.map((row) => normalizeRating(row.ratings_m_s_f) ?? "")) ?? null;
+  const sector = mode(selectedRows.map((row) => row.sector ?? "Unknown")) ?? "Unknown";
+  const ratingPremium = ratingSpreadAssumption(rating) ?? 0;
+  const liquidityScore = payload.signals.liquidity.liquidity_score;
+  const liquidityPremium = roundOrNull(liquidityScore === null ? 0 : Math.max(0, (70 - liquidityScore) * 0.25), 2) ?? 0;
+  const callableProxy = 0;
+  const residual = roundOrNull(spreadBps - ratingPremium - liquidityPremium - callableProxy, 2) ?? 0;
   return [
-    { component: "Benchmark yield", value_bps: roundOrNull(benchmarkBps, 2) ?? 0 },
-    { component: "Issuer spread", value_bps: roundOrNull(spreadBps, 2) ?? 0 },
-    { component: "Issuer yield", value_bps: roundOrNull(curvePoint.issuer_yield * 100, 2) ?? 0 }
+    {
+      component: "Active benchmark yield",
+      value_bps: roundOrNull(benchmarkBps, 2) ?? 0,
+      detail: `Active benchmark source: ${payload.universe.benchmark_source ?? "Unavailable"}. Uploaded MMD is primary when supplied.`
+    },
+    {
+      component: "Rating premium",
+      value_bps: roundOrNull(ratingPremium, 2) ?? 0,
+      detail: rating ? `${rating} assumption disclosed separately; used for attribution and peer grouping, not embedded into benchmark spread.` : "Rating unavailable; peer logic falls back to sector and maturity comparisons."
+    },
+    {
+      component: "Liquidity premium proxy",
+      value_bps: liquidityPremium,
+      detail: `Transparent proxy from liquidity score ${liquidityScore ?? "N/A"}; displayed separately from benchmark spread.`
+    },
+    {
+      component: "Callable proxy",
+      value_bps: callableProxy,
+      detail: "No call-date field is standardized yet; callable impact is shown as a separate zero proxy instead of being embedded into spread."
+    },
+    {
+      component: "Sector / maturity residual",
+      value_bps: residual,
+      detail: `Residual spread after rating, liquidity, and callable proxies. Fallback peer context is ${rating ? `rating ${rating}` : `sector ${sector}`} plus maturity bucket.`
+    },
+    {
+      component: "Issuer yield check",
+      value_bps: roundOrNull(curvePoint.issuer_yield * 100, 2) ?? 0,
+      detail: "All-in issuer yield shown as a check against benchmark plus disclosed spread components."
+    }
   ];
 }
 
@@ -2519,7 +2616,11 @@ function buildMethodologySections(): MethodologySection[] {
   return [
     {
       title: "Benchmark Source Governance",
-      body: "Trade Sheet Index / Index Rate is used first because it is tied to the same trade tape. Uploaded MMD is used only when trade-index benchmark data is unavailable."
+      body: "Uploaded MMD is the primary benchmark curve. Trade Sheet Index / Index Rate is used only as fallback when no uploaded MMD curve is available. Issuer spreads are calculated relative to the active benchmark curve."
+    },
+    {
+      title: "Rating, Sector, and Attribution",
+      body: "Ratings are used for peer grouping and spread attribution when available. If ratings are missing, peer comparisons fall back to sector and maturity bucket. Callable, liquidity, and sector effects are displayed separately in attribution and are not embedded into the benchmark spread."
     },
     {
       title: "Security Screener",
@@ -2535,7 +2636,7 @@ function buildMethodologySections(): MethodologySection[] {
     },
     {
       title: "AI Commentary",
-      body: "The AI context package is structured from calculated dashboard evidence. Live AI generation should be enabled only after API-key and data-governance settings are configured."
+      body: "Commentary remains rule-based and evidence-linked for explainability. The structured AI context package is available for review, but live OpenAI generation is intentionally deferred until methodology validation is complete."
     }
   ];
 }
@@ -2657,8 +2758,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Benchmark Governance + Benchmark Audit",
       status: "partial",
       priority: "High",
-      notes: "Trade Index / Index Rate first and MMD fallback are implemented; Streamlit's rating-curve selector and richer assumption tables are not fully replicated.",
-      next_step: "Add AAA/AA/A/BBB curve selector and explicit benchmark override controls."
+      notes: "Uploaded MMD primary, Trade Index fallback, disclosed rating assumptions, and benchmark audit table are implemented; full interactive rating curve selector remains partial.",
+      next_step: "Validate AAA/AA/A/BBB assumption values against the user's expected-output sample."
     },
     {
       area: "Data Intake / Governance",
@@ -2727,8 +2828,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "Spread Attribution Waterfall",
       status: "partial",
       priority: "Medium",
-      notes: "A simplified attribution bridge exists; Streamlit's rating, liquidity, callable adjustment, and residual decomposition is richer.",
-      next_step: "Separate rating premium, liquidity premium, callable proxy, and residual components."
+      notes: "Attribution now separates active benchmark yield, rating premium, liquidity proxy, callable proxy, sector/maturity residual, and issuer-yield check; Streamlit's full callable data model is still partial.",
+      next_step: "Add standardized call-date/call-price fields if the validated sample includes callable securities."
     },
     {
       area: "Relative Value Signals",
@@ -2877,8 +2978,8 @@ function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
       next_surface: "AI Commentary Studio",
       status: "partial",
       priority: "High",
-      notes: "Retrieve/review/generate workflow exists with structured evidence; live OpenAI generation and external market retrieval are intentionally not connected yet.",
-      next_step: "Add governed AI endpoint, model selector, and source citation controls."
+      notes: "Retrieve/review/generate workflow remains rule-based with structured evidence by design; live OpenAI generation and external market retrieval are intentionally deferred.",
+      next_step: "Revisit governed OpenAI integration only after benchmark methodology validation."
     },
     {
       area: "Export / Admin",
@@ -2960,7 +3061,7 @@ function emptyDashboard(): DashboardAnalytics {
     },
     benchmark_governance: {
       active_source: null,
-      policy: "Trade Sheet Index / Index Rate first; uploaded MMD is fallback when trade index is unavailable.",
+      policy: "Uploaded MMD primary; Trade Sheet Index / Index Rate is fallback when uploaded MMD is unavailable.",
       trade_index_points: 0,
       uploaded_mmd_points: 0,
       active_points: 0,
@@ -3032,14 +3133,14 @@ function emptyDashboard(): DashboardAnalytics {
     analyst_context: {},
     export_summary_markdown: "",
     admin: {
-      methodology_version: "nextsr-parity.v3",
-      benchmark_policy: "Trade Sheet Index / Index Rate first; uploaded MMD is fallback when trade index is unavailable.",
+      methodology_version: "nextsr-methodology.v4",
+      benchmark_policy: "Uploaded MMD primary; Trade Sheet Index / Index Rate is fallback when uploaded MMD is unavailable. Ratings support peer grouping and attribution when available; sector and maturity are fallback peer dimensions.",
       module_status: [
-        { module: "Data Engine", status: "ported", notes: "Multi-trade upload, optional bond reference, issuer mapping, sector override, MMD fallback, templates, quality scorecard, and merged trade universe." },
+        { module: "Data Engine", status: "ported", notes: "Multi-trade upload, optional bond reference, issuer mapping, sector override, MMD-primary benchmark, Trade Index fallback, templates, quality scorecard, and merged trade universe." },
         { module: "Core Dashboard", status: "ported", notes: "Desk snapshot, spread trend, volume, issuer curve yield/spread mode, spread ladder, heatmap, liquidity, screener, RV positioning, CUSIP drilldown." },
-        { module: "Advanced Analytics", status: "partial", notes: "Peer RV, cross-issuer RV, opportunity map, attribution, historical range, curve shape, scenario shock, and benchmark audit are implemented with transparent approximations where needed." },
+        { module: "Advanced Analytics", status: "partial", notes: "Rating-aware Peer RV, cross-issuer RV, opportunity map, disclosed attribution components, historical range, curve shape, scenario shock, and benchmark audit are implemented with transparent approximations where needed." },
         { module: "Watchlist / Drilldown", status: "ported", notes: "Client-side watchlist, selected CUSIP detail, trade path, and read-through are available." },
-        { module: "AI / Export / Admin", status: "partial", notes: "Desk snapshot, commentary studio, markdown/HTML/chart-data exports, PPT outline, report manifest, and methodology metadata are available; live AI/PDF/PPTX services can be added after governance is set." }
+        { module: "AI / Export / Admin", status: "partial", notes: "Rule-based commentary studio, markdown/HTML/chart-data exports, PPT outline, report manifest, and methodology metadata are available; live AI/PDF/PPTX services remain deferred." }
       ]
     }
   };
@@ -3074,7 +3175,15 @@ function buildDashboardAnalytics(input: {
   const issuerCurve = buildIssuerCurve(input.trades, input.benchmarkCurve, input.issuer, input.periodDays);
   const curveShape = buildCurveShape(issuerCurve);
   const payload = input.payload;
-  const spreadAttribution = payload ? buildSpreadAttribution(payload, issuerCurve) : [];
+  const spreadAttribution = payload
+    ? buildSpreadAttribution({
+        payload,
+        dashboardCurve: issuerCurve,
+        trades: input.trades,
+        issuer: input.issuer,
+        maturityBucket: input.maturityBucket
+      })
+    : [];
   const spreadTrend = buildSpreadTrend(input.spreadObs, input.issuer, input.maturityBucket);
   const linkedSpreadTrends = Object.fromEntries(
     MATURITY_BUCKET_ORDER
@@ -3087,7 +3196,7 @@ function buildDashboardAnalytics(input: {
   const tradeSizeDistribution = buildTradeSizeDistribution(input.trades, input.issuer, input.periodDays);
   const stalenessDistribution = buildStalenessDistribution(input.securityScreener, input.issuer);
   const topCusipActivity = buildTopCusipActivity(input.securityScreener, input.issuer);
-  const peerRv = buildPeerRv(input.spreadObs, input.issuer);
+  const peerRv = buildPeerRv(input.spreadObs, input.trades, input.issuer);
   const crossIssuerRv = buildCrossIssuerRv(input.trades, input.securityScreener);
   const historicalPercentiles = buildHistoricalPercentiles(input.spreadObs, input.issuer);
   const scenarioShock = buildScenarioShock(input.trades, input.issuer);
@@ -3479,7 +3588,7 @@ export function buildNextsrPayloadFromFiles(input: {
   const { trades, removed } = dedupeTrades(enrichedTrades);
   const tradeIndexCurve = buildTradeIndexCurve(trades);
   const uploadedMmdCurve = parseMmdBenchmarkCurve(input.mmdRows ?? []);
-  const benchmarkCurve = tradeIndexCurve.length ? tradeIndexCurve : uploadedMmdCurve;
+  const benchmarkCurve = uploadedMmdCurve.length ? uploadedMmdCurve : tradeIndexCurve;
   const benchmarkGovernance = buildBenchmarkGovernance({
     tradeIndexCurve,
     uploadedMmdCurve,
