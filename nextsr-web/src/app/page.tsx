@@ -78,6 +78,13 @@ function formatPct(value: number | null | undefined) {
   return value === null || value === undefined ? "N/A" : `${value.toFixed(1)}%`;
 }
 
+function formatMillions(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "N/A";
+  }
+  return `$${(value / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 1 })}M`;
+}
+
 function nearestTenorLabel(bucket: string | null | undefined) {
   const year = Number(String(bucket ?? "").replace("Y", ""));
   if (!Number.isFinite(year) || year < 1) return null;
@@ -225,6 +232,41 @@ function MiniTable<T>({ columns, rows }: { columns: Array<{ key: string; header:
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function AnalystReadthrough({
+  title,
+  quote,
+  evidence = [],
+  polish = []
+}: {
+  title: string;
+  quote: string;
+  evidence?: string[];
+  polish?: string[];
+}) {
+  return (
+    <div className="analyst-readthrough">
+      <h3>{title}</h3>
+      <div className="slide-quote"><strong>Slide-ready quote:</strong> {quote}</div>
+      {evidence.length ? (
+        <details className="readthrough-details">
+          <summary>Evidence / calculation details</summary>
+          <div className="readthrough-detail-list">
+            {evidence.map((item) => <p key={item}>{item}</p>)}
+          </div>
+        </details>
+      ) : null}
+      {polish.length ? (
+        <details className="readthrough-details">
+          <summary>Narrative polish</summary>
+          <div className="readthrough-detail-list">
+            {polish.map((item) => <p key={item}>{item}</p>)}
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -1243,6 +1285,96 @@ export default function Home() {
       avg_trade_size: trades.length ? selectedSecurity.total_trade_amount / trades.length : null
     };
   }, [selectedSecurity]);
+  const issuerCurveReadthrough = useMemo(() => {
+    if (!dashboard || !payload) {
+      return null;
+    }
+    const point =
+      dashboard.issuer_curve.find((row) => row.maturity_bucket === (activeBucket ?? payload.maturity_bucket)) ??
+      dashboard.issuer_curve.find((row) => row.maturity_bucket === payload.maturity_bucket) ??
+      dashboard.issuer_curve[0];
+    if (!point) {
+      return null;
+    }
+    return {
+      quote: `${payload.issuer ?? "Issuer"} ${point.maturity_bucket} screens at ${formatNumber(point.issuer_yield, "%")} versus ${formatNumber(point.benchmark_yield, "%")} active benchmark yield, or ${formatNumber(point.spread_bps, " bps")} spread.`,
+      evidence: [
+        `Active benchmark source: ${payload.universe.benchmark_source ?? "Unavailable"}.`,
+        `Curve point uses ${point.trade_count.toLocaleString()} trade(s) and ${formatMillions(point.total_trade_amount)} total par.`,
+        `Selected curve mode: ${curveMode}. Active bucket: ${point.maturity_bucket}.`
+      ]
+    };
+  }, [activeBucket, curveMode, dashboard, payload]);
+  const activityReadthrough = useMemo(() => {
+    if (!payload || !dashboard?.monthly_activity.length) {
+      return null;
+    }
+    const rows = dashboard.monthly_activity;
+    const latest = rows[rows.length - 1];
+    const peak = [...rows].sort((a, b) => b.total_trade_amount - a.total_trade_amount)[0];
+    const averageVolume = rows.reduce((sum, row) => sum + row.total_trade_amount, 0) / rows.length;
+    return {
+      quote: `${payload.issuer ?? "Issuer"} latest-month secondary-market volume was ${formatMillions(latest.total_trade_amount)} across ${latest.trade_count.toLocaleString()} trade(s); peak volume was ${formatMillions(peak.total_trade_amount)} in ${peak.month}.`,
+      evidence: [
+        `${rows.length.toLocaleString()} monthly observation(s) in the activity chart.`,
+        `Average monthly volume is ${formatMillions(averageVolume)}.`,
+        `Latest month shown: ${latest.month}.`
+      ]
+    };
+  }, [dashboard, payload]);
+  const liquidityReadthrough = useMemo(() => {
+    if (!payload || !dashboard) {
+      return null;
+    }
+    const topLiquidity = [...dashboard.top_cusip_activity].sort((a, b) => (b.liquidity_score ?? -Infinity) - (a.liquidity_score ?? -Infinity))[0];
+    const staleRows = dashboard.staleness_distribution.filter((row) => ["31-90D", "91-180D", "180D+"].includes(row.bucket));
+    const staleShare = staleRows.reduce((sum, row) => sum + row.share_pct, 0);
+    return {
+      quote: topLiquidity
+        ? `Liquidity screen highlights ${topLiquidity.cusip} with liquidity score ${formatNumber(topLiquidity.liquidity_score)}; ${staleShare.toFixed(1)}% of scored CUSIPs have not traded in more than 30 days.`
+        : `Liquidity score for the selected issuer/bucket is ${formatNumber(payload.signals.liquidity.liquidity_score)} with ${payload.signals.liquidity.trade_count.toLocaleString()} recent trade(s).`,
+      evidence: [
+        `Recent selected-bucket liquidity score: ${formatNumber(payload.signals.liquidity.liquidity_score)}.`,
+        `Selected-bucket recent trade amount: ${payload.signals.liquidity.total_trade_amount.toLocaleString()}.`,
+        `${dashboard.top_cusip_activity.length.toLocaleString()} top CUSIP activity rows are available.`
+      ]
+    };
+  }, [dashboard, payload]);
+  const screenerReadthrough = useMemo(() => {
+    if (!topOpportunity) {
+      return null;
+    }
+    return {
+      quote: `${topOpportunity.cusip} leads the current screener as ${topOpportunity.signal}; spread is ${formatNumber(topOpportunity.spread_to_benchmark_bps, " bps")}, liquidity is ${formatNumber(topOpportunity.liquidity_score)}, and RV score is ${formatNumber(topOpportunity.rv_score)}.`,
+      evidence: [
+        `Decision label: ${decisionLabel(topOpportunity)}.`,
+        `Total par traded: ${topOpportunity.total_trade_amount.toLocaleString()}.`,
+        `Latest trade date: ${topOpportunity.latest_trade_date ?? "N/A"}.`
+      ],
+      polish: topOpportunity.evidence
+    };
+  }, [topOpportunity]);
+  const selectedCusipReadthrough = useMemo(() => {
+    if (!selectedSecurity) {
+      return null;
+    }
+    const datedTrades = selectedSecurity.trades.filter((trade) => trade.date);
+    const firstTrade = datedTrades[0];
+    const lastTrade = datedTrades[datedTrades.length - 1];
+    const yieldMove =
+      firstTrade?.yield !== null && firstTrade?.yield !== undefined && lastTrade?.yield !== null && lastTrade?.yield !== undefined
+        ? (lastTrade.yield - firstTrade.yield) * 100
+        : null;
+    return {
+      quote: `${selectedSecurity.cusip} traded from ${firstTrade?.date ?? "N/A"} to ${lastTrade?.date ?? "N/A"}; yield moved ${formatNumber(yieldMove, " bps")} and latest spread is ${formatNumber(selectedSecurity.spread_to_benchmark_bps, " bps")}.`,
+      evidence: [
+        `Trade count: ${selectedSecurity.trade_count.toLocaleString()}. Total par: ${selectedSecurity.total_trade_amount.toLocaleString()}.`,
+        `Signal: ${selectedSecurity.signal}. Liquidity score: ${formatNumber(selectedSecurity.liquidity_score)}.`,
+        `Benchmark audit tenor: ${nearestTenorLabel(selectedSecurity.maturity_bucket) ?? "N/A"}.`
+      ],
+      polish: selectedSecurity.readthrough
+    };
+  }, [selectedSecurity]);
   const sameBucketComparables = useMemo(() => {
     if (!selectedSecurity?.maturity_bucket) {
       return [];
@@ -1949,6 +2081,13 @@ export default function Home() {
               showIssuer={showIssuerCurve}
               showBenchmark={showBenchmarkCurve}
             />
+            {issuerCurveReadthrough ? (
+              <AnalystReadthrough
+                title="Analyst read-through - issuer curve"
+                quote={issuerCurveReadthrough.quote}
+                evidence={issuerCurveReadthrough.evidence}
+              />
+            ) : null}
           </article>
 
           <article className="panel chart-panel">
@@ -1993,6 +2132,13 @@ export default function Home() {
               </div>
             </div>
             <ActivityChart data={dashboard.monthly_activity} />
+            {activityReadthrough ? (
+              <AnalystReadthrough
+                title="Analyst read-through - trading volume"
+                quote={activityReadthrough.quote}
+                evidence={activityReadthrough.evidence}
+              />
+            ) : null}
           </article>
 
           <article className="panel chart-panel wide">
@@ -2084,6 +2230,13 @@ export default function Home() {
               </div>
             </div>
             <BarMetricChart<LiquidityPoint> activeLabel={activeBucket} data={dashboard.liquidity} label={(row) => row.maturity_bucket} onSelect={setActiveBucket} value={(row) => row.liquidity_score} tone="teal" />
+            {liquidityReadthrough ? (
+              <AnalystReadthrough
+                title="Analyst read-through - liquidity"
+                quote={liquidityReadthrough.quote}
+                evidence={liquidityReadthrough.evidence}
+              />
+            ) : null}
           </article>
 
           <article className="panel chart-panel">
@@ -2313,6 +2466,14 @@ export default function Home() {
               </button>
             </div>
           ) : null}
+          {screenerReadthrough ? (
+            <AnalystReadthrough
+              title="Analyst read-through - screener"
+              quote={screenerReadthrough.quote}
+              evidence={screenerReadthrough.evidence}
+              polish={screenerReadthrough.polish}
+            />
+          ) : null}
           {filteredCandidates.length ? (
             <div className={`table-wrap ${tableDensity}`}>
               <table>
@@ -2403,6 +2564,14 @@ export default function Home() {
                 <div className="readthrough-list">
                   {selectedSecurity.readthrough.map((item) => <p key={item}>{item}</p>)}
                 </div>
+                {selectedCusipReadthrough ? (
+                  <AnalystReadthrough
+                    title="Analyst read-through - CUSIP detail"
+                    quote={selectedCusipReadthrough.quote}
+                    evidence={selectedCusipReadthrough.evidence}
+                    polish={selectedCusipReadthrough.polish}
+                  />
+                ) : null}
                 <div className="reason-tree">
                   <strong>Recommendation Reason Tree</strong>
                   {selectedSecurity.evidence.length ? selectedSecurity.evidence.map((item) => <p key={item}>{item}</p>) : <p>No CUSIP-level evidence was generated.</p>}
