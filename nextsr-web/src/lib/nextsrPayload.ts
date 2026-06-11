@@ -44,6 +44,7 @@ export type PayloadBuildResult = {
   payload: NextsrPayload;
   validation: PayloadValidation;
   security_screener: SecurityCandidate[];
+  dashboard: DashboardAnalytics;
 };
 
 export type RawRow = Record<string, string>;
@@ -64,6 +65,48 @@ export type SecurityCandidate = {
   rv_score: number | null;
   signal: string;
   evidence: string[];
+};
+
+export type CurvePoint = {
+  maturity_bucket: string;
+  maturity_year: number;
+  issuer_yield: number | null;
+  benchmark_yield: number | null;
+  spread_bps: number | null;
+  trade_count: number;
+  total_trade_amount: number;
+};
+
+export type TrendPoint = {
+  date: string;
+  spread_bps: number;
+  avg_yield: number;
+  benchmark_yield: number;
+  trade_count: number;
+};
+
+export type ActivityPoint = {
+  month: string;
+  trade_count: number;
+  total_trade_amount: number;
+};
+
+export type PositionPoint = {
+  cusip: string;
+  maturity_bucket: string | null;
+  spread_bps: number | null;
+  liquidity_score: number | null;
+  rv_score: number | null;
+  trade_count: number;
+  total_trade_amount: number;
+  signal: string;
+};
+
+export type DashboardAnalytics = {
+  issuer_curve: CurvePoint[];
+  spread_trend: TrendPoint[];
+  monthly_activity: ActivityPoint[];
+  positioning: PositionPoint[];
 };
 
 type TradeRow = {
@@ -695,6 +738,110 @@ function buildSecurityScreener(trades: TradeRow[], benchmarkCurve: BenchmarkRow[
     .slice(0, 100);
 }
 
+function buildIssuerCurve(trades: TradeRow[], benchmarkCurve: BenchmarkRow[], issuer: string, periodDays: number): CurvePoint[] {
+  const issuerRows = trades.filter((trade) => trade.issuer === issuer && trade.trade_date && trade.maturity_bucket && trade.yield !== null);
+  if (!issuerRows.length) {
+    return [];
+  }
+  const latestDate = new Date(Math.max(...issuerRows.map((trade) => trade.trade_date?.getTime() ?? 0)));
+  const cutoff = new Date(latestDate);
+  cutoff.setUTCDate(cutoff.getUTCDate() - periodDays);
+  const windowRows = issuerRows.filter((trade) => (trade.trade_date?.getTime() ?? 0) >= cutoff.getTime());
+  const sourceRows = windowRows.length ? windowRows : issuerRows;
+  const byBucket = new Map<string, TradeRow[]>();
+  for (const trade of sourceRows) {
+    if (!trade.maturity_bucket) {
+      continue;
+    }
+    byBucket.set(trade.maturity_bucket, [...(byBucket.get(trade.maturity_bucket) ?? []), trade]);
+  }
+
+  return MATURITY_BUCKET_ORDER.map((bucket) => {
+    const rows = byBucket.get(bucket) ?? [];
+    const yields = rows.map((row) => row.yield).filter((value): value is number => value !== null);
+    const issuerYield = yields.length ? yields.reduce((sum, value) => sum + value, 0) / yields.length : null;
+    const benchmark = latestBenchmarkForBucket(benchmarkCurve, latestDate, bucket);
+    const benchmarkYield = benchmark?.benchmark_yield ?? null;
+    return {
+      maturity_bucket: bucket,
+      maturity_year: Number(bucket.replace("Y", "")),
+      issuer_yield: roundOrNull(issuerYield, 3),
+      benchmark_yield: roundOrNull(benchmarkYield, 3),
+      spread_bps: issuerYield !== null && benchmarkYield !== null ? roundOrNull((issuerYield - benchmarkYield) * 100, 2) : null,
+      trade_count: rows.length,
+      total_trade_amount: Math.round(rows.reduce((sum, row) => sum + (row.trade_amount ?? 0), 0))
+    };
+  }).filter((point) => point.issuer_yield !== null || point.benchmark_yield !== null);
+}
+
+function buildSpreadTrend(spreadObs: SpreadObservation[], issuer: string, maturityBucket: string | null): TrendPoint[] {
+  if (!maturityBucket) {
+    return [];
+  }
+  return spreadObs
+    .filter((row) => row.issuer === issuer && row.maturity_bucket === maturityBucket)
+    .sort((a, b) => a.trade_date.localeCompare(b.trade_date))
+    .slice(-90)
+    .map((row) => ({
+      date: row.trade_date,
+      spread_bps: roundOrNull(row.spread_to_benchmark_bps, 2) ?? 0,
+      avg_yield: roundOrNull(row.avg_yield, 3) ?? 0,
+      benchmark_yield: roundOrNull(row.benchmark_yield, 3) ?? 0,
+      trade_count: row.trade_count
+    }));
+}
+
+function buildMonthlyActivity(trades: TradeRow[], issuer: string): ActivityPoint[] {
+  const byMonth = new Map<string, { trade_count: number; total_trade_amount: number }>();
+  for (const trade of trades) {
+    if (trade.issuer !== issuer || !trade.trade_date) {
+      continue;
+    }
+    const month = dateKey(trade.trade_date).slice(0, 7);
+    const current = byMonth.get(month) ?? { trade_count: 0, total_trade_amount: 0 };
+    current.trade_count += 1;
+    current.total_trade_amount += trade.trade_amount ?? 0;
+    byMonth.set(month, current);
+  }
+  return Array.from(byMonth.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-18)
+    .map(([month, value]) => ({
+      month,
+      trade_count: value.trade_count,
+      total_trade_amount: Math.round(value.total_trade_amount)
+    }));
+}
+
+function buildDashboardAnalytics(input: {
+  trades: TradeRow[];
+  benchmarkCurve: BenchmarkRow[];
+  spreadObs: SpreadObservation[];
+  securityScreener: SecurityCandidate[];
+  issuer: string | null;
+  maturityBucket: string | null;
+  periodDays: number;
+}): DashboardAnalytics {
+  if (!input.issuer) {
+    return { issuer_curve: [], spread_trend: [], monthly_activity: [], positioning: [] };
+  }
+  return {
+    issuer_curve: buildIssuerCurve(input.trades, input.benchmarkCurve, input.issuer, input.periodDays),
+    spread_trend: buildSpreadTrend(input.spreadObs, input.issuer, input.maturityBucket),
+    monthly_activity: buildMonthlyActivity(input.trades, input.issuer),
+    positioning: input.securityScreener.slice(0, 80).map((candidate) => ({
+      cusip: candidate.cusip,
+      maturity_bucket: candidate.maturity_bucket,
+      spread_bps: candidate.spread_to_benchmark_bps,
+      liquidity_score: candidate.liquidity_score,
+      rv_score: candidate.rv_score,
+      trade_count: candidate.trade_count,
+      total_trade_amount: candidate.total_trade_amount,
+      signal: candidate.signal
+    }))
+  };
+}
+
 export function buildNextsrPayloadFromRows(input: {
   rows: RawRow[];
   sourceFile: string | null;
@@ -747,7 +894,12 @@ export function buildNextsrPayloadFromRows(input: {
 
   if (!trades.length) {
     payload.evidence.push("No model-ready trade rows were available.");
-    return { payload, validation, security_screener: securityScreener };
+    return {
+      payload,
+      validation,
+      security_screener: securityScreener,
+      dashboard: { issuer_curve: [], spread_trend: [], monthly_activity: [], positioning: [] }
+    };
   }
 
   issuer = issuer ?? "Unknown";
@@ -758,6 +910,16 @@ export function buildNextsrPayloadFromRows(input: {
     payload.maturity_bucket = maturityBucket;
   }
 
+  const emptyDashboard = buildDashboardAnalytics({
+    trades,
+    benchmarkCurve,
+    spreadObs,
+    securityScreener,
+    issuer,
+    maturityBucket,
+    periodDays
+  });
+
   let obs = spreadObs.filter((row) => row.issuer === issuer);
   if (maturityBucket) {
     obs = obs.filter((row) => row.maturity_bucket === maturityBucket);
@@ -766,7 +928,7 @@ export function buildNextsrPayloadFromRows(input: {
 
   if (!obs.length) {
     payload.evidence.push("No spread observations matched the selected issuer and maturity bucket.");
-    return { payload, validation, security_screener: securityScreener };
+    return { payload, validation, security_screener: securityScreener, dashboard: emptyDashboard };
   }
 
   const latest = obs[obs.length - 1];
@@ -807,7 +969,20 @@ export function buildNextsrPayloadFromRows(input: {
     payload.evidence.push(`Liquidity score is ${liquidity.liquidity_score.toFixed(1)} from ${liquidity.trade_count} trade(s) in the selected window.`);
   }
 
-  return { payload, validation, security_screener: securityScreener };
+  return {
+    payload,
+    validation,
+    security_screener: securityScreener,
+    dashboard: buildDashboardAnalytics({
+      trades,
+      benchmarkCurve,
+      spreadObs,
+      securityScreener,
+      issuer,
+      maturityBucket,
+      periodDays
+    })
+  };
 }
 
 export function buildNextsrPayloadFromCsv(input: {

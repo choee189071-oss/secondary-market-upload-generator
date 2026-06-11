@@ -260,6 +260,19 @@ select {
   padding: 16px;
 }
 
+.developer-payload {
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+
+.developer-payload summary {
+  color: #344054;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 10px 0;
+}
+
 .empty-state,
 .error-state {
   align-items: center;
@@ -285,6 +298,147 @@ select {
 
 .screener-panel {
   margin: 0 28px 28px;
+}
+
+.visual-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0 28px 24px;
+}
+
+.chart-panel.wide {
+  grid-column: 1 / -1;
+}
+
+.chart-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.chart-header h2 {
+  margin-bottom: 4px;
+}
+
+.chart-header p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.legend span {
+  align-items: center;
+  color: #475467;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.legend-dot {
+  border-radius: 50%;
+  display: inline-block;
+  height: 9px;
+  width: 9px;
+}
+
+.issuer-key {
+  background: #e11d48;
+}
+
+.benchmark-key {
+  background: #2563eb;
+}
+
+.chart-svg {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: block;
+  height: auto;
+  max-height: 430px;
+  width: 100%;
+}
+
+.grid-line {
+  stroke: #e5ebf3;
+  stroke-width: 1;
+}
+
+.grid-line.vertical {
+  stroke-dasharray: 4 4;
+}
+
+.zero-line {
+  opacity: 0.65;
+  stroke: #94a3b8;
+  stroke-dasharray: 5 5;
+  stroke-width: 1;
+}
+
+.axis-label {
+  fill: #667085;
+  font-size: 12px;
+}
+
+.line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.line.issuer,
+.line.spread {
+  stroke: #e11d48;
+}
+
+.line.benchmark {
+  stroke: #2563eb;
+}
+
+.dot {
+  fill: #e11d48;
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+
+.bar.activity {
+  fill: #0f766e;
+  opacity: 0.85;
+}
+
+.bubble {
+  fill: #2563eb;
+  opacity: 0.48;
+  stroke: #1d4ed8;
+  stroke-width: 1;
+}
+
+.bubble.hot {
+  fill: #e11d48;
+  opacity: 0.58;
+  stroke: #be123c;
+}
+
+.empty-chart {
+  align-items: center;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  display: flex;
+  min-height: 260px;
+  padding: 18px;
 }
 
 .table-count {
@@ -335,6 +489,11 @@ tbody tr:last-child td {
 
   .screener-panel {
     margin: 0 18px 18px;
+  }
+
+  .visual-grid {
+    grid-template-columns: 1fr;
+    padding: 0 18px 18px;
   }
 
   .topbar {
