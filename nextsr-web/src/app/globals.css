@@ -573,6 +573,10 @@ select {
   stroke-width: 2;
 }
 
+.crosshair circle.benchmark-focus {
+  stroke: #2563eb;
+}
+
 .grid-line {
   stroke: #e5ebf3;
   stroke-width: 1;
@@ -658,6 +662,72 @@ select {
   opacity: 0.88;
   stroke: #111827;
   stroke-width: 2.4;
+}
+
+.trade-path-block {
+  display: grid;
+  gap: 10px;
+}
+
+.trade-volume-bar {
+  opacity: 0.28;
+}
+
+.trade-volume-bar.buy {
+  fill: #0f766e;
+}
+
+.trade-volume-bar.sell {
+  fill: #e11d48;
+}
+
+.trade-volume-bar.other {
+  fill: #64748b;
+}
+
+.trade-dot {
+  cursor: pointer;
+  fill: #ffffff;
+  stroke-width: 2;
+}
+
+.trade-dot.buy {
+  stroke: #0f766e;
+}
+
+.trade-dot.sell {
+  stroke: #e11d48;
+}
+
+.trade-dot.other {
+  stroke: #64748b;
+}
+
+.trade-dot.selected {
+  fill: #111827;
+  stroke: #111827;
+}
+
+.selected-trade-card {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #42526a;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 10px 12px;
+}
+
+.selected-trade-card strong {
+  color: #111827;
+  font-size: 18px;
+}
+
+.selected-trade-card span {
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .empty-chart {

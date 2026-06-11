@@ -145,21 +145,131 @@ function MiniTable<T>({ columns, rows }: { columns: Array<{ key: string; header:
 }
 
 function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { data: CurvePoint[]; showIssuer?: boolean; showBenchmark?: boolean }) {
-  const values = data.flatMap((point) => [point.issuer_yield, point.benchmark_yield]).filter((value): value is number => value !== null);
   const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
-  if (!data.length || !values.length) {
+  const [crosshair, setCrosshair] = useState<{ x: number; y: number; point: CurvePoint; series: string } | null>(null);
+  const [zoomRange, setZoomRange] = useState<[number, number] | null>(null);
+  const [brush, setBrush] = useState<{ startX: number; endX: number } | null>(null);
+  const sortedData = useMemo(() => [...data].sort((a, b) => a.maturity_year - b.maturity_year), [data]);
+
+  useEffect(() => {
+    setZoomRange(null);
+    setBrush(null);
+    setCrosshair(null);
+    setTooltip(null);
+  }, [data, showIssuer, showBenchmark]);
+
+  const zoomStart = zoomRange?.[0] ?? 0;
+  const plotData = zoomRange ? sortedData.slice(zoomRange[0], zoomRange[1] + 1) : sortedData;
+  const values = plotData
+    .flatMap((point) => [
+      showIssuer ? point.issuer_yield : null,
+      showBenchmark ? point.benchmark_yield : null
+    ])
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+
+  if (!plotData.length || !values.length) {
     return <EmptyChart />;
   }
   const min = Math.min(...values) - 0.15;
   const max = Math.max(...values) + 0.15;
-  const x = (point: CurvePoint) => 42 + ((point.maturity_year - 1) / 39) * 716;
+  const minYear = Math.min(...plotData.map((point) => point.maturity_year));
+  const maxYear = Math.max(...plotData.map((point) => point.maturity_year));
+  const x = (point: CurvePoint) => 42 + ((point.maturity_year - minYear) / (maxYear - minYear || 1)) * 716;
   const y = (value: number | null) => {
     if (value === null) return null;
     return 300 - ((value - min) / (max - min || 1)) * 244;
   };
+  const svgXFromEvent = (event: ReactMouseEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const raw = ((event.clientX - rect.left) / rect.width) * 800;
+    return Math.max(42, Math.min(758, raw));
+  };
+  const svgYFromEvent = (event: ReactMouseEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return ((event.clientY - rect.top) / rect.height) * 340;
+  };
+  const indexFromSvgX = (svgX: number) => {
+    let nearestIndex = 0;
+    let nearestDistance = Infinity;
+    plotData.forEach((point, index) => {
+      const distance = Math.abs(x(point) - svgX);
+      if (distance < nearestDistance) {
+        nearestIndex = index;
+        nearestDistance = distance;
+      }
+    });
+    return nearestIndex;
+  };
+  const visibleSeries = (point: CurvePoint) => [
+    ...(showIssuer && point.issuer_yield !== null ? [{ name: "Issuer", value: point.issuer_yield }] : []),
+    ...(showBenchmark && point.benchmark_yield !== null ? [{ name: "Benchmark", value: point.benchmark_yield }] : [])
+  ];
+  const updateCrosshair = (event: ReactMouseEvent<SVGSVGElement>) => {
+    const index = indexFromSvgX(svgXFromEvent(event));
+    const point = plotData[index];
+    if (!point) return;
+    const pointerY = svgYFromEvent(event);
+    const series = visibleSeries(point).sort((a, b) => Math.abs((y(a.value) ?? 0) - pointerY) - Math.abs((y(b.value) ?? 0) - pointerY))[0];
+    if (!series) return;
+    const yy = y(series.value);
+    if (yy === null) return;
+    setCrosshair({ x: x(point), y: yy, point, series: series.name });
+    setTooltip(chartTooltipFromEvent(event, `${point.maturity_bucket} ${series.name}`, [
+      `Issuer yield: ${formatNumber(point.issuer_yield, "%")}`,
+      `Benchmark yield: ${formatNumber(point.benchmark_yield, "%")}`,
+      `Spread: ${formatNumber(point.spread_bps, " bps")}`,
+      `Trades: ${point.trade_count.toLocaleString()}`,
+      `Total par: ${point.total_trade_amount.toLocaleString()}`
+    ]));
+  };
+  const commitBrush = () => {
+    if (!brush) return;
+    const left = Math.min(brush.startX, brush.endX);
+    const right = Math.max(brush.startX, brush.endX);
+    if (right - left < 12) {
+      setBrush(null);
+      return;
+    }
+    const startIndex = indexFromSvgX(left);
+    const endIndex = indexFromSvgX(right);
+    if (endIndex - startIndex < 1) {
+      setBrush(null);
+      return;
+    }
+    setZoomRange([zoomStart + startIndex, zoomStart + endIndex]);
+    setBrush(null);
+  };
+  const maturityTicks = plotData.filter((_, index) => index % Math.ceil(plotData.length / 8 || 1) === 0 || index === plotData.length - 1);
+
   return (
     <div className="chart-frame">
-      <svg className="chart-svg" viewBox="0 0 800 340" role="img" onMouseLeave={() => setTooltip(null)}>
+      {zoomRange ? (
+        <button className="chart-reset-button" type="button" onClick={() => setZoomRange(null)}>
+          Reset zoom
+        </button>
+      ) : null}
+      <svg
+        className="chart-svg brushable"
+        viewBox="0 0 800 340"
+        role="img"
+        onMouseDown={(event) => {
+          const startX = svgXFromEvent(event);
+          setBrush({ startX, endX: startX });
+          updateCrosshair(event);
+        }}
+        onMouseMove={(event) => {
+          if (brush) {
+            setBrush((current) => (current ? { ...current, endX: svgXFromEvent(event) } : current));
+          }
+          updateCrosshair(event);
+        }}
+        onMouseUp={commitBrush}
+        onMouseLeave={() => {
+          setTooltip(null);
+          setCrosshair(null);
+          setBrush(null);
+        }}
+      >
         {[0, 1, 2, 3].map((tick) => {
           const yy = 300 - tick * 70;
           const label = min + ((max - min) * tick) / 3;
@@ -170,44 +280,48 @@ function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { d
             </g>
           );
         })}
-        {showBenchmark ? <polyline className="line benchmark" points={linePath(data, x, (point) => y(point.benchmark_yield))} /> : null}
-        {showIssuer ? <polyline className="line issuer" points={linePath(data, x, (point) => y(point.issuer_yield))} /> : null}
+        {brush ? (
+          <rect
+            className="brush-window"
+            x={Math.min(brush.startX, brush.endX)}
+            y="56"
+            width={Math.abs(brush.endX - brush.startX)}
+            height="244"
+          />
+        ) : null}
+        {showBenchmark ? <polyline className="line benchmark" points={linePath(plotData, x, (point) => y(point.benchmark_yield))} /> : null}
+        {showIssuer ? <polyline className="line issuer" points={linePath(plotData, x, (point) => y(point.issuer_yield))} /> : null}
+        {crosshair ? (
+          <g className="crosshair">
+            <line x1={crosshair.x} x2={crosshair.x} y1="56" y2="300" />
+            <line x1="42" x2="758" y1={crosshair.y} y2={crosshair.y} />
+            <circle className={crosshair.series === "Benchmark" ? "benchmark-focus" : undefined} cx={crosshair.x} cy={crosshair.y} r="5" />
+          </g>
+        ) : null}
         {showBenchmark
-          ? data.filter((point) => point.benchmark_yield !== null).map((point) => (
+          ? plotData.filter((point) => point.benchmark_yield !== null).map((point) => (
               <circle
                 className="dot benchmark-dot"
                 cx={x(point)}
                 cy={y(point.benchmark_yield) ?? 0}
                 key={`${point.maturity_bucket}-benchmark`}
                 r="3.2"
-                onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, `${point.maturity_bucket} Benchmark`, [
-                  `Benchmark yield: ${formatNumber(point.benchmark_yield, "%")}`,
-                  `Issuer yield: ${formatNumber(point.issuer_yield, "%")}`,
-                  `Spread: ${formatNumber(point.spread_bps, " bps")}`,
-                  `Trades: ${point.trade_count.toLocaleString()}`
-                ]))}
               />
             ))
           : null}
         {showIssuer
-          ? data.filter((point) => point.issuer_yield !== null).map((point) => (
+          ? plotData.filter((point) => point.issuer_yield !== null).map((point) => (
               <circle
                 className="dot issuer-dot"
                 cx={x(point)}
                 cy={y(point.issuer_yield) ?? 0}
                 key={point.maturity_bucket}
                 r="3.4"
-                onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, `${point.maturity_bucket} Issuer`, [
-                  `Issuer yield: ${formatNumber(point.issuer_yield, "%")}`,
-                  `Benchmark yield: ${formatNumber(point.benchmark_yield, "%")}`,
-                  `Spread: ${formatNumber(point.spread_bps, " bps")}`,
-                  `Total par: ${point.total_trade_amount.toLocaleString()}`
-                ]))}
               />
             ))
           : null}
-        {[1, 5, 10, 15, 20, 25, 30, 35, 40].map((year) => (
-          <text className="axis-label" key={year} x={42 + ((year - 1) / 39) * 716} y="324" textAnchor="middle">{year}Y</text>
+        {maturityTicks.map((point) => (
+          <text className="axis-label" key={`${point.maturity_bucket}-${point.maturity_year}`} x={x(point)} y="324" textAnchor="middle">{point.maturity_bucket}</text>
         ))}
       </svg>
       <TooltipOverlay tooltip={tooltip} />
@@ -447,6 +561,212 @@ function PositioningChart({ data, selectedCusip, onSelect }: { data: PositionPoi
         <text className="axis-label" x="758" y="324" textAnchor="end">Liquidity 100</text>
       </svg>
       <TooltipOverlay tooltip={tooltip} />
+    </div>
+  );
+}
+
+function SecurityTradePathChart({ trades }: { trades: SecurityTradePoint[] }) {
+  const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
+  const [crosshair, setCrosshair] = useState<{ x: number; y: number; point: SecurityTradePoint; absoluteIndex: number } | null>(null);
+  const [zoomRange, setZoomRange] = useState<[number, number] | null>(null);
+  const [brush, setBrush] = useState<{ startX: number; endX: number } | null>(null);
+  const [selectedTradeIndex, setSelectedTradeIndex] = useState<number | null>(null);
+  const sortedTrades = useMemo(
+    () => [...trades]
+      .filter((trade) => trade.spread_bps !== null || trade.yield !== null)
+      .sort((a, b) => {
+        const aTime = a.date ? new Date(`${a.date}T00:00:00Z`).getTime() : Number.MAX_SAFE_INTEGER;
+        const bTime = b.date ? new Date(`${b.date}T00:00:00Z`).getTime() : Number.MAX_SAFE_INTEGER;
+        return (Number.isFinite(aTime) ? aTime : Number.MAX_SAFE_INTEGER) - (Number.isFinite(bTime) ? bTime : Number.MAX_SAFE_INTEGER);
+      }),
+    [trades]
+  );
+
+  useEffect(() => {
+    setZoomRange(null);
+    setBrush(null);
+    setCrosshair(null);
+    setTooltip(null);
+    setSelectedTradeIndex(null);
+  }, [trades]);
+
+  const hasSpread = sortedTrades.some((trade) => trade.spread_bps !== null);
+  const metricLabel = hasSpread ? "Spread" : "Yield";
+  const metricSuffix = hasSpread ? " bps" : "%";
+  const metricValue = (trade: SecurityTradePoint) => (hasSpread ? trade.spread_bps : trade.yield);
+  const zoomStart = zoomRange?.[0] ?? 0;
+  const plotData = zoomRange ? sortedTrades.slice(zoomRange[0], zoomRange[1] + 1) : sortedTrades;
+  const values = plotData.map(metricValue).filter((value): value is number => value !== null && Number.isFinite(value));
+
+  if (plotData.length < 2 || !values.length) {
+    return <EmptyChart />;
+  }
+
+  const padding = hasSpread ? 5 : 0.12;
+  const min = Math.min(...values) - padding;
+  const max = Math.max(...values) + padding;
+  const maxPar = Math.max(...plotData.map((trade) => trade.trade_amount), 1);
+  const x = (_point: SecurityTradePoint, index: number) => 42 + (index / Math.max(plotData.length - 1, 1)) * 716;
+  const y = (value: number | null) => {
+    if (value === null) return null;
+    return 285 - ((value - min) / (max - min || 1)) * 229;
+  };
+  const sideClass = (trade: SecurityTradePoint) => {
+    const side = (trade.trade_type ?? "").toLowerCase();
+    if (side.includes("buy")) return "buy";
+    if (side.includes("sell")) return "sell";
+    return "other";
+  };
+  const svgXFromEvent = (event: ReactMouseEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const raw = ((event.clientX - rect.left) / rect.width) * 800;
+    return Math.max(42, Math.min(758, raw));
+  };
+  const indexFromSvgX = (svgX: number) => {
+    const ratio = (svgX - 42) / 716;
+    return Math.max(0, Math.min(plotData.length - 1, Math.round(ratio * (plotData.length - 1))));
+  };
+  const updateCrosshair = (event: ReactMouseEvent<SVGSVGElement>) => {
+    const index = indexFromSvgX(svgXFromEvent(event));
+    const point = plotData[index];
+    if (!point) return;
+    const yy = y(metricValue(point));
+    if (yy === null) return;
+    const absoluteIndex = zoomStart + index;
+    setCrosshair({ x: x(point, index), y: yy, point, absoluteIndex });
+    setTooltip(chartTooltipFromEvent(event, point.date ?? "Undated trade", [
+      `${metricLabel}: ${formatNumber(metricValue(point), metricSuffix)}`,
+      `Yield: ${formatNumber(point.yield, "%")}`,
+      `Benchmark: ${formatNumber(point.benchmark_yield, "%")}`,
+      `Price: ${formatNumber(point.price)}`,
+      `Par: ${point.trade_amount.toLocaleString()}`,
+      `Side: ${point.trade_type ?? "N/A"}`
+    ]));
+  };
+  const commitBrush = () => {
+    if (!brush) return;
+    const left = Math.min(brush.startX, brush.endX);
+    const right = Math.max(brush.startX, brush.endX);
+    const nearestIndex = indexFromSvgX(brush.endX);
+    if (right - left < 12) {
+      setSelectedTradeIndex(zoomStart + nearestIndex);
+      setBrush(null);
+      return;
+    }
+    const startIndex = indexFromSvgX(left);
+    const endIndex = indexFromSvgX(right);
+    if (endIndex - startIndex < 1) {
+      setBrush(null);
+      return;
+    }
+    setZoomRange([zoomStart + startIndex, zoomStart + endIndex]);
+    setSelectedTradeIndex(zoomStart + startIndex);
+    setBrush(null);
+  };
+  const barWidth = Math.max(3, Math.min(22, 650 / plotData.length));
+  const selectedTrade = selectedTradeIndex !== null ? sortedTrades[selectedTradeIndex] ?? null : null;
+
+  return (
+    <div className="trade-path-block">
+      <div className="chart-frame">
+        {zoomRange ? (
+          <button className="chart-reset-button" type="button" onClick={() => setZoomRange(null)}>
+            Reset zoom
+          </button>
+        ) : null}
+        <svg
+          className="chart-svg brushable"
+          viewBox="0 0 800 380"
+          role="img"
+          onMouseDown={(event) => {
+            const startX = svgXFromEvent(event);
+            setBrush({ startX, endX: startX });
+            updateCrosshair(event);
+          }}
+          onMouseMove={(event) => {
+            if (brush) {
+              setBrush((current) => (current ? { ...current, endX: svgXFromEvent(event) } : current));
+            }
+            updateCrosshair(event);
+          }}
+          onMouseUp={commitBrush}
+          onMouseLeave={() => {
+            setTooltip(null);
+            setCrosshair(null);
+            setBrush(null);
+          }}
+        >
+          {[0, 1, 2, 3].map((tick) => {
+            const yy = 285 - tick * 64;
+            const label = min + ((max - min) * tick) / 3;
+            return (
+              <g key={tick}>
+                <line className="grid-line" x1="42" x2="758" y1={yy} y2={yy} />
+                <text className="axis-label" x="8" y={yy + 4}>{formatNumber(label, metricSuffix)}</text>
+              </g>
+            );
+          })}
+          {brush ? (
+            <rect
+              className="brush-window"
+              x={Math.min(brush.startX, brush.endX)}
+              y="56"
+              width={Math.abs(brush.endX - brush.startX)}
+              height="274"
+            />
+          ) : null}
+          {plotData.map((trade, index) => {
+            const height = Math.max(2, (trade.trade_amount / maxPar) * 36);
+            return (
+              <rect
+                className={`trade-volume-bar ${sideClass(trade)}`}
+                height={height}
+                key={`${trade.date ?? "undated"}-${index}-bar`}
+                width={barWidth}
+                x={x(trade, index) - barWidth / 2}
+                y={330 - height}
+              />
+            );
+          })}
+          <polyline className="line spread" points={linePath(plotData, x, (trade) => y(metricValue(trade)))} />
+          {crosshair ? (
+            <g className="crosshair">
+              <line x1={crosshair.x} x2={crosshair.x} y1="56" y2="330" />
+              <line x1="42" x2="758" y1={crosshair.y} y2={crosshair.y} />
+              <circle cx={crosshair.x} cy={crosshair.y} r="5" />
+            </g>
+          ) : null}
+          {plotData.map((trade, index) => {
+            const metric = metricValue(trade);
+            const yy = y(metric);
+            if (yy === null) return null;
+            const absoluteIndex = zoomStart + index;
+            return (
+              <circle
+                className={`trade-dot ${sideClass(trade)} ${absoluteIndex === selectedTradeIndex ? "selected" : ""}`}
+                cx={x(trade, index)}
+                cy={yy}
+                key={`${trade.date ?? "undated"}-${index}-dot`}
+                onClick={() => setSelectedTradeIndex(absoluteIndex)}
+                r={absoluteIndex === selectedTradeIndex ? 5.4 : 3.8}
+              />
+            );
+          })}
+          <text className="axis-label" x="42" y="358">{plotData[0].date ?? "Undated"}</text>
+          <text className="axis-label" x="758" y="358" textAnchor="end">{plotData[plotData.length - 1].date ?? "Undated"}</text>
+        </svg>
+        <TooltipOverlay tooltip={tooltip} />
+      </div>
+      {selectedTrade ? (
+        <div className="selected-trade-card">
+          <span>{selectedTrade.date ?? "Undated trade"}</span>
+          <strong>{formatNumber(metricValue(selectedTrade), metricSuffix)}</strong>
+          <span>Yield {formatNumber(selectedTrade.yield, "%")}</span>
+          <span>Price {formatNumber(selectedTrade.price)}</span>
+          <span>Par {selectedTrade.trade_amount.toLocaleString()}</span>
+          <span>{selectedTrade.trade_type ?? "N/A"}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1231,6 +1551,7 @@ export default function Home() {
                 <div className="readthrough-list">
                   {selectedSecurity.readthrough.map((item) => <p key={item}>{item}</p>)}
                 </div>
+                <SecurityTradePathChart trades={selectedSecurity.trades} />
                 <MiniTable<SecurityTradePoint>
                   rows={selectedSecurity.trades.slice(-20).reverse()}
                   columns={[
