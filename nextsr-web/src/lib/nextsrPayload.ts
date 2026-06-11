@@ -322,6 +322,37 @@ export type RecommendationNarrative = {
   evidence: string[];
 };
 
+export type DeskSnapshot = {
+  thesis: string;
+  market_read: string;
+  action_bias: string;
+  confidence: "High" | "Medium" | "Low";
+  key_metrics: Array<{ label: string; value: string; tone: "positive" | "warning" | "negative" | "neutral"; detail: string }>;
+  decision_points: string[];
+  next_steps: string[];
+  risk_flags: string[];
+};
+
+export type ChartReferenceLine = {
+  id: string;
+  label: string;
+  value_bps: number;
+  source: string;
+  description: string;
+  tone: "current" | "sector" | "market" | "baseline" | "peer";
+};
+
+export type CommentaryStudio = {
+  market_context: Array<{ step: string; status: "ready" | "review" | "missing"; evidence: string }>;
+  analyst_review: Array<{ check: string; status: "pass" | "review" | "blocked"; notes: string }>;
+  generated_commentary: {
+    headline: string;
+    bullets: string[];
+    client_note: string;
+    internal_note: string;
+  };
+};
+
 export type MethodologySection = {
   title: string;
   body: string;
@@ -333,6 +364,8 @@ export type ReportArtifacts = {
   audit_data_json: string;
   security_detail_csv: string;
   benchmark_csv: string;
+  ppt_outline_markdown: string;
+  report_manifest_json: string;
 };
 
 export type DashboardAnalytics = {
@@ -358,6 +391,9 @@ export type DashboardAnalytics = {
   security_details: SecurityDetail[];
   benchmark_audit: BenchmarkAuditRow[];
   recommendation: RecommendationNarrative;
+  desk_snapshot: DeskSnapshot;
+  chart_reference_lines: ChartReferenceLine[];
+  commentary_studio: CommentaryStudio;
   methodology_sections: MethodologySection[];
   report_artifacts: ReportArtifacts;
   analyst_context: Record<string, unknown>;
@@ -1806,6 +1842,271 @@ function buildRecommendationNarrative(payload: NextsrPayload, candidates: Securi
   };
 }
 
+function metricTone(value: number | null, highGood = true): "positive" | "warning" | "negative" | "neutral" {
+  if (value === null) {
+    return "neutral";
+  }
+  if (highGood) {
+    if (value >= 70) return "positive";
+    if (value >= 35) return "warning";
+    return "negative";
+  }
+  if (value <= 25) return "positive";
+  if (value <= 60) return "warning";
+  return "negative";
+}
+
+function buildDeskSnapshot(input: {
+  payload: NextsrPayload;
+  dataHealth: DataHealth;
+  dataAudit: DataAuditCenter;
+  benchmarkGovernance: BenchmarkGovernance;
+  recommendation: RecommendationNarrative;
+  candidates: SecurityCandidate[];
+  curveShape: CurveShapeMetric[];
+}): DeskSnapshot {
+  const { payload, dataHealth, dataAudit, benchmarkGovernance, recommendation, candidates, curveShape } = input;
+  const spread = payload.signals.spread.current_spread_bps;
+  const spreadMove = payload.signals.spread.spread_change_bps;
+  const liquidity = payload.signals.liquidity.liquidity_score;
+  const percentile = payload.signals.spread.historical_percentile_1y;
+  const topCandidate = candidates[0];
+  const benchmarkMatch = dataAudit.reconciliation.benchmark_match_rate_pct;
+  const dataConfidence =
+    dataAudit.overall_status === "pass" && benchmarkMatch >= 80 && payload.signals.liquidity.trade_count >= 5
+      ? "High"
+      : dataAudit.overall_status === "blocked" || benchmarkMatch < 40
+        ? "Low"
+        : "Medium";
+  const direction = spreadMove === null ? "flat to inconclusive" : spreadMove >= 0 ? `widened ${spreadMove.toFixed(1)} bps` : `tightened ${Math.abs(spreadMove).toFixed(1)} bps`;
+  const thesis = `${payload.issuer ?? "Selected issuer"} ${payload.maturity_bucket ?? "selected bucket"} screens as ${payload.label.toLowerCase()} with ${spread === null ? "unavailable" : `${spread.toFixed(1)} bps`} current spread.`;
+  const marketRead = `Spread path is ${direction} over the selected lookback; liquidity score is ${liquidity === null ? "unavailable" : liquidity.toFixed(1)} and benchmark source is ${dataHealth.benchmark_source ?? "not detected"}.`;
+  const actionBias =
+    payload.label === "Potential Relative Value Candidate"
+      ? "Prioritize CUSIP review and compare against same-bucket peers before adding to the desk watchlist."
+      : payload.label === "Watchlist Candidate"
+        ? "Keep on watchlist; wait for stronger liquidity or spread confirmation."
+        : payload.label === "Potentially Rich / Lower Priority"
+          ? "Deprioritize unless client demand or structure-specific reasons override the screen."
+          : "Use as a monitoring read; no strong action signal from the current file alone.";
+  const riskFlags = [
+    ...recommendation.caveats,
+    ...dataAudit.warnings.slice(0, 2),
+    ...(benchmarkGovernance.fallback_points_used ? [`${benchmarkGovernance.fallback_points_used.toLocaleString()} benchmark fallback point(s) were used.`] : [])
+  ].slice(0, 5);
+
+  return {
+    thesis,
+    market_read: marketRead,
+    action_bias: actionBias,
+    confidence: dataConfidence,
+    key_metrics: [
+      {
+        label: "Spread",
+        value: spread === null ? "N/A" : `${spread.toFixed(1)} bps`,
+        tone: metricTone(spread, true),
+        detail: percentile === null ? "No percentile available." : `${percentile.toFixed(0)}th percentile of available history.`
+      },
+      {
+        label: "Liquidity",
+        value: liquidity === null ? "N/A" : liquidity.toFixed(1),
+        tone: metricTone(liquidity, true),
+        detail: `${payload.signals.liquidity.trade_count.toLocaleString()} recent trade(s), ${payload.signals.liquidity.total_trade_amount.toLocaleString()} par.`
+      },
+      {
+        label: "Top CUSIP",
+        value: topCandidate?.cusip ?? "N/A",
+        tone: topCandidate?.signal.includes("Wide") ? "positive" : "neutral",
+        detail: topCandidate ? `${topCandidate.signal}; RV ${topCandidate.rv_score ?? "N/A"}.` : "No security candidate passed scoring."
+      },
+      {
+        label: "Data Quality",
+        value: dataAudit.overall_status,
+        tone: dataAudit.overall_status === "pass" ? "positive" : dataAudit.overall_status === "review" ? "warning" : "negative",
+        detail: `${benchmarkMatch.toFixed(1)}% benchmark match across ${dataHealth.model_ready_rows.toLocaleString()} model-ready rows.`
+      }
+    ],
+    decision_points: [
+      ...recommendation.drivers.slice(0, 3),
+      ...curveShape.slice(0, 1).map((metric) => `${metric.metric}: ${metric.value ?? "N/A"} ${metric.unit}.`)
+    ].slice(0, 4),
+    next_steps: [
+      topCandidate ? `Open ${topCandidate.cusip} drilldown and review trade path / side mix.` : "Run CUSIP screener after adding enough benchmarkable rows.",
+      "Compare selected bucket against peer and all-issuer reference lines.",
+      "Confirm benchmark source and any MMD fallback before external distribution.",
+      "Export HTML report or chart bundle after analyst review."
+    ],
+    risk_flags: riskFlags.length ? riskFlags : ["No additional rule-based risk flags beyond standard screening caveats."]
+  };
+}
+
+function latestSpreadByIssuer(spreadObs: SpreadObservation[], maturityBucket: string | null) {
+  const latest = new Map<string, SpreadObservation>();
+  for (const row of spreadObs) {
+    if (!maturityBucket || row.maturity_bucket !== maturityBucket) {
+      continue;
+    }
+    const current = latest.get(row.issuer);
+    if (!current || row.trade_date > current.trade_date) {
+      latest.set(row.issuer, row);
+    }
+  }
+  return latest;
+}
+
+function buildChartReferenceLines(input: {
+  trades: TradeRow[];
+  spreadObs: SpreadObservation[];
+  issuer: string;
+  maturityBucket: string | null;
+  payload?: NextsrPayload;
+}): ChartReferenceLine[] {
+  const { trades, spreadObs, issuer, maturityBucket, payload } = input;
+  const latestByIssuer = latestSpreadByIssuer(spreadObs, maturityBucket);
+  const issuerSector = mode(trades.filter((trade) => trade.issuer === issuer).map((trade) => trade.sector));
+  const sectorByIssuer = new Map<string, string>();
+  for (const trade of trades) {
+    if (trade.issuer && trade.sector && !sectorByIssuer.has(trade.issuer)) {
+      sectorByIssuer.set(trade.issuer, trade.sector);
+    }
+  }
+  const values = Array.from(latestByIssuer.entries()).map(([rowIssuer, row]) => ({
+    issuer: rowIssuer,
+    sector: sectorByIssuer.get(rowIssuer) ?? "Unknown",
+    spread: row.spread_to_benchmark_bps
+  }));
+  const sectorLabel = issuerSector && issuerSector !== "Unknown" ? issuerSector : "Sector";
+  const current = payload?.signals.spread.current_spread_bps ?? latestByIssuer.get(issuer)?.spread_to_benchmark_bps ?? null;
+  const allAverage = values.length ? values.reduce((sum, row) => sum + row.spread, 0) / values.length : null;
+  const sectorValues = values.filter((row) => row.sector === issuerSector);
+  const sectorAverage = sectorValues.length ? sectorValues.reduce((sum, row) => sum + row.spread, 0) / sectorValues.length : null;
+  const peerMedian = median(values.filter((row) => row.issuer !== issuer).map((row) => row.spread));
+  const lines = [
+    current === null
+      ? null
+      : {
+          id: "selected-current",
+          label: "Selected Current",
+          value_bps: roundOrNull(current, 2) ?? current,
+          source: "Selected issuer / bucket",
+          description: "Current spread for the selected issuer and maturity bucket.",
+          tone: "current" as const
+        },
+    sectorAverage === null
+      ? null
+      : {
+          id: "sector-average",
+          label: `${sectorLabel} Avg`,
+          value_bps: roundOrNull(sectorAverage, 2) ?? sectorAverage,
+          source: "Uploaded issuers with matching sector",
+          description: `${sectorValues.length.toLocaleString()} latest same-bucket issuer observation(s).`,
+          tone: "sector" as const
+        },
+    allAverage === null
+      ? null
+      : {
+          id: "all-issuer-average",
+          label: "All Issuer Avg",
+          value_bps: roundOrNull(allAverage, 2) ?? allAverage,
+          source: "Uploaded universe",
+          description: `${values.length.toLocaleString()} latest same-bucket issuer observation(s).`,
+          tone: "market" as const
+        },
+    peerMedian === null
+      ? null
+      : {
+          id: "peer-median",
+          label: "Peer Median",
+          value_bps: roundOrNull(peerMedian, 2) ?? peerMedian,
+          source: "Uploaded peers excluding selected issuer",
+          description: "Median latest spread across other issuers in the selected bucket.",
+          tone: "peer" as const
+        },
+    {
+      id: "aaa-baseline",
+      label: "AAA / Benchmark",
+      value_bps: 0,
+      source: "Benchmark spread baseline",
+      description: "Zero spread to active benchmark, used as the baseline reference.",
+      tone: "baseline" as const
+    }
+  ];
+  return lines.filter((line): line is ChartReferenceLine => line !== null);
+}
+
+function buildCommentaryStudio(input: {
+  payload: NextsrPayload;
+  dataHealth: DataHealth;
+  dataAudit: DataAuditCenter;
+  benchmarkGovernance: BenchmarkGovernance;
+  recommendation: RecommendationNarrative;
+  deskSnapshot: DeskSnapshot;
+  referenceLines: ChartReferenceLine[];
+  candidates: SecurityCandidate[];
+}): CommentaryStudio {
+  const { payload, dataHealth, dataAudit, benchmarkGovernance, recommendation, deskSnapshot, referenceLines, candidates } = input;
+  const topCandidate = candidates[0];
+  const context: CommentaryStudio["market_context"] = [
+    {
+      step: "Retrieve uploaded market tape",
+      status: dataHealth.model_ready_rows ? "ready" : "missing",
+      evidence: `${dataHealth.model_ready_rows.toLocaleString()} model-ready trades across ${dataHealth.cusips.toLocaleString()} CUSIPs.`
+    },
+    {
+      step: "Retrieve benchmark context",
+      status: benchmarkGovernance.active_source ? "ready" : "missing",
+      evidence: `${benchmarkGovernance.active_source ?? "No active benchmark"}; ${dataAudit.reconciliation.benchmark_match_rate_pct.toFixed(1)}% benchmark match.`
+    },
+    {
+      step: "Retrieve relative-value context",
+      status: referenceLines.length > 1 ? "ready" : "review",
+      evidence: `${referenceLines.length.toLocaleString()} spread reference line(s) available for ${payload.maturity_bucket ?? "selected bucket"}.`
+    },
+    {
+      step: "Retrieve CUSIP opportunity context",
+      status: topCandidate ? "ready" : "review",
+      evidence: topCandidate ? `${topCandidate.cusip} leads screener with ${topCandidate.signal}.` : "No scored CUSIP leads are available."
+    }
+  ];
+  const review: CommentaryStudio["analyst_review"] = [
+    {
+      check: "Data readiness",
+      status: dataAudit.overall_status === "pass" ? "pass" : dataAudit.overall_status,
+      notes: `${dataAudit.reconciliation.model_ready_rows.toLocaleString()} model-ready rows; ${dataAudit.reconciliation.duplicate_rows_removed.toLocaleString()} duplicate row(s) removed.`
+    },
+    {
+      check: "Benchmark governance",
+      status: benchmarkGovernance.active_source ? "pass" : "blocked",
+      notes: benchmarkGovernance.policy
+    },
+    {
+      check: "Liquidity sufficiency",
+      status: payload.signals.liquidity.trade_count >= 5 ? "pass" : payload.signals.liquidity.trade_count >= 2 ? "review" : "blocked",
+      notes: `${payload.signals.liquidity.trade_count.toLocaleString()} recent trade(s); liquidity score ${payload.signals.liquidity.liquidity_score ?? "N/A"}.`
+    },
+    {
+      check: "Distribution caveats",
+      status: recommendation.caveats.length ? "review" : "pass",
+      notes: recommendation.caveats.join(" ")
+    }
+  ];
+  const bullets = [
+    deskSnapshot.thesis,
+    deskSnapshot.market_read,
+    ...recommendation.drivers.slice(0, 3)
+  ].slice(0, 5);
+  return {
+    market_context: context,
+    analyst_review: review,
+    generated_commentary: {
+      headline: `${payload.issuer ?? "Issuer"} ${payload.maturity_bucket ?? "bucket"}: ${payload.label}`,
+      bullets,
+      client_note: `${recommendation.summary} Key support comes from ${recommendation.drivers.slice(0, 2).join(" ") || "the uploaded trade tape and benchmark governance checks."}`,
+      internal_note: `${deskSnapshot.action_bias} Confidence: ${deskSnapshot.confidence}. Confirm all review checks before sending externally.`
+    }
+  };
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -1842,7 +2143,9 @@ function buildHtmlReport(
   candidates: SecurityCandidate[],
   curveShape: CurveShapeMetric[],
   dataAudit: DataAuditCenter,
-  benchmarkGovernance: BenchmarkGovernance
+  benchmarkGovernance: BenchmarkGovernance,
+  deskSnapshot: DeskSnapshot,
+  referenceLines: ChartReferenceLine[]
 ) {
   const candidateRows = candidates
     .slice(0, 15)
@@ -1853,6 +2156,10 @@ function buildHtmlReport(
   const curveRows = curveShape.map((metric) => `<li>${escapeHtml(metric.metric)}: ${escapeHtml(metric.value ?? "N/A")} ${escapeHtml(metric.unit)}. ${escapeHtml(metric.readthrough)}</li>`).join("");
   const auditRows = dataAudit.steps.map((step) => `<tr><td>${escapeHtml(step.step)}</td><td>${escapeHtml(step.status)}</td><td>${escapeHtml(step.rows_in.toLocaleString())}</td><td>${escapeHtml(step.rows_out.toLocaleString())}</td><td>${escapeHtml(step.rejected_rows.toLocaleString())}</td><td>${escapeHtml(step.notes.join(" "))}</td></tr>`).join("");
   const benchmarkRows = benchmarkGovernance.source_priority.map((source) => `<tr><td>${escapeHtml(source.source)}</td><td>${escapeHtml(source.status)}</td><td>${escapeHtml(source.points.toLocaleString())}</td><td>${escapeHtml(source.notes)}</td></tr>`).join("");
+  const snapshotRows = deskSnapshot.key_metrics.map((metric) => `<div class="card"><strong>${escapeHtml(metric.label)}</strong><br />${escapeHtml(metric.value)}<br /><span class="muted">${escapeHtml(metric.detail)}</span></div>`).join("");
+  const decisionRows = deskSnapshot.decision_points.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const riskRows = deskSnapshot.risk_flags.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const referenceRows = referenceLines.map((line) => `<tr><td>${escapeHtml(line.label)}</td><td>${escapeHtml(line.value_bps)} bps</td><td>${escapeHtml(line.source)}</td><td>${escapeHtml(line.description)}</td></tr>`).join("");
   return `<!doctype html>
 <html>
 <head>
@@ -1877,10 +2184,19 @@ function buildHtmlReport(
     <div class="card"><strong>Liquidity</strong><br />${escapeHtml(payload.signals.liquidity.liquidity_score ?? "N/A")}</div>
     <div class="card"><strong>Universe</strong><br />${escapeHtml(dataHealth.model_ready_rows.toLocaleString())} trades</div>
   </div>
+  <h2>Desk Snapshot</h2>
+  <p><strong>${escapeHtml(deskSnapshot.confidence)} confidence.</strong> ${escapeHtml(deskSnapshot.thesis)}</p>
+  <p>${escapeHtml(deskSnapshot.market_read)}</p>
+  <p>${escapeHtml(deskSnapshot.action_bias)}</p>
+  <div class="grid">${snapshotRows}</div>
+  <h3>Decision Points</h3><ul>${decisionRows}</ul>
+  <h3>Risk Flags</h3><ul>${riskRows}</ul>
   <h2>Recommendation Narrative</h2>
   <p>${escapeHtml(recommendation.summary)}</p>
   <h3>Drivers</h3><ul>${driverRows}</ul>
   <h3>Caveats</h3><ul>${caveatRows}</ul>
+  <h2>Spread Reference Lines</h2>
+  <table><thead><tr><th>Reference</th><th>Spread</th><th>Source</th><th>Description</th></tr></thead><tbody>${referenceRows}</tbody></table>
   <h2>Data Audit Center</h2>
   <p>Status: <strong>${escapeHtml(dataAudit.overall_status)}</strong>. Benchmark match rate: ${escapeHtml(dataAudit.reconciliation.benchmark_match_rate_pct)}%.</p>
   <table><thead><tr><th>Step</th><th>Status</th><th>Rows In</th><th>Rows Out</th><th>Rejected</th><th>Notes</th></tr></thead><tbody>${auditRows}</tbody></table>
@@ -1892,6 +2208,81 @@ function buildHtmlReport(
   <h2>Curve Shape</h2><ul>${curveRows}</ul>
 </body>
 </html>`;
+}
+
+function buildPptOutlineMarkdown(input: {
+  payload: NextsrPayload;
+  deskSnapshot: DeskSnapshot;
+  recommendation: RecommendationNarrative;
+  referenceLines: ChartReferenceLine[];
+  candidates: SecurityCandidate[];
+  curveShape: CurveShapeMetric[];
+}) {
+  const { payload, deskSnapshot, recommendation, referenceLines, candidates, curveShape } = input;
+  const topCandidates = candidates.slice(0, 6).map((candidate) => `  - ${candidate.cusip}: ${candidate.signal}; spread ${candidate.spread_to_benchmark_bps ?? "N/A"} bps; liquidity ${candidate.liquidity_score ?? "N/A"}`).join("\n");
+  const referenceBullets = referenceLines.map((line) => `  - ${line.label}: ${line.value_bps} bps (${line.source})`).join("\n");
+  const curveBullets = curveShape.map((metric) => `  - ${metric.metric}: ${metric.value ?? "N/A"} ${metric.unit}; ${metric.readthrough}`).join("\n");
+  return [
+    `# ${payload.issuer ?? "Issuer"} Secondary Market Deck Outline`,
+    "",
+    "## Slide 1 - Desk Snapshot",
+    `- ${deskSnapshot.thesis}`,
+    `- ${deskSnapshot.market_read}`,
+    `- Action bias: ${deskSnapshot.action_bias}`,
+    `- Confidence: ${deskSnapshot.confidence}`,
+    "",
+    "## Slide 2 - Key Metrics",
+    ...deskSnapshot.key_metrics.map((metric) => `- ${metric.label}: ${metric.value}. ${metric.detail}`),
+    "",
+    "## Slide 3 - Spread Trend Reference Lines",
+    referenceBullets || "  - No reference lines available.",
+    "",
+    "## Slide 4 - Security Candidates",
+    topCandidates || "  - No CUSIP candidates available.",
+    "",
+    "## Slide 5 - Recommendation Narrative",
+    ...recommendation.drivers.slice(0, 5).map((item) => `- ${item}`),
+    "",
+    "## Slide 6 - Risk Flags / Caveats",
+    ...deskSnapshot.risk_flags.slice(0, 5).map((item) => `- ${item}`),
+    "",
+    "## Slide 7 - Curve Shape / Scenario Discussion",
+    curveBullets || "  - No curve-shape metrics available."
+  ].join("\n");
+}
+
+function buildReportManifest(input: {
+  payload: NextsrPayload;
+  dataHealth: DataHealth;
+  deskSnapshot: DeskSnapshot;
+  referenceLines: ChartReferenceLine[];
+  commentaryStudio: CommentaryStudio;
+}) {
+  return JSON.stringify({
+    report_type: "secondary_market_analysis_bundle",
+    issuer: input.payload.issuer,
+    maturity_bucket: input.payload.maturity_bucket,
+    as_of_date: input.payload.as_of_date,
+    confidence: input.deskSnapshot.confidence,
+    included_exports: [
+      "nextsr_payload.json",
+      "secondary_market_summary.md",
+      "secondary_market_report.html",
+      "chart_data_bundle.json",
+      "audit_data_bundle.json",
+      "security_screener.csv",
+      "security_detail.csv",
+      "benchmark_audit.csv",
+      "ppt_outline.md"
+    ],
+    data_health: {
+      model_ready_rows: input.dataHealth.model_ready_rows,
+      cusips: input.dataHealth.cusips,
+      benchmark_source: input.dataHealth.benchmark_source
+    },
+    reference_lines: input.referenceLines,
+    commentary_review: input.commentaryStudio.analyst_review
+  }, null, 2);
 }
 
 function buildMethodologySections(): MethodologySection[] {
@@ -1925,6 +2316,9 @@ function buildReportArtifacts(input: {
   dataAudit: DataAuditCenter;
   benchmarkGovernance: BenchmarkGovernance;
   recommendation: RecommendationNarrative;
+  deskSnapshot: DeskSnapshot;
+  referenceLines: ChartReferenceLine[];
+  commentaryStudio: CommentaryStudio;
   candidates: SecurityCandidate[];
   securityDetails: SecurityDetail[];
   benchmarkAudit: BenchmarkAuditRow[];
@@ -1932,7 +2326,7 @@ function buildReportArtifacts(input: {
   dashboardData: Record<string, unknown>;
 }): ReportArtifacts {
   return {
-    html_report: buildHtmlReport(input.payload, input.dataHealth, input.recommendation, input.candidates, input.curveShape, input.dataAudit, input.benchmarkGovernance),
+    html_report: buildHtmlReport(input.payload, input.dataHealth, input.recommendation, input.candidates, input.curveShape, input.dataAudit, input.benchmarkGovernance, input.deskSnapshot, input.referenceLines),
     chart_data_json: JSON.stringify(input.dashboardData, null, 2),
     audit_data_json: JSON.stringify({
       data_health: input.dataHealth,
@@ -1940,7 +2334,22 @@ function buildReportArtifacts(input: {
       benchmark_governance: input.benchmarkGovernance
     }, null, 2),
     security_detail_csv: buildSecurityDetailCsv(input.securityDetails),
-    benchmark_csv: buildBenchmarkCsv(input.benchmarkAudit)
+    benchmark_csv: buildBenchmarkCsv(input.benchmarkAudit),
+    ppt_outline_markdown: buildPptOutlineMarkdown({
+      payload: input.payload,
+      deskSnapshot: input.deskSnapshot,
+      recommendation: input.recommendation,
+      referenceLines: input.referenceLines,
+      candidates: input.candidates,
+      curveShape: input.curveShape
+    }),
+    report_manifest_json: buildReportManifest({
+      payload: input.payload,
+      dataHealth: input.dataHealth,
+      deskSnapshot: input.deskSnapshot,
+      referenceLines: input.referenceLines,
+      commentaryStudio: input.commentaryStudio
+    })
   };
 }
 
@@ -2031,13 +2440,36 @@ function emptyDashboard(): DashboardAnalytics {
       caveats: [],
       evidence: []
     },
+    desk_snapshot: {
+      thesis: "No desk snapshot is available until a dashboard payload is generated.",
+      market_read: "Upload trade data and run the dashboard to generate a market read.",
+      action_bias: "Waiting for model-ready trade data.",
+      confidence: "Low",
+      key_metrics: [],
+      decision_points: [],
+      next_steps: [],
+      risk_flags: []
+    },
+    chart_reference_lines: [],
+    commentary_studio: {
+      market_context: [],
+      analyst_review: [],
+      generated_commentary: {
+        headline: "No commentary generated.",
+        bullets: [],
+        client_note: "",
+        internal_note: ""
+      }
+    },
     methodology_sections: buildMethodologySections(),
     report_artifacts: {
       html_report: "",
       chart_data_json: "",
       audit_data_json: "",
       security_detail_csv: "",
-      benchmark_csv: ""
+      benchmark_csv: "",
+      ppt_outline_markdown: "",
+      report_manifest_json: ""
     },
     analyst_context: {},
     export_summary_markdown: "",
@@ -2049,7 +2481,7 @@ function emptyDashboard(): DashboardAnalytics {
         { module: "Core Dashboard", status: "ported", notes: "Spread trend, volume, issuer curve, spread ladder, liquidity, screener, RV positioning, CUSIP drilldown." },
         { module: "Advanced Analytics", status: "partial", notes: "Peer RV, cross-issuer RV, attribution, historical range, curve shape, scenario shock, and benchmark audit are implemented with transparent approximations where needed." },
         { module: "Watchlist / Drilldown", status: "ported", notes: "Client-side watchlist, selected CUSIP detail, trade path, and read-through are available." },
-        { module: "AI / Export / Admin", status: "partial", notes: "Structured AI context, rule narrative, markdown/HTML/chart-data exports, and methodology metadata are available; live AI calls can be added after API-key governance is set." }
+        { module: "AI / Export / Admin", status: "partial", notes: "Desk snapshot, commentary studio, markdown/HTML/chart-data exports, PPT outline, report manifest, and methodology metadata are available; live AI/PDF/PPTX services can be added after governance is set." }
       ]
     }
   };
@@ -2100,9 +2532,43 @@ function buildDashboardAnalytics(input: {
   const securityDetails = buildSecurityDetails(input.trades, input.securityScreener, input.benchmarkCurve);
   const benchmarkAudit = buildBenchmarkAudit(input.benchmarkCurve);
   const recommendation = payload ? buildRecommendationNarrative(payload, input.securityScreener, peerRv) : emptyDashboard().recommendation;
+  const deskSnapshot = payload
+    ? buildDeskSnapshot({
+        payload,
+        dataHealth: input.dataHealth,
+        dataAudit: input.dataAudit,
+        benchmarkGovernance: input.benchmarkGovernance,
+        recommendation,
+        candidates: input.securityScreener,
+        curveShape
+      })
+    : emptyDashboard().desk_snapshot;
+  const chartReferenceLines = payload
+    ? buildChartReferenceLines({
+        trades: input.trades,
+        spreadObs: input.spreadObs,
+        issuer: input.issuer,
+        maturityBucket: input.maturityBucket,
+        payload
+      })
+    : [];
+  const commentaryStudio = payload
+    ? buildCommentaryStudio({
+        payload,
+        dataHealth: input.dataHealth,
+        dataAudit: input.dataAudit,
+        benchmarkGovernance: input.benchmarkGovernance,
+        recommendation,
+        deskSnapshot,
+        referenceLines: chartReferenceLines,
+        candidates: input.securityScreener
+      })
+    : emptyDashboard().commentary_studio;
   const compactDashboardData = {
+    desk_snapshot: deskSnapshot,
     issuer_curve: issuerCurve,
     spread_trend: spreadTrend,
+    chart_reference_lines: chartReferenceLines,
     monthly_activity: monthlyActivity,
     spread_movement_ladder: spreadMovement.slice(0, 50),
     liquidity,
@@ -2120,6 +2586,9 @@ function buildDashboardAnalytics(input: {
         dataAudit: input.dataAudit,
         benchmarkGovernance: input.benchmarkGovernance,
         recommendation,
+        deskSnapshot,
+        referenceLines: chartReferenceLines,
+        commentaryStudio,
         candidates: input.securityScreener,
         securityDetails,
         benchmarkAudit,
@@ -2161,6 +2630,9 @@ function buildDashboardAnalytics(input: {
     security_details: securityDetails,
     benchmark_audit: benchmarkAudit,
     recommendation,
+    desk_snapshot: deskSnapshot,
+    chart_reference_lines: chartReferenceLines,
+    commentary_studio: commentaryStudio,
     methodology_sections: buildMethodologySections(),
     report_artifacts: reportArtifacts,
     analyst_context: {
@@ -2172,6 +2644,9 @@ function buildDashboardAnalytics(input: {
       payload_signals: payload?.signals ?? null,
       top_candidates: input.securityScreener.slice(0, 10),
       recommendation,
+      desk_snapshot: deskSnapshot,
+      chart_reference_lines: chartReferenceLines,
+      commentary_studio: commentaryStudio,
       selected_security: securityDetails[0] ?? null,
       benchmark_audit: benchmarkAudit.slice(0, 20)
     },

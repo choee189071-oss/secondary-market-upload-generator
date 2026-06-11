@@ -4,6 +4,7 @@ import { FormEvent, MouseEvent as ReactMouseEvent, useEffect, useMemo, useState 
 import type {
   ActivityPoint,
   BenchmarkAuditRow,
+  ChartReferenceLine,
   CrossIssuerRvPoint,
   CurvePoint,
   CurveShapeMetric,
@@ -364,7 +365,11 @@ function IssuerCurveChart({
   );
 }
 
-function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
+function referenceLineClass(tone: ChartReferenceLine["tone"]) {
+  return `reference-line ${tone}`;
+}
+
+function SpreadTrendChart({ data, referenceLines = [] }: { data: TrendPoint[]; referenceLines?: ChartReferenceLine[] }) {
   const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   const [crosshair, setCrosshair] = useState<{ x: number; y: number; point: TrendPoint } | null>(null);
   const [zoomRange, setZoomRange] = useState<[number, number] | null>(null);
@@ -383,7 +388,8 @@ function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
 
   const zoomStart = zoomRange?.[0] ?? 0;
   const plotData = zoomRange ? data.slice(zoomRange[0], zoomRange[1] + 1) : data;
-  const values = plotData.map((point) => point.spread_bps);
+  const referenceValues = referenceLines.map((line) => line.value_bps).filter((value) => Number.isFinite(value));
+  const values = [...plotData.map((point) => point.spread_bps), ...referenceValues];
   const min = Math.min(...values) - 5;
   const max = Math.max(...values) + 5;
   const x = (_point: TrendPoint, index: number) => 42 + (index / Math.max(plotData.length - 1, 1)) * 716;
@@ -481,6 +487,17 @@ function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
           />
         ) : null}
         <line className="zero-line" x1="42" x2="758" y1={y(0)} y2={y(0)} />
+        {referenceLines.map((line, index) => {
+          const yy = y(line.value_bps);
+          return (
+            <g key={line.id}>
+              <line className={referenceLineClass(line.tone)} x1="42" x2="758" y1={yy} y2={yy} />
+              <text className="reference-label" x="752" y={yy - 5 - (index % 2) * 10} textAnchor="end">
+                {line.label} {line.value_bps.toFixed(1)} bps
+              </text>
+            </g>
+          );
+        })}
         <polyline className="line spread" points={linePath(plotData, x, (point) => y(point.spread_bps))} />
         {crosshair ? (
           <g className="crosshair">
@@ -943,6 +960,14 @@ export default function Home() {
     const data = dashboard?.report_artifacts.benchmark_csv;
     return data ? `data:text/csv;charset=utf-8,${encodeURIComponent(data)}` : "";
   }, [dashboard]);
+  const pptOutlineHref = useMemo(() => {
+    const data = dashboard?.report_artifacts.ppt_outline_markdown;
+    return data ? `data:text/markdown;charset=utf-8,${encodeURIComponent(data)}` : "";
+  }, [dashboard]);
+  const reportManifestHref = useMemo(() => {
+    const data = dashboard?.report_artifacts.report_manifest_json;
+    return data ? `data:application/json;charset=utf-8,${encodeURIComponent(data)}` : "";
+  }, [dashboard]);
   const selectedSecurity = useMemo(() => {
     if (!dashboard?.security_details.length) {
       return null;
@@ -1077,6 +1102,26 @@ export default function Home() {
 
   function toggleWatchlist(cusip: string) {
     setWatchlist((current) => (current.includes(cusip) ? current.filter((item) => item !== cusip) : [...current, cusip].sort()));
+  }
+
+  function openPrintReport() {
+    const html = dashboard?.report_artifacts.html_report;
+    if (!html) {
+      setError("Generate a report before opening the PDF print view.");
+      return;
+    }
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      setError("The browser blocked the print report window. Allow popups for localhost and try again.");
+      return;
+    }
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.setTimeout(() => {
+      printWindow.focus();
+      printWindow.print();
+    }, 250);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -1384,6 +1429,45 @@ export default function Home() {
 
           {payload ? (
             <div className="content-grid">
+              {dashboard?.desk_snapshot ? (
+                <section className="desk-snapshot">
+                  <div className="snapshot-main">
+                    <div>
+                      <span className="eyebrow">Desk Snapshot</span>
+                      <h2>{dashboard.desk_snapshot.thesis}</h2>
+                      <p>{dashboard.desk_snapshot.market_read}</p>
+                      <p>{dashboard.desk_snapshot.action_bias}</p>
+                    </div>
+                    <div className={`confidence-card ${dashboard.desk_snapshot.confidence.toLowerCase()}`}>
+                      <span>Confidence</span>
+                      <strong>{dashboard.desk_snapshot.confidence}</strong>
+                    </div>
+                  </div>
+                  <div className="snapshot-metrics">
+                    {dashboard.desk_snapshot.key_metrics.map((metric) => (
+                      <div className={`snapshot-metric ${metric.tone}`} key={metric.label}>
+                        <span>{metric.label}</span>
+                        <strong>{metric.value}</strong>
+                        <em>{metric.detail}</em>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="snapshot-columns">
+                    <div>
+                      <strong>Decision Points</strong>
+                      {dashboard.desk_snapshot.decision_points.map((item) => <p key={item}>{item}</p>)}
+                    </div>
+                    <div>
+                      <strong>Next Steps</strong>
+                      {dashboard.desk_snapshot.next_steps.map((item) => <p key={item}>{item}</p>)}
+                    </div>
+                    <div>
+                      <strong>Risk Flags</strong>
+                      {dashboard.desk_snapshot.risk_flags.map((item) => <p key={item}>{item}</p>)}
+                    </div>
+                  </div>
+                </section>
+              ) : null}
               <div className="metrics">
                 <div className="metric">
                   <span>Issuer</span>
@@ -1561,7 +1645,18 @@ export default function Home() {
                 ))}
               </div>
             </div>
-            <SpreadTrendChart data={visibleSpreadTrend} />
+            <SpreadTrendChart data={visibleSpreadTrend} referenceLines={dashboard.chart_reference_lines} />
+            {dashboard.chart_reference_lines.length ? (
+              <div className="reference-line-list">
+                {dashboard.chart_reference_lines.map((line) => (
+                  <div className={`reference-chip ${line.tone}`} key={line.id} title={line.description}>
+                    <span>{line.label}</span>
+                    <strong>{line.value_bps.toFixed(1)} bps</strong>
+                    <em>{line.source}</em>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </article>
 
           <article className="panel chart-panel">
@@ -1914,25 +2009,61 @@ export default function Home() {
           <article className="panel">
             <div className="chart-header">
               <div>
-                <h2>Recommendation Narrative Engine</h2>
-                <p>Rule-based narrative generated from calculated dashboard evidence.</p>
+                <h2>AI Commentary Studio</h2>
+                <p>Retrieve market context, review evidence, then generate a desk-ready narrative.</p>
+              </div>
+            </div>
+            <div className="studio-flow">
+              <div className="studio-card">
+                <span className="eyebrow">01 Retrieve</span>
+                <strong>Market Context</strong>
+                {dashboard.commentary_studio.market_context.map((item) => (
+                  <p key={item.step}>
+                    <mark className={`status-chip ${item.status}`}>{item.status}</mark>
+                    <b>{item.step}</b>
+                    {item.evidence}
+                  </p>
+                ))}
+              </div>
+              <div className="studio-card">
+                <span className="eyebrow">02 Review</span>
+                <strong>Analyst Checks</strong>
+                {dashboard.commentary_studio.analyst_review.map((item) => (
+                  <p key={item.check}>
+                    <mark className={`status-chip ${item.status}`}>{item.status}</mark>
+                    <b>{item.check}</b>
+                    {item.notes}
+                  </p>
+                ))}
+              </div>
+              <div className="studio-card generated">
+                <span className="eyebrow">03 Generate</span>
+                <strong>{dashboard.commentary_studio.generated_commentary.headline}</strong>
+                {dashboard.commentary_studio.generated_commentary.bullets.map((item) => <p key={item}>{item}</p>)}
               </div>
             </div>
             <div className="methodology-block">
-              <strong>{dashboard.recommendation.label}</strong>
-              <p>{dashboard.recommendation.summary}</p>
+              <strong>Client Note</strong>
+              <p>{dashboard.commentary_studio.generated_commentary.client_note}</p>
             </div>
-            <div className="split-list">
-              <div>
-                <h3>Drivers</h3>
-                {dashboard.recommendation.drivers.map((item) => <p key={item}>{item}</p>)}
-              </div>
-              <div>
-                <h3>Caveats</h3>
-                {dashboard.recommendation.caveats.map((item) => <p key={item}>{item}</p>)}
-              </div>
+            <div className="methodology-block">
+              <strong>Internal Note</strong>
+              <p>{dashboard.commentary_studio.generated_commentary.internal_note}</p>
             </div>
-            <details className="developer-payload" open>
+            <details className="developer-payload">
+              <summary>Original Rule Narrative</summary>
+              <div className="split-list">
+                <div>
+                  <h3>Drivers</h3>
+                  {dashboard.recommendation.drivers.map((item) => <p key={item}>{item}</p>)}
+                </div>
+                <div>
+                  <h3>Caveats</h3>
+                  {dashboard.recommendation.caveats.map((item) => <p key={item}>{item}</p>)}
+                </div>
+              </div>
+            </details>
+            <details className="developer-payload">
               <summary>AI Context Package</summary>
               <pre className="json-block small">{JSON.stringify(dashboard.analyst_context, null, 2)}</pre>
             </details>
@@ -1941,20 +2072,55 @@ export default function Home() {
           <article className="panel">
             <div className="chart-header">
               <div>
-                <h2>Export / Admin / Methodology</h2>
-                <p>Report summary, benchmark policy, module status, and version log.</p>
+                <h2>Report Export Center</h2>
+                <p>Download the report package, chart bundle, audit data, and presentation outline.</p>
               </div>
             </div>
-            <div className="methodology-block">
-              <strong>{dashboard.admin.methodology_version}</strong>
-              <p>{dashboard.admin.benchmark_policy}</p>
+            <div className="export-center">
+              {[
+                { label: "Payload JSON", href: downloadHref, file: "nextsr_payload.json", detail: "Model input for NextSR." },
+                { label: "Summary MD", href: exportSummaryHref, file: "secondary_market_summary.md", detail: "Lightweight written summary." },
+                { label: "HTML Report", href: htmlReportHref, file: "secondary_market_report.html", detail: "Full report page." },
+                { label: "Chart Bundle", href: chartDataHref, file: "chart_data_bundle.json", detail: "Chart-ready data package." },
+                { label: "Audit Bundle", href: auditDataHref, file: "audit_data_bundle.json", detail: "Data health and governance." },
+                { label: "PPT Outline", href: pptOutlineHref, file: "ppt_outline.md", detail: "Slide-by-slide deck outline." },
+                { label: "Manifest", href: reportManifestHref, file: "report_manifest.json", detail: "Export inventory and provenance." },
+                { label: "Screener CSV", href: candidateCsvHref, file: "security_screener.csv", detail: "CUSIP-level scores." },
+                { label: "Detail CSV", href: securityDetailHref, file: "security_detail.csv", detail: "Selected drilldown fields." },
+                { label: "Benchmark CSV", href: benchmarkCsvHref, file: "benchmark_audit.csv", detail: "Benchmark audit rows." }
+              ].filter((item) => item.href).map((item) => (
+                <a className="export-tile" href={item.href} download={item.file} key={item.file}>
+                  <strong>{item.label}</strong>
+                  <span>{item.detail}</span>
+                  <em>{item.file}</em>
+                </a>
+              ))}
+              <button className="export-tile action" type="button" onClick={openPrintReport}>
+                <strong>PDF Print View</strong>
+                <span>Open report and print/save as PDF.</span>
+                <em>browser print</em>
+              </button>
+              {watchlistCsvHref ? (
+                <a className="export-tile" href={watchlistCsvHref} download="watchlist.csv">
+                  <strong>Watchlist CSV</strong>
+                  <span>Saved CUSIP candidates.</span>
+                  <em>watchlist.csv</em>
+                </a>
+              ) : null}
             </div>
-            <div className="metrics dense">
-              <div className="metric"><span>Active Benchmark</span><strong>{dashboard.benchmark_governance.active_source ?? "N/A"}</strong></div>
-              <div className="metric"><span>Trade Index Points</span><strong>{dashboard.benchmark_governance.trade_index_points.toLocaleString()}</strong></div>
-              <div className="metric"><span>Uploaded MMD Points</span><strong>{dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()}</strong></div>
-              <div className="metric"><span>Fallback Used</span><strong>{dashboard.benchmark_governance.fallback_points_used.toLocaleString()}</strong></div>
-            </div>
+            <details className="developer-payload" open>
+              <summary>Admin / Benchmark Policy</summary>
+              <div className="methodology-block">
+                <strong>{dashboard.admin.methodology_version}</strong>
+                <p>{dashboard.admin.benchmark_policy}</p>
+              </div>
+              <div className="metrics dense">
+                <div className="metric"><span>Active Benchmark</span><strong>{dashboard.benchmark_governance.active_source ?? "N/A"}</strong></div>
+                <div className="metric"><span>Trade Index Points</span><strong>{dashboard.benchmark_governance.trade_index_points.toLocaleString()}</strong></div>
+                <div className="metric"><span>Uploaded MMD Points</span><strong>{dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()}</strong></div>
+                <div className="metric"><span>Fallback Used</span><strong>{dashboard.benchmark_governance.fallback_points_used.toLocaleString()}</strong></div>
+              </div>
+            </details>
             <details className="developer-payload" open>
               <summary>Benchmark Governance</summary>
               <div className="methodology-block">
