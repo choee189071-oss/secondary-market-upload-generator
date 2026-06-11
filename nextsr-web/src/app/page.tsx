@@ -217,17 +217,101 @@ function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { d
 
 function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
   const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
+  const [crosshair, setCrosshair] = useState<{ x: number; y: number; point: TrendPoint } | null>(null);
+  const [zoomRange, setZoomRange] = useState<[number, number] | null>(null);
+  const [brush, setBrush] = useState<{ startX: number; endX: number } | null>(null);
+
+  useEffect(() => {
+    setZoomRange(null);
+    setBrush(null);
+    setCrosshair(null);
+    setTooltip(null);
+  }, [data]);
+
   if (data.length < 2) {
     return <EmptyChart />;
   }
-  const values = data.map((point) => point.spread_bps);
+
+  const zoomStart = zoomRange?.[0] ?? 0;
+  const plotData = zoomRange ? data.slice(zoomRange[0], zoomRange[1] + 1) : data;
+  const values = plotData.map((point) => point.spread_bps);
   const min = Math.min(...values) - 5;
   const max = Math.max(...values) + 5;
-  const x = (_point: TrendPoint, index: number) => 42 + (index / Math.max(data.length - 1, 1)) * 716;
+  const x = (_point: TrendPoint, index: number) => 42 + (index / Math.max(plotData.length - 1, 1)) * 716;
   const y = (value: number) => 300 - ((value - min) / (max - min || 1)) * 244;
+
+  const svgXFromEvent = (event: ReactMouseEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const raw = ((event.clientX - rect.left) / rect.width) * 800;
+    return Math.max(42, Math.min(758, raw));
+  };
+
+  const indexFromSvgX = (svgX: number) => {
+    const ratio = (svgX - 42) / 716;
+    return Math.max(0, Math.min(plotData.length - 1, Math.round(ratio * (plotData.length - 1))));
+  };
+
+  const updateCrosshair = (event: ReactMouseEvent<SVGSVGElement>) => {
+    const svgX = svgXFromEvent(event);
+    const index = indexFromSvgX(svgX);
+    const point = plotData[index];
+    if (!point) return;
+    setCrosshair({ x: x(point, index), y: y(point.spread_bps), point });
+    setTooltip(chartTooltipFromEvent(event, point.date, [
+      `Spread: ${formatNumber(point.spread_bps, " bps")}`,
+      `Avg yield: ${formatNumber(point.avg_yield, "%")}`,
+      `Benchmark: ${formatNumber(point.benchmark_yield, "%")}`,
+      `Trades: ${point.trade_count.toLocaleString()}`
+    ]));
+  };
+
+  const commitBrush = () => {
+    if (!brush) return;
+    const left = Math.min(brush.startX, brush.endX);
+    const right = Math.max(brush.startX, brush.endX);
+    if (right - left < 12) {
+      setBrush(null);
+      return;
+    }
+    const startIndex = indexFromSvgX(left);
+    const endIndex = indexFromSvgX(right);
+    if (endIndex - startIndex < 1) {
+      setBrush(null);
+      return;
+    }
+    setZoomRange([zoomStart + startIndex, zoomStart + endIndex]);
+    setBrush(null);
+  };
+
   return (
     <div className="chart-frame">
-      <svg className="chart-svg" viewBox="0 0 800 340" role="img" onMouseLeave={() => setTooltip(null)}>
+      {zoomRange ? (
+        <button className="chart-reset-button" type="button" onClick={() => setZoomRange(null)}>
+          Reset zoom
+        </button>
+      ) : null}
+      <svg
+        className="chart-svg brushable"
+        viewBox="0 0 800 340"
+        role="img"
+        onMouseDown={(event) => {
+          const startX = svgXFromEvent(event);
+          setBrush({ startX, endX: startX });
+          updateCrosshair(event);
+        }}
+        onMouseMove={(event) => {
+          if (brush) {
+            setBrush((current) => (current ? { ...current, endX: svgXFromEvent(event) } : current));
+          }
+          updateCrosshair(event);
+        }}
+        onMouseUp={commitBrush}
+        onMouseLeave={() => {
+          setTooltip(null);
+          setCrosshair(null);
+          setBrush(null);
+        }}
+      >
         {[0, 1, 2, 3].map((tick) => {
           const yy = 300 - tick * 70;
           const label = min + ((max - min) * tick) / 3;
@@ -238,9 +322,25 @@ function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
             </g>
           );
         })}
+        {brush ? (
+          <rect
+            className="brush-window"
+            x={Math.min(brush.startX, brush.endX)}
+            y="56"
+            width={Math.abs(brush.endX - brush.startX)}
+            height="244"
+          />
+        ) : null}
         <line className="zero-line" x1="42" x2="758" y1={y(0)} y2={y(0)} />
-        <polyline className="line spread" points={linePath(data, x, (point) => y(point.spread_bps))} />
-        {data.map((point, index) => (
+        <polyline className="line spread" points={linePath(plotData, x, (point) => y(point.spread_bps))} />
+        {crosshair ? (
+          <g className="crosshair">
+            <line x1={crosshair.x} x2={crosshair.x} y1="56" y2="300" />
+            <line x1="42" x2="758" y1={crosshair.y} y2={crosshair.y} />
+            <circle cx={crosshair.x} cy={crosshair.y} r="5" />
+          </g>
+        ) : null}
+        {plotData.map((point, index) => (
           <circle
             className="dot issuer-dot"
             cx={x(point, index)}
@@ -255,8 +355,8 @@ function SpreadTrendChart({ data }: { data: TrendPoint[] }) {
             ]))}
           />
         ))}
-        <text className="axis-label" x="42" y="324">{data[0].date}</text>
-        <text className="axis-label" x="758" y="324" textAnchor="end">{data[data.length - 1].date}</text>
+        <text className="axis-label" x="42" y="324">{plotData[0].date}</text>
+        <text className="axis-label" x="758" y="324" textAnchor="end">{plotData[plotData.length - 1].date}</text>
       </svg>
       <TooltipOverlay tooltip={tooltip} />
     </div>

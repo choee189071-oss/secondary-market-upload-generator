@@ -495,8 +495,28 @@ select {
   width: 100%;
 }
 
+.chart-svg.brushable {
+  cursor: crosshair;
+  user-select: none;
+}
+
 .chart-frame {
   position: relative;
+}
+
+.chart-reset-button {
+  background: #eef2f6;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: #263343;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 10px;
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 4;
 }
 
 .chart-tooltip {
@@ -527,6 +547,30 @@ select {
 
 .chart-svg.compact {
   max-height: 300px;
+}
+
+.brush-window {
+  fill: rgba(37, 99, 235, 0.14);
+  pointer-events: none;
+  stroke: rgba(37, 99, 235, 0.5);
+  stroke-dasharray: 5 4;
+  stroke-width: 1;
+}
+
+.crosshair {
+  pointer-events: none;
+}
+
+.crosshair line {
+  stroke: #64748b;
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+}
+
+.crosshair circle {
+  fill: #ffffff;
+  stroke: #e11d48;
+  stroke-width: 2;
 }
 
 .grid-line {
