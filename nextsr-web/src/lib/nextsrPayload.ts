@@ -353,6 +353,17 @@ export type CommentaryStudio = {
   };
 };
 
+export type StreamlitParityAuditItem = {
+  area: string;
+  streamlit_surface: string;
+  source_anchor: string;
+  next_surface: string;
+  status: "ported" | "partial" | "missing" | "next-enhanced";
+  priority: "High" | "Medium" | "Low";
+  notes: string;
+  next_step: string;
+};
+
 export type MethodologySection = {
   title: string;
   body: string;
@@ -394,6 +405,7 @@ export type DashboardAnalytics = {
   desk_snapshot: DeskSnapshot;
   chart_reference_lines: ChartReferenceLine[];
   commentary_studio: CommentaryStudio;
+  streamlit_parity_audit: StreamlitParityAuditItem[];
   methodology_sections: MethodologySection[];
   report_artifacts: ReportArtifacts;
   analyst_context: Record<string, unknown>;
@@ -2257,7 +2269,12 @@ function buildReportManifest(input: {
   deskSnapshot: DeskSnapshot;
   referenceLines: ChartReferenceLine[];
   commentaryStudio: CommentaryStudio;
+  parityAudit: StreamlitParityAuditItem[];
 }) {
+  const parityCounts = input.parityAudit.reduce<Record<string, number>>((counts, item) => {
+    counts[item.status] = (counts[item.status] ?? 0) + 1;
+    return counts;
+  }, {});
   return JSON.stringify({
     report_type: "secondary_market_analysis_bundle",
     issuer: input.payload.issuer,
@@ -2281,6 +2298,7 @@ function buildReportManifest(input: {
       benchmark_source: input.dataHealth.benchmark_source
     },
     reference_lines: input.referenceLines,
+    streamlit_parity_counts: parityCounts,
     commentary_review: input.commentaryStudio.analyst_review
   }, null, 2);
 }
@@ -2319,6 +2337,7 @@ function buildReportArtifacts(input: {
   deskSnapshot: DeskSnapshot;
   referenceLines: ChartReferenceLine[];
   commentaryStudio: CommentaryStudio;
+  parityAudit: StreamlitParityAuditItem[];
   candidates: SecurityCandidate[];
   securityDetails: SecurityDetail[];
   benchmarkAudit: BenchmarkAuditRow[];
@@ -2348,7 +2367,8 @@ function buildReportArtifacts(input: {
       dataHealth: input.dataHealth,
       deskSnapshot: input.deskSnapshot,
       referenceLines: input.referenceLines,
-      commentaryStudio: input.commentaryStudio
+      commentaryStudio: input.commentaryStudio,
+      parityAudit: input.parityAudit
     })
   };
 }
@@ -2372,6 +2392,321 @@ function buildExportSummary(payload: NextsrPayload, dataHealth: DataHealth, cand
     ...curveShape.map((metric) => `- ${metric.metric}: ${metric.value ?? "N/A"} ${metric.unit}. ${metric.readthrough}`)
   ];
   return lines.join("\n");
+}
+
+function buildStreamlitParityAudit(): StreamlitParityAuditItem[] {
+  return [
+    {
+      area: "Data Intake / Governance",
+      streamlit_surface: "File Readiness Check",
+      source_anchor: "file-readiness",
+      next_surface: "File Readiness Check + detected-field validation",
+      status: "ported",
+      priority: "High",
+      notes: "Multi-file trade upload, required/recommended field detection, readiness status, and safe missing-field handling are implemented.",
+      next_step: "Add blank template downloads to match Streamlit sidebar utilities."
+    },
+    {
+      area: "Data Intake / Governance",
+      streamlit_surface: "Bond / Issuer / MMD optional reference files",
+      source_anchor: "sidebar optional reference files",
+      next_surface: "Optional Reference Files expander",
+      status: "ported",
+      priority: "High",
+      notes: "Bond reference, issuer mapping, and MMD benchmark uploads are supported in the Next API.",
+      next_step: "Add issuer-sector override workflow and template examples."
+    },
+    {
+      area: "Data Intake / Governance",
+      streamlit_surface: "Download blank templates",
+      source_anchor: "sidebar download blank templates",
+      next_surface: "Not built",
+      status: "missing",
+      priority: "Medium",
+      notes: "Streamlit provides blank trade, bond reference, and benchmark curve templates. Next currently accepts files but does not generate templates.",
+      next_step: "Add template CSV downloads beside Optional Reference Files."
+    },
+    {
+      area: "Data Intake / Governance",
+      streamlit_surface: "Performance controls / clear cached calculations",
+      source_anchor: "sidebar performance",
+      next_surface: "Upload limits and serverless timeout guardrails",
+      status: "missing",
+      priority: "Low",
+      notes: "Streamlit exposes table row limits, performance mode, full raw table toggles, and cache clearing. Next has serverless-safe upload limits but no user-facing performance controls.",
+      next_step: "Add display-density/performance settings and a reset-workspace action if needed."
+    },
+    {
+      area: "Data Intake / Governance",
+      streamlit_surface: "Benchmark source governance",
+      source_anchor: "benchmark source governance",
+      next_surface: "Benchmark Governance + Benchmark Audit",
+      status: "partial",
+      priority: "High",
+      notes: "Trade Index / Index Rate first and MMD fallback are implemented; Streamlit's rating-curve selector and richer assumption tables are not fully replicated.",
+      next_step: "Add AAA/AA/A/BBB curve selector and explicit benchmark override controls."
+    },
+    {
+      area: "Data Intake / Governance",
+      streamlit_surface: "Data Quality Scorecard",
+      source_anchor: "data-quality-scorecard",
+      next_surface: "Data Audit Center",
+      status: "partial",
+      priority: "High",
+      notes: "Row reconciliation, coverage, warnings, and match rates exist; weighted scorecard presentation is not yet one-to-one.",
+      next_step: "Add weighted score tiles for CUSIP match, maturity quality, benchmark coverage, and amount coverage."
+    },
+    {
+      area: "Executive / Navigation",
+      streamlit_surface: "Executive Snapshot / Desk Market Snapshot",
+      source_anchor: "executive-snapshot / desk-market-snapshot",
+      next_surface: "Desk Snapshot",
+      status: "next-enhanced",
+      priority: "High",
+      notes: "Next now opens with thesis, market read, action bias, confidence, decision points, next steps, and risk flags.",
+      next_step: "Tune language against real desk examples after more issuer files are tested."
+    },
+    {
+      area: "Executive / Navigation",
+      streamlit_surface: "Sidebar desk navigation / contents",
+      source_anchor: "dashboard-contents / sidebar-nav-small",
+      next_surface: "Sticky workflow rail",
+      status: "partial",
+      priority: "High",
+      notes: "Navigation exists, but the previous Next layout was too dense and mixed exports into the first output view.",
+      next_step: "Keep top rail focused on core journey and move downloads into Export Center."
+    },
+    {
+      area: "Benchmark / Spread Framework",
+      streamlit_surface: "Yield Trend / Relative Value Comparison",
+      source_anchor: "yield-relative-value",
+      next_surface: "Spread Trend + reference lines",
+      status: "partial",
+      priority: "High",
+      notes: "Selected-bucket spread trend, brush zoom, crosshair, and reference lines exist; full multi-rating yield/RV comparison controls are not complete.",
+      next_step: "Add rating curve selector and multi-issuer overlay controls."
+    },
+    {
+      area: "Benchmark / Spread Framework",
+      streamlit_surface: "Issuer Curve vs Benchmark Curve",
+      source_anchor: "issuer-curve",
+      next_surface: "Issuer Curve vs Benchmark",
+      status: "ported",
+      priority: "High",
+      notes: "Issuer and benchmark curve display with legend toggle, brush zoom, crosshair, and bucket selection is implemented.",
+      next_step: "Add spread-curve mode in addition to yield-curve mode."
+    },
+    {
+      area: "Benchmark / Spread Framework",
+      streamlit_surface: "Current Spread Level Framework",
+      source_anchor: "spread-level",
+      next_surface: "Spread Trend reference lines + Spread Movement Ladder",
+      status: "partial",
+      priority: "High",
+      notes: "Baseline/current/sector/all-issuer references exist; Streamlit's spread level heatmap or rating ladder is not fully replicated.",
+      next_step: "Add current-spread heatmap by maturity bucket and benchmark rating."
+    },
+    {
+      area: "Benchmark / Spread Framework",
+      streamlit_surface: "Spread Attribution Waterfall",
+      source_anchor: "spread-attribution",
+      next_surface: "Spread Attribution Waterfall",
+      status: "partial",
+      priority: "Medium",
+      notes: "A simplified attribution bridge exists; Streamlit's rating, liquidity, callable adjustment, and residual decomposition is richer.",
+      next_step: "Separate rating premium, liquidity premium, callable proxy, and residual components."
+    },
+    {
+      area: "Relative Value Signals",
+      streamlit_surface: "Peer Relative Value Comparison",
+      source_anchor: "peer-rv",
+      next_surface: "Peer Relative Value",
+      status: "partial",
+      priority: "High",
+      notes: "Peer gap by bucket exists; peer spread curve comparison, heatmap/ladder, and full ranking table need more parity.",
+      next_step: "Add peer curve matrix and peer ranking table."
+    },
+    {
+      area: "Relative Value Signals",
+      streamlit_surface: "Cross-Issuer Relative Value Analytics",
+      source_anchor: "cross-issuer-rv",
+      next_surface: "Cross-Issuer RV Ranking",
+      status: "partial",
+      priority: "High",
+      notes: "Cross-issuer ranking exists; peer gap matrix, opportunity map, and decision table are not fully replicated.",
+      next_step: "Add opportunity map and decision table with action labels."
+    },
+    {
+      area: "Relative Value Signals",
+      streamlit_surface: "Historical Spread Range & Percentile",
+      source_anchor: "historical-spread",
+      next_surface: "Historical Spread Range",
+      status: "partial",
+      priority: "Medium",
+      notes: "Current/median/percentile table exists; distribution chart and window controls are not one-to-one.",
+      next_step: "Add histogram/distribution view and raw/rolling window toggle."
+    },
+    {
+      area: "Relative Value Signals",
+      streamlit_surface: "Curve Shape Analytics",
+      source_anchor: "curve-shape",
+      next_surface: "Curve Shape Analytics",
+      status: "partial",
+      priority: "Medium",
+      notes: "Slope/butterfly diagnostics exist; Streamlit's yield/spread curve basis toggle and richer read-through are partial.",
+      next_step: "Add yield/spread basis toggle and curve-shape chart."
+    },
+    {
+      area: "Relative Value Signals",
+      streamlit_surface: "Market Narrative & Opportunity Map",
+      source_anchor: "market-narrative",
+      next_surface: "Desk Snapshot + AI Commentary Studio + RV Positioning",
+      status: "partial",
+      priority: "Medium",
+      notes: "Narrative and opportunity positioning exist, but Streamlit's timeline and rich/cheap quadrant tabs are not fully replicated.",
+      next_step: "Add explicit trading activity timeline and rich/cheap quadrant panel."
+    },
+    {
+      area: "CUSIP Workflow",
+      streamlit_surface: "Security Screener - Top Relative Value Candidates",
+      source_anchor: "security-screener",
+      next_surface: "Security Screener",
+      status: "ported",
+      priority: "High",
+      notes: "CUSIP score, filters, sorting, table controls, and CSV export are implemented.",
+      next_step: "Add Streamlit-style opportunity read-through card above the table."
+    },
+    {
+      area: "CUSIP Workflow",
+      streamlit_surface: "CUSIP Opportunity Drilldown",
+      source_anchor: "cusip-drilldown",
+      next_surface: "CUSIP Opportunity Drilldown",
+      status: "partial",
+      priority: "High",
+      notes: "Security detail, trade path, read-through, comparable CUSIPs, and latest trades exist; benchmark/rating drilldown controls and separate yield/amount charts are partial.",
+      next_step: "Add yield history, amount history, and benchmark audit tabs for selected CUSIP."
+    },
+    {
+      area: "CUSIP Workflow",
+      streamlit_surface: "Relative Value Positioning Map",
+      source_anchor: "rv-positioning",
+      next_surface: "RV Positioning Map",
+      status: "ported",
+      priority: "High",
+      notes: "Liquidity-vs-spread bubble map with selected CUSIP interaction is implemented.",
+      next_step: "Add y-axis toggle between spread and average yield."
+    },
+    {
+      area: "CUSIP Workflow",
+      streamlit_surface: "Watchlist / Saved Candidates",
+      source_anchor: "watchlist",
+      next_surface: "Watchlist / Saved Candidates",
+      status: "ported",
+      priority: "Medium",
+      notes: "Client-side local watchlist with add/remove/clear/export is implemented.",
+      next_step: "Add project-level saved watchlists if a backend datastore is introduced."
+    },
+    {
+      area: "Risk / Liquidity",
+      streamlit_surface: "Liquidity / Trading Frequency Analysis",
+      source_anchor: "liquidity",
+      next_surface: "Monthly Activity + Liquidity by Bucket",
+      status: "partial",
+      priority: "Medium",
+      notes: "Monthly activity, bucket liquidity, and trade frequency exist; trade size distribution, staleness histogram, and top CUSIP bar chart are partial.",
+      next_step: "Add trade-size distribution and days-since-last-trade histogram."
+    },
+    {
+      area: "Risk / Liquidity",
+      streamlit_surface: "Bid / Ask & Dealer Behavior Proxy",
+      source_anchor: "dealer-proxy",
+      next_surface: "Bid / Ask & Dealer Behavior Proxy",
+      status: "ported",
+      priority: "Medium",
+      notes: "Buy/sell/other flow proxy is implemented from trade side classifications.",
+      next_step: "Add bid/ask proxy trend over time."
+    },
+    {
+      area: "Risk / Liquidity",
+      streamlit_surface: "Scenario Shock Analysis",
+      source_anchor: "scenario-shock",
+      next_surface: "Scenario Shock Analysis",
+      status: "partial",
+      priority: "Medium",
+      notes: "Bucket-level +25 bp impact is implemented; custom shock curve and CUSIP-level shock detail are not fully replicated.",
+      next_step: "Add custom short/10Y/20Y/30Y shock controls and CUSIP exposure map."
+    },
+    {
+      area: "Risk / Liquidity",
+      streamlit_surface: "Spread Movement Heatmap / Ladder",
+      source_anchor: "spread-movement",
+      next_surface: "Spread Movement Ladder",
+      status: "partial",
+      priority: "Medium",
+      notes: "Movement ladder is implemented; Streamlit/DuckDB heatmap and rating selector are not fully replicated.",
+      next_step: "Add heatmap view with rating/tenor controls."
+    },
+    {
+      area: "AI / Narrative",
+      streamlit_surface: "Trade Recommendation Narrative Engine",
+      source_anchor: "recommendation-engine",
+      next_surface: "Recommendation Narrative + Desk Snapshot",
+      status: "ported",
+      priority: "High",
+      notes: "Rule-based recommendation label, drivers, caveats, and generated commentary exist.",
+      next_step: "Tune thresholds using historical desk examples."
+    },
+    {
+      area: "AI / Narrative",
+      streamlit_surface: "AI Commentary Studio",
+      source_anchor: "ai-commentary-studio",
+      next_surface: "AI Commentary Studio",
+      status: "partial",
+      priority: "High",
+      notes: "Retrieve/review/generate workflow exists with structured evidence; live OpenAI generation and external market retrieval are intentionally not connected yet.",
+      next_step: "Add governed AI endpoint, model selector, and source citation controls."
+    },
+    {
+      area: "Export / Admin",
+      streamlit_surface: "Report Export Center",
+      source_anchor: "report-export-center",
+      next_surface: "Report Export Center",
+      status: "partial",
+      priority: "High",
+      notes: "HTML, JSON, CSV, markdown, chart bundle, manifest, and PPT outline exports exist; native PDF/PPTX binary generation is not yet implemented.",
+      next_step: "Add server-side PDF/PPTX generation or a queued export worker."
+    },
+    {
+      area: "Export / Admin",
+      streamlit_surface: "Export Summary Package",
+      source_anchor: "export-summary",
+      next_surface: "Summary MD + report manifest",
+      status: "ported",
+      priority: "Medium",
+      notes: "Summary markdown and report manifest are implemented.",
+      next_step: "Add one-click zip bundle when deployment limits allow it."
+    },
+    {
+      area: "Export / Admin",
+      streamlit_surface: "Security Reference / Trade Detail / Raw Tables",
+      source_anchor: "bond-master / trade-detail / downloads",
+      next_surface: "Security Detail CSV + Benchmark CSV + Developer Payload",
+      status: "partial",
+      priority: "Medium",
+      notes: "Selected detail exports exist; full raw/processed table viewer and merged market data downloads are partial.",
+      next_step: "Add raw/processed table browser behind a collapsed diagnostics section."
+    },
+    {
+      area: "Export / Admin",
+      streamlit_surface: "Admin Methodology Page / Version Change Log",
+      source_anchor: "admin-methodology / version-changelog",
+      next_surface: "Admin / Benchmark Policy + Module Status",
+      status: "partial",
+      priority: "Low",
+      notes: "Methodology blocks and module status exist; full assumption tables and changelog are partial.",
+      next_step: "Add versioned assumption tables and methodology changelog."
+    }
+  ];
 }
 
 function emptyDashboard(): DashboardAnalytics {
@@ -2461,6 +2796,7 @@ function emptyDashboard(): DashboardAnalytics {
         internal_note: ""
       }
     },
+    streamlit_parity_audit: buildStreamlitParityAudit(),
     methodology_sections: buildMethodologySections(),
     report_artifacts: {
       html_report: "",
@@ -2532,6 +2868,7 @@ function buildDashboardAnalytics(input: {
   const securityDetails = buildSecurityDetails(input.trades, input.securityScreener, input.benchmarkCurve);
   const benchmarkAudit = buildBenchmarkAudit(input.benchmarkCurve);
   const recommendation = payload ? buildRecommendationNarrative(payload, input.securityScreener, peerRv) : emptyDashboard().recommendation;
+  const parityAudit = buildStreamlitParityAudit();
   const deskSnapshot = payload
     ? buildDeskSnapshot({
         payload,
@@ -2589,6 +2926,7 @@ function buildDashboardAnalytics(input: {
         deskSnapshot,
         referenceLines: chartReferenceLines,
         commentaryStudio,
+        parityAudit,
         candidates: input.securityScreener,
         securityDetails,
         benchmarkAudit,
@@ -2633,6 +2971,7 @@ function buildDashboardAnalytics(input: {
     desk_snapshot: deskSnapshot,
     chart_reference_lines: chartReferenceLines,
     commentary_studio: commentaryStudio,
+    streamlit_parity_audit: parityAudit,
     methodology_sections: buildMethodologySections(),
     report_artifacts: reportArtifacts,
     analyst_context: {

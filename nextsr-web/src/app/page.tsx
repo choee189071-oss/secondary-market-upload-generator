@@ -23,6 +23,7 @@ import type {
   SecurityCandidate,
   SpreadAttributionPoint,
   SpreadMovementPoint,
+  StreamlitParityAuditItem,
   TrendPoint
 } from "@/lib/nextsrPayload";
 
@@ -968,6 +969,22 @@ export default function Home() {
     const data = dashboard?.report_artifacts.report_manifest_json;
     return data ? `data:application/json;charset=utf-8,${encodeURIComponent(data)}` : "";
   }, [dashboard]);
+  const parityAuditHref = useMemo(() => {
+    const rows = dashboard?.streamlit_parity_audit ?? [];
+    if (!rows.length) {
+      return "";
+    }
+    const headers = ["area", "streamlit_surface", "source_anchor", "next_surface", "status", "priority", "notes", "next_step"];
+    const csvRows = rows.map((row) => headers.map((header) => JSON.stringify(row[header as keyof StreamlitParityAuditItem] ?? "")).join(","));
+    return `data:text/csv;charset=utf-8,${encodeURIComponent([headers.join(","), ...csvRows].join("\n"))}`;
+  }, [dashboard]);
+  const parityStats = useMemo(() => {
+    const rows = dashboard?.streamlit_parity_audit ?? [];
+    return rows.reduce<Record<StreamlitParityAuditItem["status"], number>>(
+      (counts, item) => ({ ...counts, [item.status]: counts[item.status] + 1 }),
+      { ported: 0, partial: 0, missing: 0, "next-enhanced": 0 }
+    );
+  }, [dashboard]);
   const selectedSecurity = useMemo(() => {
     if (!dashboard?.security_details.length) {
       return null;
@@ -1035,43 +1052,43 @@ export default function Home() {
     {
       href: "#data-intake",
       index: "01",
-      title: "Data Intake",
+      title: "Intake",
       detail: tradeFiles.length ? `${tradeFiles.length} trade file(s)` : "Upload files",
       status: tradeFiles.length ? "ready" : "active"
     },
     {
-      href: "#audit-center",
+      href: "#desk-output",
       index: "02",
+      title: "Snapshot",
+      detail: dashboard ? dashboard.desk_snapshot.confidence : "Waiting",
+      status: dashboard ? "ready" : "pending"
+    },
+    {
+      href: "#audit-center",
+      index: "03",
       title: "Audit",
       detail: dashboard ? `${dashboard.data_audit_center.reconciliation.benchmark_match_rate_pct}% benchmark match` : "Waiting",
       status: dashboard ? dashboard.data_audit_center.overall_status : "pending"
     },
     {
       href: "#visual-analytics",
-      index: "03",
-      title: "Visuals",
+      index: "04",
+      title: "Charts",
       detail: dashboard ? `${dashboard.issuer_curve.length} curve point(s)` : "Run dashboard",
       status: dashboard ? "ready" : "pending"
     },
     {
       href: "#security-workbench",
-      index: "04",
-      title: "Screener",
+      index: "05",
+      title: "CUSIPs",
       detail: candidates.length ? `${candidates.length} scored` : "No scores",
       status: candidates.length ? "ready" : "pending"
     },
     {
-      href: "#cusip-drilldown",
-      index: "05",
-      title: "Drilldown",
-      detail: selectedCusip || "Select CUSIP",
-      status: selectedCusip ? "ready" : "pending"
-    },
-    {
       href: "#narrative-export",
       index: "06",
-      title: "Narrative / Export",
-      detail: dashboard ? dashboard.recommendation.label : "Waiting",
+      title: "Export / Parity",
+      detail: dashboard ? `${parityStats.partial} partial gaps` : "Waiting",
       status: dashboard ? "ready" : "pending"
     }
   ];
@@ -1376,49 +1393,20 @@ export default function Home() {
           ) : null}
         </section>
 
-        <section className="panel">
+        <section className="panel output-panel" id="desk-output">
           <div className="toolbar">
             <h2>Output</h2>
             {payload ? (
-              <div className="button-row">
-                <a className="secondary-button" href={downloadHref} download="nextsr_payload.json">
-                  Download JSON
+              <div className="button-row compact-actions">
+                <a className="secondary-button" href="#visual-analytics">
+                  View Charts
                 </a>
-                {exportSummaryHref ? (
-                  <a className="secondary-button" href={exportSummaryHref} download="secondary_market_summary.md">
-                    Summary MD
-                  </a>
-                ) : null}
-                {candidateCsvHref ? (
-                  <a className="secondary-button" href={candidateCsvHref} download="security_screener.csv">
-                    Screener CSV
-                  </a>
-                ) : null}
-                {htmlReportHref ? (
-                  <a className="secondary-button" href={htmlReportHref} download="secondary_market_report.html">
-                    HTML Report
-                  </a>
-                ) : null}
-                {chartDataHref ? (
-                  <a className="secondary-button" href={chartDataHref} download="chart_data_bundle.json">
-                    Chart Data
-                  </a>
-                ) : null}
-                {auditDataHref ? (
-                  <a className="secondary-button" href={auditDataHref} download="audit_data_bundle.json">
-                    Audit JSON
-                  </a>
-                ) : null}
-                {securityDetailHref ? (
-                  <a className="secondary-button" href={securityDetailHref} download="security_detail.csv">
-                    Detail CSV
-                  </a>
-                ) : null}
-                {benchmarkCsvHref ? (
-                  <a className="secondary-button" href={benchmarkCsvHref} download="benchmark_audit.csv">
-                    Benchmark CSV
-                  </a>
-                ) : null}
+                <a className="secondary-button" href="#narrative-export">
+                  Export Center
+                </a>
+                <a className="secondary-button" href={downloadHref} download="nextsr_payload.json">
+                  Payload JSON
+                </a>
               </div>
             ) : null}
           </div>
@@ -2083,6 +2071,7 @@ export default function Home() {
                 { label: "HTML Report", href: htmlReportHref, file: "secondary_market_report.html", detail: "Full report page." },
                 { label: "Chart Bundle", href: chartDataHref, file: "chart_data_bundle.json", detail: "Chart-ready data package." },
                 { label: "Audit Bundle", href: auditDataHref, file: "audit_data_bundle.json", detail: "Data health and governance." },
+                { label: "Parity Audit", href: parityAuditHref, file: "streamlit_parity_audit.csv", detail: "Streamlit to Next gap checklist." },
                 { label: "PPT Outline", href: pptOutlineHref, file: "ppt_outline.md", detail: "Slide-by-slide deck outline." },
                 { label: "Manifest", href: reportManifestHref, file: "report_manifest.json", detail: "Export inventory and provenance." },
                 { label: "Screener CSV", href: candidateCsvHref, file: "security_screener.csv", detail: "CUSIP-level scores." },
@@ -2179,6 +2168,63 @@ export default function Home() {
               ]}
             />
           </article>
+        </section>
+      ) : null}
+
+      {payload && dashboard ? (
+        <section className="panel parity-audit-panel" id="streamlit-parity">
+          <div className="toolbar">
+            <div>
+              <h2>Streamlit Parity Audit</h2>
+              <span className="table-count">Original Streamlit surface mapped to the current Next.js product.</span>
+            </div>
+            {parityAuditHref ? (
+              <a className="secondary-button" href={parityAuditHref} download="streamlit_parity_audit.csv">
+                Audit CSV
+              </a>
+            ) : null}
+          </div>
+          <div className="parity-summary">
+            <div className="parity-stat ported"><span>Ported</span><strong>{parityStats.ported}</strong></div>
+            <div className="parity-stat next-enhanced"><span>Next Enhanced</span><strong>{parityStats["next-enhanced"]}</strong></div>
+            <div className="parity-stat partial"><span>Partial</span><strong>{parityStats.partial}</strong></div>
+            <div className="parity-stat missing"><span>Missing</span><strong>{parityStats.missing}</strong></div>
+          </div>
+          <div className="parity-guidance">
+            <strong>What this means</strong>
+            <p>Ported means the core workflow exists in Next. Partial means the main analytical idea exists but Streamlit has more controls, charts, or exports. Next enhanced means the new version is intentionally productized beyond the Streamlit page. Missing means the original surface still needs to be built.</p>
+          </div>
+          <div className="table-wrap parity-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Area</th>
+                  <th>Streamlit Surface</th>
+                  <th>Status</th>
+                  <th>Priority</th>
+                  <th>Current Next Surface</th>
+                  <th>Notes</th>
+                  <th>Next Step</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dashboard.streamlit_parity_audit.map((item) => (
+                  <tr key={`${item.area}-${item.streamlit_surface}`}>
+                    <td>{item.area}</td>
+                    <td>
+                      <strong>{item.streamlit_surface}</strong>
+                      <span className="source-anchor">{item.source_anchor}</span>
+                    </td>
+                    <td><mark className={`parity-status ${item.status}`}>{item.status}</mark></td>
+                    <td>{item.priority}</td>
+                    <td>{item.next_surface}</td>
+                    <td>{item.notes}</td>
+                    <td>{item.next_step}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </section>
       ) : null}
     </main>
