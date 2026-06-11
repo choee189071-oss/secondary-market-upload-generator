@@ -184,6 +184,28 @@ select {
   color: #92400e;
 }
 
+.readiness-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.readiness-strip span {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 9px;
+}
+
+.readiness-strip span.ready {
+  background: var(--soft);
+  border-color: #b7d8d3;
+  color: var(--accent-dark);
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -644,6 +666,17 @@ select {
   opacity: 0.82;
 }
 
+.bar.selected {
+  opacity: 1;
+  stroke: #111827;
+  stroke-width: 1.5;
+}
+
+.dot.selected {
+  stroke: #111827;
+  stroke-width: 2.6;
+}
+
 .bubble {
   fill: #2563eb;
   cursor: pointer;
@@ -728,6 +761,57 @@ select {
 .selected-trade-card span {
   font-size: 12px;
   font-weight: 700;
+}
+
+.audit-status {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 7px 10px;
+  text-transform: uppercase;
+}
+
+.audit-status.pass {
+  background: var(--soft);
+  color: var(--accent-dark);
+}
+
+.audit-status.review {
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.audit-status.blocked {
+  background: #fff1f0;
+  color: var(--danger);
+}
+
+.warning-list {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.warning-list p,
+.reason-tree p {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  color: #6b4c00;
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+  padding: 9px 10px;
+}
+
+.reason-tree {
+  display: grid;
+  gap: 8px;
+}
+
+.reason-tree strong {
+  color: #344054;
+  font-size: 13px;
 }
 
 .empty-chart {

@@ -3,6 +3,11 @@ import * as XLSX from "xlsx";
 import { buildNextsrPayloadFromFiles, type RawRow, type TradeFileInput } from "@/lib/nextsrPayload";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
+
+const MAX_TRADE_FILES = 12;
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 80 * 1024 * 1024;
 
 export async function POST(request: Request) {
   try {
@@ -24,8 +29,26 @@ export async function POST(request: Request) {
     if (!tradeFiles.length) {
       return NextResponse.json({ error: "Missing trade file(s)." }, { status: 400 });
     }
+    if (tradeFiles.length > MAX_TRADE_FILES) {
+      return NextResponse.json({ error: `Too many trade files. Upload ${MAX_TRADE_FILES} or fewer files at a time.` }, { status: 413 });
+    }
+    const allFiles = [
+      ...tradeFiles,
+      ...(bondReference instanceof File ? [bondReference] : []),
+      ...(issuerMapping instanceof File ? [issuerMapping] : []),
+      ...(mmdBenchmark instanceof File ? [mmdBenchmark] : [])
+    ];
+    const oversized = allFiles.find((file) => file.size > MAX_FILE_BYTES);
+    if (oversized) {
+      return NextResponse.json({ error: `${oversized.name} is too large. Maximum file size is ${Math.round(MAX_FILE_BYTES / 1024 / 1024)}MB.` }, { status: 413 });
+    }
+    const totalBytes = allFiles.reduce((sum, file) => sum + file.size, 0);
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      return NextResponse.json({ error: `Upload bundle is too large. Maximum combined size is ${Math.round(MAX_TOTAL_BYTES / 1024 / 1024)}MB.` }, { status: 413 });
+    }
 
-    const periodDays = Number(periodDaysRaw ?? 30);
+    const parsedPeriodDays = Number(periodDaysRaw ?? 30);
+    const periodDays = Number.isFinite(parsedPeriodDays) ? Math.max(1, Math.min(365, parsedPeriodDays)) : 30;
     const parsedTradeFiles: TradeFileInput[] = [];
     for (const file of tradeFiles) {
       parsedTradeFiles.push({
@@ -41,7 +64,7 @@ export async function POST(request: Request) {
       mmdRows: mmdBenchmark instanceof File ? await readTabularFile(mmdBenchmark) : undefined,
       issuer: typeof issuer === "string" ? issuer : null,
       maturityBucket: typeof maturityBucket === "string" ? maturityBucket : null,
-      periodDays: Number.isFinite(periodDays) ? periodDays : 30
+      periodDays
     });
 
     return NextResponse.json(result);

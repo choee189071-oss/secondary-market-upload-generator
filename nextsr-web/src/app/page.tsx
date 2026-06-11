@@ -28,12 +28,18 @@ import type {
 const maturityBuckets = ["", ...Array.from({ length: 40 }, (_, index) => `${index + 1}Y`)];
 const lookbackOptions = [7, 30, 60, 90, 180, 365];
 const validationOrder = ["cusip", "trade_date", "yield", "maturity", "trade_amount", "index_rate", "spread", "trade_type", "price", "ratings"];
+const maxUiFileBytes = 25 * 1024 * 1024;
+const maxUiBundleBytes = 80 * 1024 * 1024;
 
 function formatNumber(value: number | null | undefined, suffix = "") {
   if (value === null || value === undefined) {
     return "N/A";
   }
   return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}${suffix}`;
+}
+
+function formatPct(value: number | null | undefined) {
+  return value === null || value === undefined ? "N/A" : `${value.toFixed(1)}%`;
 }
 
 type ChartTooltip = {
@@ -85,7 +91,21 @@ function EmptyChart() {
   return <div className="empty-chart">No chartable observations.</div>;
 }
 
-function BarMetricChart<T>({ data, label, value, tone = "teal" }: { data: T[]; label: (point: T) => string; value: (point: T) => number | null; tone?: "teal" | "rose" | "blue" }) {
+function BarMetricChart<T>({
+  data,
+  label,
+  value,
+  tone = "teal",
+  activeLabel,
+  onSelect
+}: {
+  data: T[];
+  label: (point: T) => string;
+  value: (point: T) => number | null;
+  tone?: "teal" | "rose" | "blue";
+  activeLabel?: string | null;
+  onSelect?: (label: string) => void;
+}) {
   const values = data.map(value).filter((item): item is number => item !== null && Number.isFinite(item));
   const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   if (!data.length || !values.length) {
@@ -104,11 +124,12 @@ function BarMetricChart<T>({ data, label, value, tone = "teal" }: { data: T[]; l
           return (
             <g key={`${label(point)}-${index}`}>
               <rect
-                className={`bar ${tone}`}
+                className={`bar ${tone} ${label(point) === activeLabel ? "selected" : ""}`}
                 height={height}
                 width={Math.max(7, barWidth - 8)}
                 x={x}
                 y={230 - height}
+                onClick={() => onSelect?.(label(point))}
                 onMouseMove={(event) => setTooltip(chartTooltipFromEvent(event, label(point), [`Value: ${formatNumber(rawValue)}`]))}
               />
               {index % Math.ceil(data.length / 12 || 1) === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{label(point)}</text> : null}
@@ -144,7 +165,19 @@ function MiniTable<T>({ columns, rows }: { columns: Array<{ key: string; header:
   );
 }
 
-function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { data: CurvePoint[]; showIssuer?: boolean; showBenchmark?: boolean }) {
+function IssuerCurveChart({
+  data,
+  showIssuer = true,
+  showBenchmark = true,
+  activeBucket,
+  onSelectBucket
+}: {
+  data: CurvePoint[];
+  showIssuer?: boolean;
+  showBenchmark?: boolean;
+  activeBucket?: string | null;
+  onSelectBucket?: (bucket: string) => void;
+}) {
   const [tooltip, setTooltip] = useState<ChartTooltip | null>(null);
   const [crosshair, setCrosshair] = useState<{ x: number; y: number; point: CurvePoint; series: string } | null>(null);
   const [zoomRange, setZoomRange] = useState<[number, number] | null>(null);
@@ -301,10 +334,11 @@ function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { d
         {showBenchmark
           ? plotData.filter((point) => point.benchmark_yield !== null).map((point) => (
               <circle
-                className="dot benchmark-dot"
+                className={`dot benchmark-dot ${point.maturity_bucket === activeBucket ? "selected" : ""}`}
                 cx={x(point)}
                 cy={y(point.benchmark_yield) ?? 0}
                 key={`${point.maturity_bucket}-benchmark`}
+                onClick={() => onSelectBucket?.(point.maturity_bucket)}
                 r="3.2"
               />
             ))
@@ -312,10 +346,11 @@ function IssuerCurveChart({ data, showIssuer = true, showBenchmark = true }: { d
         {showIssuer
           ? plotData.filter((point) => point.issuer_yield !== null).map((point) => (
               <circle
-                className="dot issuer-dot"
+                className={`dot issuer-dot ${point.maturity_bucket === activeBucket ? "selected" : ""}`}
                 cx={x(point)}
                 cy={y(point.issuer_yield) ?? 0}
                 key={point.maturity_bucket}
+                onClick={() => onSelectBucket?.(point.maturity_bucket)}
                 r="3.4"
               />
             ))
@@ -787,6 +822,7 @@ export default function Home() {
   const [candidates, setCandidates] = useState<SecurityCandidate[]>([]);
   const [dashboard, setDashboard] = useState<DashboardAnalytics | null>(null);
   const [selectedCusip, setSelectedCusip] = useState("");
+  const [activeBucket, setActiveBucket] = useState<string | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [showIssuerCurve, setShowIssuerCurve] = useState(true);
   const [showBenchmarkCurve, setShowBenchmarkCurve] = useState(true);
@@ -817,9 +853,24 @@ export default function Home() {
     window.localStorage.setItem("nextsr-watchlist", JSON.stringify(watchlist));
   }, [watchlist]);
 
+  useEffect(() => {
+    if (payload?.maturity_bucket) {
+      setActiveBucket(payload.maturity_bucket);
+    }
+  }, [payload?.maturity_bucket]);
+
   const jsonText = useMemo(() => (payload ? JSON.stringify(payload, null, 2) : ""), [payload]);
+  const activeTrendSource = useMemo(() => {
+    if (!dashboard) {
+      return [];
+    }
+    if (activeBucket && dashboard.linked_spread_trends[activeBucket]?.length) {
+      return dashboard.linked_spread_trends[activeBucket];
+    }
+    return dashboard.spread_trend;
+  }, [activeBucket, dashboard]);
   const visibleSpreadTrend = useMemo(() => {
-    const source = dashboard?.spread_trend ?? [];
+    const source = activeTrendSource;
     if (trendRange === "all" || source.length < 2) {
       return source;
     }
@@ -828,7 +879,7 @@ export default function Home() {
     const cutoff = new Date(latest);
     cutoff.setUTCDate(cutoff.getUTCDate() - days);
     return source.filter((point) => new Date(`${point.date}T00:00:00Z`).getTime() >= cutoff.getTime());
-  }, [dashboard, trendRange]);
+  }, [activeTrendSource, trendRange]);
   const filteredCandidates = useMemo(
     () => {
       const sortValue = (candidate: SecurityCandidate) => {
@@ -880,12 +931,81 @@ export default function Home() {
     const data = dashboard?.report_artifacts.chart_data_json;
     return data ? `data:application/json;charset=utf-8,${encodeURIComponent(data)}` : "";
   }, [dashboard]);
+  const auditDataHref = useMemo(() => {
+    const data = dashboard?.report_artifacts.audit_data_json;
+    return data ? `data:application/json;charset=utf-8,${encodeURIComponent(data)}` : "";
+  }, [dashboard]);
+  const securityDetailHref = useMemo(() => {
+    const data = dashboard?.report_artifacts.security_detail_csv;
+    return data ? `data:text/csv;charset=utf-8,${encodeURIComponent(data)}` : "";
+  }, [dashboard]);
+  const benchmarkCsvHref = useMemo(() => {
+    const data = dashboard?.report_artifacts.benchmark_csv;
+    return data ? `data:text/csv;charset=utf-8,${encodeURIComponent(data)}` : "";
+  }, [dashboard]);
   const selectedSecurity = useMemo(() => {
     if (!dashboard?.security_details.length) {
       return null;
     }
     return dashboard.security_details.find((item) => item.cusip === selectedCusip) ?? dashboard.security_details[0];
   }, [dashboard, selectedCusip]);
+  const selectedSecurityStats = useMemo(() => {
+    if (!selectedSecurity) {
+      return null;
+    }
+    const trades = selectedSecurity.trades;
+    const buys = trades.filter((trade) => String(trade.trade_type ?? "").toLowerCase().includes("buy"));
+    const sells = trades.filter((trade) => String(trade.trade_type ?? "").toLowerCase().includes("sell"));
+    const spreads = trades.map((trade) => trade.spread_bps).filter((value): value is number => value !== null);
+    const latestSpread = spreads.at(-1) ?? null;
+    const firstSpread = spreads[0] ?? null;
+    const avg = (items: number[]) => items.length ? items.reduce((sum, item) => sum + item, 0) / items.length : null;
+    const avgBuySpread = avg(buys.map((trade) => trade.spread_bps).filter((value): value is number => value !== null));
+    const avgSellSpread = avg(sells.map((trade) => trade.spread_bps).filter((value): value is number => value !== null));
+    return {
+      spread_path_change: latestSpread !== null && firstSpread !== null ? latestSpread - firstSpread : null,
+      buy_count: buys.length,
+      sell_count: sells.length,
+      other_count: trades.length - buys.length - sells.length,
+      buy_par: buys.reduce((sum, trade) => sum + trade.trade_amount, 0),
+      sell_par: sells.reduce((sum, trade) => sum + trade.trade_amount, 0),
+      bid_ask_proxy_bps: avgBuySpread !== null && avgSellSpread !== null ? avgSellSpread - avgBuySpread : null,
+      avg_trade_size: trades.length ? selectedSecurity.total_trade_amount / trades.length : null
+    };
+  }, [selectedSecurity]);
+  const sameBucketComparables = useMemo(() => {
+    if (!selectedSecurity?.maturity_bucket) {
+      return [];
+    }
+    return candidates
+      .filter((candidate) => candidate.maturity_bucket === selectedSecurity.maturity_bucket && candidate.cusip !== selectedSecurity.cusip)
+      .slice(0, 8);
+  }, [candidates, selectedSecurity]);
+  const allUploadedFiles = useMemo(
+    () => [
+      ...tradeFiles,
+      ...(bondReference ? [bondReference] : []),
+      ...(issuerMapping ? [issuerMapping] : []),
+      ...(mmdBenchmark ? [mmdBenchmark] : [])
+    ],
+    [bondReference, issuerMapping, mmdBenchmark, tradeFiles]
+  );
+  const uploadBytes = useMemo(() => allUploadedFiles.reduce((sum, file) => sum + file.size, 0), [allUploadedFiles]);
+  const uploadWarnings = useMemo(() => {
+    const warnings: string[] = [];
+    const oversized = allUploadedFiles.filter((file) => file.size > maxUiFileBytes);
+    if (oversized.length) {
+      warnings.push(`${oversized.map((file) => file.name).join(", ")} exceeds the 25MB per-file limit.`);
+    }
+    if (uploadBytes > maxUiBundleBytes) {
+      warnings.push("Selected files exceed the 80MB combined upload limit.");
+    }
+    if (tradeFiles.length > 12) {
+      warnings.push("Select 12 or fewer trade files at a time.");
+    }
+    return warnings;
+  }, [allUploadedFiles, tradeFiles.length, uploadBytes]);
+  const canGenerate = tradeFiles.length > 0 && uploadWarnings.length === 0 && !isLoading;
   const watchlistRows = useMemo(() => {
     const details = dashboard?.security_details ?? [];
     return watchlist
@@ -901,6 +1021,16 @@ export default function Home() {
     return `data:text/csv;charset=utf-8,${encodeURIComponent([headers.join(","), ...rows].join("\n"))}`;
   }, [watchlistRows]);
 
+  function selectCusip(cusip: string) {
+    setSelectedCusip(cusip);
+    const security = dashboard?.security_details.find((item) => item.cusip === cusip);
+    const candidate = candidates.find((item) => item.cusip === cusip);
+    const bucket = security?.maturity_bucket ?? candidate?.maturity_bucket ?? null;
+    if (bucket) {
+      setActiveBucket(bucket);
+    }
+  }
+
   function toggleWatchlist(cusip: string) {
     setWatchlist((current) => (current.includes(cusip) ? current.filter((item) => item !== cusip) : [...current, cusip].sort()));
   }
@@ -909,6 +1039,10 @@ export default function Home() {
     event.preventDefault();
     if (!tradeFiles.length) {
       setError("Select at least one CSV or Excel trade file.");
+      return;
+    }
+    if (uploadWarnings.length) {
+      setError(uploadWarnings.join(" "));
       return;
     }
 
@@ -929,23 +1063,31 @@ export default function Home() {
     formData.set("maturityBucket", maturityBucket);
     formData.set("periodDays", String(periodDays));
 
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 90_000);
     try {
       const response = await fetch("/api/nextsr-payload", {
         method: "POST",
-        body: formData
+        body: formData,
+        signal: controller.signal
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error ?? "Payload generation failed.");
+        throw new Error(data?.error ?? `Payload generation failed with HTTP ${response.status}.`);
+      }
+      if (!data) {
+        throw new Error("Payload generation returned an empty response.");
       }
       setPayload(data.payload);
       setValidation(data.validation);
       setCandidates(data.security_screener ?? []);
       setDashboard(data.dashboard ?? null);
       setSelectedCusip(data.dashboard?.security_details?.[0]?.cusip ?? data.security_screener?.[0]?.cusip ?? "");
+      setActiveBucket(data.payload?.maturity_bucket ?? data.dashboard?.security_details?.[0]?.maturity_bucket ?? null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Payload generation failed.");
+      setError(caught instanceof DOMException && caught.name === "AbortError" ? "Payload generation timed out after 90 seconds. Try a smaller upload bundle or fewer trade files." : caught instanceof Error ? caught.message : "Payload generation failed.");
     } finally {
+      window.clearTimeout(timeout);
       setIsLoading(false);
     }
   }
@@ -974,6 +1116,11 @@ export default function Home() {
                 onChange={(event) => setTradeFiles(Array.from(event.target.files ?? []))}
               />
               <span className="field-help">{tradeFiles.length ? `${tradeFiles.length} file(s) selected` : "Upload one or more MuniPro trade-history exports."}</span>
+              {allUploadedFiles.length ? (
+                <span className="field-help">
+                  Upload bundle: {(uploadBytes / 1024 / 1024).toFixed(1)}MB across {allUploadedFiles.length} file(s).
+                </span>
+              ) : null}
             </div>
 
             <details className="input-expander">
@@ -1077,7 +1224,17 @@ export default function Home() {
               </div>
             </div>
 
-            <button className="primary-button" type="submit" disabled={isLoading}>
+            {uploadWarnings.length ? (
+              <div className="validation-warning">{uploadWarnings.join(" ")}</div>
+            ) : null}
+
+            <div className="readiness-strip">
+              <span className={tradeFiles.length ? "ready" : ""}>Trade file</span>
+              <span className={!uploadWarnings.length ? "ready" : ""}>Upload limits</span>
+              <span className="ready">Vercel API</span>
+            </div>
+
+            <button className="primary-button" type="submit" disabled={!canGenerate}>
               {isLoading ? "Generating..." : "Generate Dashboard"}
             </button>
           </form>
@@ -1142,6 +1299,21 @@ export default function Home() {
                 {chartDataHref ? (
                   <a className="secondary-button" href={chartDataHref} download="chart_data_bundle.json">
                     Chart Data
+                  </a>
+                ) : null}
+                {auditDataHref ? (
+                  <a className="secondary-button" href={auditDataHref} download="audit_data_bundle.json">
+                    Audit JSON
+                  </a>
+                ) : null}
+                {securityDetailHref ? (
+                  <a className="secondary-button" href={securityDetailHref} download="security_detail.csv">
+                    Detail CSV
+                  </a>
+                ) : null}
+                {benchmarkCsvHref ? (
+                  <a className="secondary-button" href={benchmarkCsvHref} download="benchmark_audit.csv">
+                    Benchmark CSV
                   </a>
                 ) : null}
               </div>
@@ -1237,6 +1409,51 @@ export default function Home() {
               <div className="metric"><span>Duplicates Removed</span><strong>{dashboard.data_health.duplicate_rows_removed.toLocaleString()}</strong></div>
             </div>
           </article>
+
+          <article className="panel">
+            <div className="chart-header">
+              <div>
+                <h2>Data Audit Center</h2>
+                <p>Row reconciliation, required-field coverage, and benchmark matching checks.</p>
+              </div>
+              <span className={`audit-status ${dashboard.data_audit_center.overall_status}`}>{dashboard.data_audit_center.overall_status}</span>
+            </div>
+            <div className="metrics dense">
+              <div className="metric"><span>Raw Rows</span><strong>{dashboard.data_audit_center.reconciliation.raw_rows.toLocaleString()}</strong></div>
+              <div className="metric"><span>Model Ready</span><strong>{dashboard.data_audit_center.reconciliation.model_ready_rows.toLocaleString()}</strong></div>
+              <div className="metric"><span>Benchmark Match</span><strong>{formatPct(dashboard.data_audit_center.reconciliation.benchmark_match_rate_pct)}</strong></div>
+              <div className="metric"><span>Reference Match</span><strong>{formatPct(dashboard.data_audit_center.reconciliation.cusip_reference_match_rate_pct)}</strong></div>
+            </div>
+            {dashboard.data_audit_center.warnings.length ? (
+              <div className="warning-list">
+                {dashboard.data_audit_center.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+              </div>
+            ) : null}
+            <MiniTable
+              rows={dashboard.data_audit_center.steps}
+              columns={[
+                { key: "step", header: "Step", render: (row) => row.step },
+                { key: "status", header: "Status", render: (row) => row.status },
+                { key: "in", header: "Rows In", render: (row) => row.rows_in.toLocaleString() },
+                { key: "out", header: "Rows Out", render: (row) => row.rows_out.toLocaleString() },
+                { key: "reject", header: "Rejected", render: (row) => row.rejected_rows.toLocaleString() },
+                { key: "notes", header: "Notes", render: (row) => row.notes.join(" ") }
+              ]}
+            />
+            <details className="developer-payload">
+              <summary>Field Coverage</summary>
+              <MiniTable
+                rows={dashboard.data_audit_center.field_coverage}
+                columns={[
+                  { key: "field", header: "Field", render: (row) => row.field },
+                  { key: "column", header: "Detected Column", render: (row) => row.detected_column },
+                  { key: "nonnull", header: "Non-null Rows", render: (row) => row.non_null_rows.toLocaleString() },
+                  { key: "coverage", header: "Coverage", render: (row) => `${row.coverage_pct}%` },
+                  { key: "required", header: "Required", render: (row) => row.required ? "Yes" : "No" }
+                ]}
+              />
+            </details>
+          </article>
         </section>
       ) : null}
 
@@ -1257,14 +1474,20 @@ export default function Home() {
                 </button>
               </div>
             </div>
-            <IssuerCurveChart data={dashboard.issuer_curve} showIssuer={showIssuerCurve} showBenchmark={showBenchmarkCurve} />
+            <IssuerCurveChart
+              activeBucket={activeBucket}
+              data={dashboard.issuer_curve}
+              onSelectBucket={setActiveBucket}
+              showIssuer={showIssuerCurve}
+              showBenchmark={showBenchmarkCurve}
+            />
           </article>
 
           <article className="panel chart-panel">
             <div className="chart-header">
               <div>
                 <h2>Spread Trend</h2>
-                <p>{payload.maturity_bucket ?? "Selected bucket"} spread to benchmark · {visibleSpreadTrend.length.toLocaleString()} point(s).</p>
+                <p>{activeBucket ?? payload.maturity_bucket ?? "Selected bucket"} spread to benchmark · {visibleSpreadTrend.length.toLocaleString()} point(s).</p>
               </div>
               <div className="segmented-control">
                 {[
@@ -1300,7 +1523,7 @@ export default function Home() {
                 <p>Liquidity score versus spread, sized by total par traded.</p>
               </div>
             </div>
-            <PositioningChart data={dashboard.positioning} selectedCusip={selectedCusip} onSelect={setSelectedCusip} />
+            <PositioningChart data={dashboard.positioning} selectedCusip={selectedCusip} onSelect={selectCusip} />
           </article>
 
           <article className="panel chart-panel">
@@ -1329,7 +1552,7 @@ export default function Home() {
                 <p>Bucket-level trade frequency and liquidity score.</p>
               </div>
             </div>
-            <BarMetricChart<LiquidityPoint> data={dashboard.liquidity} label={(row) => row.maturity_bucket} value={(row) => row.liquidity_score} tone="teal" />
+            <BarMetricChart<LiquidityPoint> activeLabel={activeBucket} data={dashboard.liquidity} label={(row) => row.maturity_bucket} onSelect={setActiveBucket} value={(row) => row.liquidity_score} tone="teal" />
           </article>
 
           <article className="panel chart-panel">
@@ -1339,7 +1562,7 @@ export default function Home() {
                 <p>Selected issuer spread versus peer median by bucket.</p>
               </div>
             </div>
-            <BarMetricChart<PeerRvPoint> data={dashboard.peer_rv} label={(row) => row.maturity_bucket} value={(row) => row.peer_gap_bps} tone="rose" />
+            <BarMetricChart<PeerRvPoint> activeLabel={activeBucket} data={dashboard.peer_rv} label={(row) => row.maturity_bucket} onSelect={setActiveBucket} value={(row) => row.peer_gap_bps} tone="rose" />
           </article>
 
           <article className="panel chart-panel">
@@ -1495,7 +1718,7 @@ export default function Home() {
                     <tr className={candidate.cusip === selectedCusip ? "selected-row" : ""} key={candidate.cusip}>
                       <td>{candidate.signal}</td>
                       <td>
-                        <button className="link-button" type="button" onClick={() => setSelectedCusip(candidate.cusip)}>
+                        <button className="link-button" type="button" onClick={() => selectCusip(candidate.cusip)}>
                           {candidate.cusip}
                         </button>
                       </td>
@@ -1548,10 +1771,37 @@ export default function Home() {
                   <div className="metric"><span>Spread</span><strong>{formatNumber(selectedSecurity.spread_to_benchmark_bps, " bps")}</strong></div>
                   <div className="metric"><span>Total Par</span><strong>{selectedSecurity.total_trade_amount.toLocaleString()}</strong></div>
                 </div>
+                {selectedSecurityStats ? (
+                  <div className="metrics dense">
+                    <div className="metric"><span>Path Change</span><strong>{formatNumber(selectedSecurityStats.spread_path_change, " bps")}</strong></div>
+                    <div className="metric"><span>Bid/Ask Proxy</span><strong>{formatNumber(selectedSecurityStats.bid_ask_proxy_bps, " bps")}</strong></div>
+                    <div className="metric"><span>Buy / Sell Trades</span><strong>{selectedSecurityStats.buy_count} / {selectedSecurityStats.sell_count}</strong></div>
+                    <div className="metric"><span>Avg Trade Size</span><strong>{formatNumber(selectedSecurityStats.avg_trade_size)}</strong></div>
+                    <div className="metric"><span>Buy Par</span><strong>{selectedSecurityStats.buy_par.toLocaleString()}</strong></div>
+                    <div className="metric"><span>Sell Par</span><strong>{selectedSecurityStats.sell_par.toLocaleString()}</strong></div>
+                    <div className="metric"><span>Other Trades</span><strong>{selectedSecurityStats.other_count.toLocaleString()}</strong></div>
+                    <div className="metric"><span>Same Bucket Peers</span><strong>{sameBucketComparables.length.toLocaleString()}</strong></div>
+                  </div>
+                ) : null}
                 <div className="readthrough-list">
                   {selectedSecurity.readthrough.map((item) => <p key={item}>{item}</p>)}
                 </div>
+                <div className="reason-tree">
+                  <strong>Recommendation Reason Tree</strong>
+                  {selectedSecurity.evidence.length ? selectedSecurity.evidence.map((item) => <p key={item}>{item}</p>) : <p>No CUSIP-level evidence was generated.</p>}
+                </div>
                 <SecurityTradePathChart trades={selectedSecurity.trades} />
+                <MiniTable<SecurityCandidate>
+                  rows={sameBucketComparables}
+                  columns={[
+                    { key: "cusip", header: "Same Bucket CUSIP", render: (row) => row.cusip },
+                    { key: "signal", header: "Signal", render: (row) => row.signal },
+                    { key: "spread", header: "Spread", render: (row) => formatNumber(row.spread_to_benchmark_bps, " bps") },
+                    { key: "liq", header: "Liquidity", render: (row) => formatNumber(row.liquidity_score) },
+                    { key: "rv", header: "RV", render: (row) => formatNumber(row.rv_score) },
+                    { key: "trades", header: "Trades", render: (row) => row.trade_count.toLocaleString() }
+                  ]}
+                />
                 <MiniTable<SecurityTradePoint>
                   rows={selectedSecurity.trades.slice(-20).reverse()}
                   columns={[
@@ -1641,6 +1891,37 @@ export default function Home() {
               <strong>{dashboard.admin.methodology_version}</strong>
               <p>{dashboard.admin.benchmark_policy}</p>
             </div>
+            <div className="metrics dense">
+              <div className="metric"><span>Active Benchmark</span><strong>{dashboard.benchmark_governance.active_source ?? "N/A"}</strong></div>
+              <div className="metric"><span>Trade Index Points</span><strong>{dashboard.benchmark_governance.trade_index_points.toLocaleString()}</strong></div>
+              <div className="metric"><span>Uploaded MMD Points</span><strong>{dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()}</strong></div>
+              <div className="metric"><span>Fallback Used</span><strong>{dashboard.benchmark_governance.fallback_points_used.toLocaleString()}</strong></div>
+            </div>
+            <details className="developer-payload" open>
+              <summary>Benchmark Governance</summary>
+              <div className="methodology-block">
+                <strong>{dashboard.benchmark_governance.rating_curve_selector}</strong>
+                <p>{dashboard.benchmark_governance.policy}</p>
+                <p>Missing active tenors: {dashboard.benchmark_governance.missing_active_tenors.join(", ") || "None"}</p>
+              </div>
+              <MiniTable
+                rows={dashboard.benchmark_governance.source_priority}
+                columns={[
+                  { key: "source", header: "Source", render: (row) => row.source },
+                  { key: "status", header: "Status", render: (row) => row.status },
+                  { key: "points", header: "Points", render: (row) => row.points.toLocaleString() },
+                  { key: "notes", header: "Notes", render: (row) => row.notes }
+                ]}
+              />
+              <MiniTable
+                rows={dashboard.benchmark_governance.spread_assumptions}
+                columns={[
+                  { key: "rating", header: "Rating", render: (row) => row.rating },
+                  { key: "spread", header: "Spread Assumption", render: (row) => formatNumber(row.spread_bps, " bps") },
+                  { key: "source", header: "Source", render: (row) => row.source }
+                ]}
+              />
+            </details>
             <details className="developer-payload">
               <summary>Benchmark Audit</summary>
               <MiniTable<BenchmarkAuditRow>

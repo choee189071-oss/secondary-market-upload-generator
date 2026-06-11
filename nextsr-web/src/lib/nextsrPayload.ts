@@ -77,6 +77,52 @@ export type DataHealth = {
   };
 };
 
+export type DataAuditStep = {
+  step: string;
+  status: "pass" | "review" | "blocked";
+  rows_in: number;
+  rows_out: number;
+  rejected_rows: number;
+  notes: string[];
+};
+
+export type FieldCoverageRow = {
+  field: string;
+  detected_column: string | null;
+  non_null_rows: number;
+  coverage_pct: number;
+  required: boolean;
+};
+
+export type DataAuditCenter = {
+  overall_status: "pass" | "review" | "blocked";
+  steps: DataAuditStep[];
+  field_coverage: FieldCoverageRow[];
+  reconciliation: {
+    raw_rows: number;
+    model_ready_rows: number;
+    duplicate_rows_removed: number;
+    unmatched_benchmark_rows: number;
+    benchmark_match_rate_pct: number;
+    cusip_reference_match_rate_pct: number | null;
+    issuer_mapping_match_rate_pct: number | null;
+  };
+  warnings: string[];
+};
+
+export type BenchmarkGovernance = {
+  active_source: string | null;
+  policy: string;
+  trade_index_points: number;
+  uploaded_mmd_points: number;
+  active_points: number;
+  fallback_points_used: number;
+  missing_active_tenors: string[];
+  rating_curve_selector: string;
+  spread_assumptions: Array<{ rating: string; spread_bps: number; source: string }>;
+  source_priority: Array<{ source: string; status: "active" | "fallback" | "missing"; points: number; notes: string }>;
+};
+
 export type IssuerOption = {
   issuer: string;
   sector: string;
@@ -278,14 +324,20 @@ export type MethodologySection = {
 export type ReportArtifacts = {
   html_report: string;
   chart_data_json: string;
+  audit_data_json: string;
+  security_detail_csv: string;
+  benchmark_csv: string;
 };
 
 export type DashboardAnalytics = {
   file_readiness: FileReadinessReport[];
   data_health: DataHealth;
+  data_audit_center: DataAuditCenter;
+  benchmark_governance: BenchmarkGovernance;
   issuers: IssuerOption[];
   issuer_curve: CurvePoint[];
   spread_trend: TrendPoint[];
+  linked_spread_trends: Record<string, TrendPoint[]>;
   monthly_activity: ActivityPoint[];
   positioning: PositionPoint[];
   spread_movement_ladder: SpreadMovementPoint[];
@@ -1211,6 +1263,165 @@ function buildDataHealth(input: {
   };
 }
 
+function fieldCoverage(rows: RawRow[], validation: PayloadValidation): FieldCoverageRow[] {
+  const aliases: Record<string, string[]> = {
+    cusip: ["cusip", "cusip9", "security_id"],
+    trade_date: ["trade_date", "trade date", "date", "transaction_date", "td_time", "td & time"],
+    yield: ["ytw", "ytm", "msrb_yld", "yield", "yield_to_worst", "yield to worst"],
+    maturity: ["mty", "maturity", "maturity_date", "maturity date"],
+    trade_amount: ["qty_m", "qty (m)", "trade_amount", "trade amount", "par_amount", "quantity", "amount"],
+    index_rate: ["bnch_rate", "bnch rate", "index_rate", "benchmark_rate"],
+    spread: ["spread_bp", "spread bp", "spread_bps", "spread"],
+    trade_type: ["tde_type", "tde type", "trade_type", "side", "buy_sell"],
+    price: ["price", "trade_price", "execution_price"],
+    ratings: ["m", "s", "f", "ratings_m_s_f", "ratings m/s/f", "ratings", "rating"]
+  };
+  return Object.entries(aliases).map(([field, fieldAliases]) => {
+    const detected = validation.detected_fields[field];
+    const nonNullRows = rows.filter((row) => first(row, fieldAliases) !== null).length;
+    return {
+      field,
+      detected_column: detected,
+      non_null_rows: nonNullRows,
+      coverage_pct: rows.length ? roundOrNull((nonNullRows / rows.length) * 100, 1) ?? 0 : 0,
+      required: ["cusip", "trade_date", "yield"].includes(field)
+    };
+  });
+}
+
+function buildDataAuditCenter(input: {
+  rows: RawRow[];
+  tradesBeforeDedupe: number;
+  trades: TradeRow[];
+  duplicateRowsRemoved: number;
+  validation: PayloadValidation;
+  readiness: FileReadinessReport[];
+  spreadObs: SpreadObservation[];
+  bondReferenceCusips?: Set<string>;
+  issuerMappingIssuers?: Set<string>;
+}): DataAuditCenter {
+  const benchmarkEligible = input.trades.filter((trade) => trade.trade_date && trade.maturity_bucket && trade.yield !== null).length;
+  const benchmarkMatchRate = benchmarkEligible ? (input.spreadObs.length / benchmarkEligible) * 100 : 0;
+  const uniqueCusips = new Set(input.trades.map((trade) => trade.cusip).filter((value): value is string => Boolean(value)));
+  const bondMatches = input.bondReferenceCusips
+    ? Array.from(uniqueCusips).filter((cusip) => input.bondReferenceCusips?.has(cusip)).length
+    : null;
+  const issuerUniverse = new Set(input.trades.map((trade) => trade.issuer).filter(Boolean));
+  const issuerMatches = input.issuerMappingIssuers
+    ? Array.from(issuerUniverse).filter((issuer) => input.issuerMappingIssuers?.has(issuer)).length
+    : null;
+  const warnings = [
+    ...input.readiness.flatMap((item) => item.warnings.map((warning) => `${item.dataset}: ${warning}`)),
+    ...(benchmarkEligible && benchmarkMatchRate < 70 ? [`Benchmark match rate is ${benchmarkMatchRate.toFixed(1)}%; review uploaded index/MMD coverage.`] : []),
+    ...(input.validation.missing_required.length ? [`Missing required detected fields: ${input.validation.missing_required.join(", ")}.`] : []),
+    ...(input.trades.length === 0 ? ["No model-ready trades were generated."] : [])
+  ];
+  const overallStatus: DataAuditCenter["overall_status"] =
+    input.trades.length === 0 || input.validation.missing_required.length ? "blocked" : warnings.length ? "review" : "pass";
+  return {
+    overall_status: overallStatus,
+    steps: [
+      {
+        step: "File ingestion",
+        status: input.rows.length ? "pass" : "blocked",
+        rows_in: input.rows.length,
+        rows_out: input.rows.length,
+        rejected_rows: 0,
+        notes: [`${input.readiness.length.toLocaleString()} uploaded dataset(s) evaluated.`]
+      },
+      {
+        step: "Required-field mapping",
+        status: input.validation.missing_required.length ? "blocked" : input.validation.missing_recommended.length ? "review" : "pass",
+        rows_in: input.rows.length,
+        rows_out: input.tradesBeforeDedupe,
+        rejected_rows: Math.max(0, input.rows.length - input.tradesBeforeDedupe),
+        notes: [
+          input.validation.missing_required.length ? `Missing required: ${input.validation.missing_required.join(", ")}.` : "CUSIP, trade date, and yield fields were detected.",
+          input.validation.missing_recommended.length ? `Missing recommended: ${input.validation.missing_recommended.join(", ")}.` : "Recommended fields have broad coverage."
+        ]
+      },
+      {
+        step: "Duplicate removal",
+        status: "pass",
+        rows_in: input.tradesBeforeDedupe,
+        rows_out: input.trades.length,
+        rejected_rows: input.duplicateRowsRemoved,
+        notes: [`Removed ${input.duplicateRowsRemoved.toLocaleString()} exact duplicate trade row(s).`]
+      },
+      {
+        step: "Benchmark matching",
+        status: benchmarkEligible === 0 ? "blocked" : benchmarkMatchRate < 70 ? "review" : "pass",
+        rows_in: benchmarkEligible,
+        rows_out: input.spreadObs.length,
+        rejected_rows: Math.max(0, benchmarkEligible - input.spreadObs.length),
+        notes: [`Matched ${benchmarkMatchRate.toFixed(1)}% of eligible issuer/date/bucket observations to benchmark tenors.`]
+      },
+      {
+        step: "CUSIP scoring",
+        status: input.trades.length ? "pass" : "blocked",
+        rows_in: input.trades.length,
+        rows_out: uniqueCusips.size,
+        rejected_rows: 0,
+        notes: [`${uniqueCusips.size.toLocaleString()} unique CUSIP(s) available for screener and drilldown.`]
+      }
+    ],
+    field_coverage: fieldCoverage(input.rows, input.validation),
+    reconciliation: {
+      raw_rows: input.rows.length,
+      model_ready_rows: input.trades.length,
+      duplicate_rows_removed: input.duplicateRowsRemoved,
+      unmatched_benchmark_rows: Math.max(0, benchmarkEligible - input.spreadObs.length),
+      benchmark_match_rate_pct: roundOrNull(benchmarkMatchRate, 1) ?? 0,
+      cusip_reference_match_rate_pct:
+        bondMatches === null ? null : roundOrNull(uniqueCusips.size ? (bondMatches / uniqueCusips.size) * 100 : 0, 1),
+      issuer_mapping_match_rate_pct:
+        issuerMatches === null ? null : roundOrNull(issuerUniverse.size ? (issuerMatches / issuerUniverse.size) * 100 : 0, 1)
+    },
+    warnings
+  };
+}
+
+function buildBenchmarkGovernance(input: {
+  tradeIndexCurve: BenchmarkRow[];
+  uploadedMmdCurve: BenchmarkRow[];
+  activeCurve: BenchmarkRow[];
+}): BenchmarkGovernance {
+  const activeSource = input.activeCurve[0]?.benchmark_source ?? null;
+  const activeTenors = new Set(input.activeCurve.map((row) => row.tenor));
+  const missingActiveTenors = ["1Y", "2Y", "5Y", "10Y", "20Y", "30Y"].filter((tenor) => !activeTenors.has(tenor));
+  const tradeIndexActive = input.tradeIndexCurve.length > 0;
+  return {
+    active_source: activeSource,
+    policy: "Use Trade Sheet Index / Index Rate first because it is directly tied to uploaded trades; use uploaded MMD only when no trade-index curve can be formed.",
+    trade_index_points: input.tradeIndexCurve.length,
+    uploaded_mmd_points: input.uploadedMmdCurve.length,
+    active_points: input.activeCurve.length,
+    fallback_points_used: tradeIndexActive ? 0 : input.uploadedMmdCurve.length,
+    missing_active_tenors: missingActiveTenors,
+    rating_curve_selector: "General market curve; rating-specific spread assumptions are disclosed below and not silently applied.",
+    spread_assumptions: [
+      { rating: "AAA", spread_bps: 0, source: "Base benchmark curve" },
+      { rating: "AA", spread_bps: 8, source: "Transparent screening assumption" },
+      { rating: "A", spread_bps: 25, source: "Transparent screening assumption" },
+      { rating: "BBB", spread_bps: 60, source: "Transparent screening assumption" }
+    ],
+    source_priority: [
+      {
+        source: "Trade Sheet Index / Index Rate",
+        status: input.tradeIndexCurve.length ? "active" : "missing",
+        points: input.tradeIndexCurve.length,
+        notes: input.tradeIndexCurve.length ? "Primary source used for benchmark-dependent analytics." : "No usable trade-index benchmark points detected."
+      },
+      {
+        source: "Uploaded MMD",
+        status: input.tradeIndexCurve.length ? (input.uploadedMmdCurve.length ? "fallback" : "missing") : input.uploadedMmdCurve.length ? "active" : "missing",
+        points: input.uploadedMmdCurve.length,
+        notes: input.tradeIndexCurve.length ? "Available only for audit/fallback review." : "Used when trade-index benchmark is unavailable."
+      }
+    ]
+  };
+}
+
 function buildSpreadMovementLadder(spreadObs: SpreadObservation[], issuer: string): SpreadMovementPoint[] {
   const windows: Array<[keyof Omit<SpreadMovementPoint, "maturity_bucket" | "latest_spread_bps">, number]> = [
     ["move_1w_bps", 7],
@@ -1588,7 +1799,36 @@ function escapeHtml(value: unknown): string {
     .replace(/"/g, "&quot;");
 }
 
-function buildHtmlReport(payload: NextsrPayload, dataHealth: DataHealth, recommendation: RecommendationNarrative, candidates: SecurityCandidate[], curveShape: CurveShapeMetric[]) {
+function csvCell(value: unknown): string {
+  return JSON.stringify(value ?? "");
+}
+
+function rowsToCsv<T>(headers: string[], rows: T[], value: (row: T, header: string) => unknown): string {
+  return [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => csvCell(value(row, header))).join(","))
+  ].join("\n");
+}
+
+function buildSecurityDetailCsv(details: SecurityDetail[]): string {
+  const headers = ["cusip", "issuer", "signal", "maturity_bucket", "latest_trade_date", "spread_to_benchmark_bps", "liquidity_score", "rv_score", "trade_count", "total_trade_amount", "avg_yield", "latest_price"];
+  return rowsToCsv(headers, details, (row, header) => row[header as keyof SecurityDetail]);
+}
+
+function buildBenchmarkCsv(rows: BenchmarkAuditRow[]): string {
+  const headers = ["date", "tenor", "benchmark_yield", "benchmark_source", "observation_count"];
+  return rowsToCsv(headers, rows, (row, header) => row[header as keyof BenchmarkAuditRow]);
+}
+
+function buildHtmlReport(
+  payload: NextsrPayload,
+  dataHealth: DataHealth,
+  recommendation: RecommendationNarrative,
+  candidates: SecurityCandidate[],
+  curveShape: CurveShapeMetric[],
+  dataAudit: DataAuditCenter,
+  benchmarkGovernance: BenchmarkGovernance
+) {
   const candidateRows = candidates
     .slice(0, 15)
     .map((candidate) => `<tr><td>${escapeHtml(candidate.cusip)}</td><td>${escapeHtml(candidate.signal)}</td><td>${escapeHtml(candidate.maturity_bucket)}</td><td>${escapeHtml(candidate.spread_to_benchmark_bps ?? "N/A")}</td><td>${escapeHtml(candidate.liquidity_score ?? "N/A")}</td><td>${escapeHtml(candidate.rv_score ?? "N/A")}</td></tr>`)
@@ -1596,6 +1836,8 @@ function buildHtmlReport(payload: NextsrPayload, dataHealth: DataHealth, recomme
   const driverRows = recommendation.drivers.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
   const caveatRows = recommendation.caveats.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
   const curveRows = curveShape.map((metric) => `<li>${escapeHtml(metric.metric)}: ${escapeHtml(metric.value ?? "N/A")} ${escapeHtml(metric.unit)}. ${escapeHtml(metric.readthrough)}</li>`).join("");
+  const auditRows = dataAudit.steps.map((step) => `<tr><td>${escapeHtml(step.step)}</td><td>${escapeHtml(step.status)}</td><td>${escapeHtml(step.rows_in.toLocaleString())}</td><td>${escapeHtml(step.rows_out.toLocaleString())}</td><td>${escapeHtml(step.rejected_rows.toLocaleString())}</td><td>${escapeHtml(step.notes.join(" "))}</td></tr>`).join("");
+  const benchmarkRows = benchmarkGovernance.source_priority.map((source) => `<tr><td>${escapeHtml(source.source)}</td><td>${escapeHtml(source.status)}</td><td>${escapeHtml(source.points.toLocaleString())}</td><td>${escapeHtml(source.notes)}</td></tr>`).join("");
   return `<!doctype html>
 <html>
 <head>
@@ -1624,6 +1866,12 @@ function buildHtmlReport(payload: NextsrPayload, dataHealth: DataHealth, recomme
   <p>${escapeHtml(recommendation.summary)}</p>
   <h3>Drivers</h3><ul>${driverRows}</ul>
   <h3>Caveats</h3><ul>${caveatRows}</ul>
+  <h2>Data Audit Center</h2>
+  <p>Status: <strong>${escapeHtml(dataAudit.overall_status)}</strong>. Benchmark match rate: ${escapeHtml(dataAudit.reconciliation.benchmark_match_rate_pct)}%.</p>
+  <table><thead><tr><th>Step</th><th>Status</th><th>Rows In</th><th>Rows Out</th><th>Rejected</th><th>Notes</th></tr></thead><tbody>${auditRows}</tbody></table>
+  <h2>Benchmark Governance</h2>
+  <p>${escapeHtml(benchmarkGovernance.policy)}</p>
+  <table><thead><tr><th>Source</th><th>Status</th><th>Points</th><th>Notes</th></tr></thead><tbody>${benchmarkRows}</tbody></table>
   <h2>Top Security Candidates</h2>
   <table><thead><tr><th>CUSIP</th><th>Signal</th><th>Bucket</th><th>Spread</th><th>Liquidity</th><th>RV</th></tr></thead><tbody>${candidateRows}</tbody></table>
   <h2>Curve Shape</h2><ul>${curveRows}</ul>
@@ -1659,14 +1907,25 @@ function buildMethodologySections(): MethodologySection[] {
 function buildReportArtifacts(input: {
   payload: NextsrPayload;
   dataHealth: DataHealth;
+  dataAudit: DataAuditCenter;
+  benchmarkGovernance: BenchmarkGovernance;
   recommendation: RecommendationNarrative;
   candidates: SecurityCandidate[];
+  securityDetails: SecurityDetail[];
+  benchmarkAudit: BenchmarkAuditRow[];
   curveShape: CurveShapeMetric[];
   dashboardData: Record<string, unknown>;
 }): ReportArtifacts {
   return {
-    html_report: buildHtmlReport(input.payload, input.dataHealth, input.recommendation, input.candidates, input.curveShape),
-    chart_data_json: JSON.stringify(input.dashboardData, null, 2)
+    html_report: buildHtmlReport(input.payload, input.dataHealth, input.recommendation, input.candidates, input.curveShape, input.dataAudit, input.benchmarkGovernance),
+    chart_data_json: JSON.stringify(input.dashboardData, null, 2),
+    audit_data_json: JSON.stringify({
+      data_health: input.dataHealth,
+      data_audit_center: input.dataAudit,
+      benchmark_governance: input.benchmarkGovernance
+    }, null, 2),
+    security_detail_csv: buildSecurityDetailCsv(input.securityDetails),
+    benchmark_csv: buildBenchmarkCsv(input.benchmarkAudit)
   };
 }
 
@@ -1706,9 +1965,37 @@ function emptyDashboard(): DashboardAnalytics {
       benchmark_source: null,
       reference_files: { bond_reference: false, issuer_mapping: false, uploaded_mmd: false }
     },
+    data_audit_center: {
+      overall_status: "blocked",
+      steps: [],
+      field_coverage: [],
+      reconciliation: {
+        raw_rows: 0,
+        model_ready_rows: 0,
+        duplicate_rows_removed: 0,
+        unmatched_benchmark_rows: 0,
+        benchmark_match_rate_pct: 0,
+        cusip_reference_match_rate_pct: null,
+        issuer_mapping_match_rate_pct: null
+      },
+      warnings: []
+    },
+    benchmark_governance: {
+      active_source: null,
+      policy: "Trade Sheet Index / Index Rate first; uploaded MMD is fallback when trade index is unavailable.",
+      trade_index_points: 0,
+      uploaded_mmd_points: 0,
+      active_points: 0,
+      fallback_points_used: 0,
+      missing_active_tenors: [],
+      rating_curve_selector: "General market curve",
+      spread_assumptions: [],
+      source_priority: []
+    },
     issuers: [],
     issuer_curve: [],
     spread_trend: [],
+    linked_spread_trends: {},
     monthly_activity: [],
     positioning: [],
     spread_movement_ladder: [],
@@ -1732,7 +2019,10 @@ function emptyDashboard(): DashboardAnalytics {
     methodology_sections: buildMethodologySections(),
     report_artifacts: {
       html_report: "",
-      chart_data_json: ""
+      chart_data_json: "",
+      audit_data_json: "",
+      security_detail_csv: "",
+      benchmark_csv: ""
     },
     analyst_context: {},
     export_summary_markdown: "",
@@ -1757,19 +2047,33 @@ function buildDashboardAnalytics(input: {
   securityScreener: SecurityCandidate[];
   readiness: FileReadinessReport[];
   dataHealth: DataHealth;
+  dataAudit: DataAuditCenter;
+  benchmarkGovernance: BenchmarkGovernance;
   issuer: string | null;
   maturityBucket: string | null;
   periodDays: number;
   payload?: NextsrPayload;
 }): DashboardAnalytics {
   if (!input.issuer) {
-    return { ...emptyDashboard(), file_readiness: input.readiness, data_health: input.dataHealth, issuers: buildIssuerOptions(input.trades) };
+    return {
+      ...emptyDashboard(),
+      file_readiness: input.readiness,
+      data_health: input.dataHealth,
+      data_audit_center: input.dataAudit,
+      benchmark_governance: input.benchmarkGovernance,
+      issuers: buildIssuerOptions(input.trades)
+    };
   }
   const issuerCurve = buildIssuerCurve(input.trades, input.benchmarkCurve, input.issuer, input.periodDays);
   const curveShape = buildCurveShape(issuerCurve);
   const payload = input.payload;
   const spreadAttribution = payload ? buildSpreadAttribution(payload, issuerCurve) : [];
   const spreadTrend = buildSpreadTrend(input.spreadObs, input.issuer, input.maturityBucket);
+  const linkedSpreadTrends = Object.fromEntries(
+    MATURITY_BUCKET_ORDER
+      .map((bucket) => [bucket, buildSpreadTrend(input.spreadObs, input.issuer ?? "", bucket)] as const)
+      .filter(([, points]) => points.length > 0)
+  );
   const monthlyActivity = buildMonthlyActivity(input.trades, input.issuer);
   const spreadMovement = buildSpreadMovementLadder(input.spreadObs, input.issuer);
   const liquidity = buildLiquidityByBucket(input.trades, input.issuer, input.periodDays);
@@ -1785,12 +2089,17 @@ function buildDashboardAnalytics(input: {
     ? buildReportArtifacts({
         payload,
         dataHealth: input.dataHealth,
+        dataAudit: input.dataAudit,
+        benchmarkGovernance: input.benchmarkGovernance,
         recommendation,
         candidates: input.securityScreener,
+        securityDetails,
+        benchmarkAudit,
         curveShape,
         dashboardData: {
           issuer_curve: issuerCurve,
           spread_trend: spreadTrend,
+          linked_spread_trends: linkedSpreadTrends,
           monthly_activity: monthlyActivity,
           spread_movement_ladder: spreadMovement,
           liquidity,
@@ -1807,9 +2116,12 @@ function buildDashboardAnalytics(input: {
     ...emptyDashboard(),
     file_readiness: input.readiness,
     data_health: input.dataHealth,
+    data_audit_center: input.dataAudit,
+    benchmark_governance: input.benchmarkGovernance,
     issuers: buildIssuerOptions(input.trades),
     issuer_curve: issuerCurve,
     spread_trend: spreadTrend,
+    linked_spread_trends: linkedSpreadTrends,
     monthly_activity: monthlyActivity,
     positioning: input.securityScreener.slice(0, 80).map((candidate) => ({
       cusip: candidate.cusip,
@@ -1840,6 +2152,8 @@ function buildDashboardAnalytics(input: {
       issuer: input.issuer,
       maturity_bucket: input.maturityBucket,
       data_health: input.dataHealth,
+      data_audit_center: input.dataAudit,
+      benchmark_governance: input.benchmarkGovernance,
       payload_signals: payload?.signals ?? null,
       top_candidates: input.securityScreener.slice(0, 10),
       recommendation,
@@ -1857,6 +2171,11 @@ function buildPreparedResult(input: {
   readiness: FileReadinessReport[];
   dataHealth: DataHealth;
   benchmarkCurve: BenchmarkRow[];
+  benchmarkGovernance: BenchmarkGovernance;
+  tradesBeforeDedupe: number;
+  duplicateRowsRemoved: number;
+  bondReferenceCusips?: Set<string>;
+  issuerMappingIssuers?: Set<string>;
   issuer?: string | null;
   maturityBucket?: string | null;
   periodDays?: number;
@@ -1865,6 +2184,17 @@ function buildPreparedResult(input: {
   const validation = input.validation;
   const benchmarkCurve = input.benchmarkCurve;
   const spreadObs = buildSpreadObservations(trades, benchmarkCurve);
+  const dataAudit = buildDataAuditCenter({
+    rows: input.rows,
+    tradesBeforeDedupe: input.tradesBeforeDedupe,
+    trades,
+    duplicateRowsRemoved: input.duplicateRowsRemoved,
+    validation,
+    readiness: input.readiness,
+    spreadObs,
+    bondReferenceCusips: input.bondReferenceCusips,
+    issuerMappingIssuers: input.issuerMappingIssuers
+  });
   const periodDays = input.periodDays ?? 30;
   const securityScreener = buildSecurityScreener(trades, benchmarkCurve, periodDays);
   let issuer = textValue(input.issuer) ?? mode(trades.map((trade) => trade.issuer));
@@ -1912,7 +2242,9 @@ function buildPreparedResult(input: {
       dashboard: {
         ...emptyDashboard(),
         file_readiness: input.readiness,
-        data_health: input.dataHealth
+        data_health: input.dataHealth,
+        data_audit_center: dataAudit,
+        benchmark_governance: input.benchmarkGovernance
       }
     };
   }
@@ -1932,6 +2264,8 @@ function buildPreparedResult(input: {
     securityScreener,
     readiness: input.readiness,
     dataHealth: input.dataHealth,
+    dataAudit,
+    benchmarkGovernance: input.benchmarkGovernance,
     issuer,
     maturityBucket,
     periodDays
@@ -1997,6 +2331,8 @@ function buildPreparedResult(input: {
       securityScreener,
       readiness: input.readiness,
       dataHealth: input.dataHealth,
+      dataAudit,
+      benchmarkGovernance: input.benchmarkGovernance,
       issuer,
       maturityBucket,
       periodDays,
@@ -2015,7 +2351,13 @@ export function buildNextsrPayloadFromRows(input: {
   const rows = input.rows;
   const standardized = standardizeRows(rows, input.sourceFile);
   const { trades, removed } = dedupeTrades(standardized);
-  const benchmarkCurve = buildTradeIndexCurve(trades);
+  const tradeIndexCurve = buildTradeIndexCurve(trades);
+  const benchmarkCurve = tradeIndexCurve;
+  const benchmarkGovernance = buildBenchmarkGovernance({
+    tradeIndexCurve,
+    uploadedMmdCurve: [],
+    activeCurve: benchmarkCurve
+  });
   const validation = buildValidation(rows, trades, input.sourceFile);
   const readiness = [buildReadinessReport(rows, trades, input.sourceFile, "Trade File")];
   const dataHealth = buildDataHealth({
@@ -2035,6 +2377,9 @@ export function buildNextsrPayloadFromRows(input: {
     readiness,
     dataHealth,
     benchmarkCurve,
+    benchmarkGovernance,
+    tradesBeforeDedupe: standardized.length,
+    duplicateRowsRemoved: removed,
     issuer: input.issuer,
     maturityBucket: input.maturityBucket,
     periodDays: input.periodDays
@@ -2069,6 +2414,11 @@ export function buildNextsrPayloadFromFiles(input: {
   const tradeIndexCurve = buildTradeIndexCurve(trades);
   const uploadedMmdCurve = parseMmdBenchmarkCurve(input.mmdRows ?? []);
   const benchmarkCurve = tradeIndexCurve.length ? tradeIndexCurve : uploadedMmdCurve;
+  const benchmarkGovernance = buildBenchmarkGovernance({
+    tradeIndexCurve,
+    uploadedMmdCurve,
+    activeCurve: benchmarkCurve
+  });
   const validation = buildValidation(allRows, trades, tradeFiles.length === 1 ? tradeFiles[0].sourceFile : `${tradeFiles.length} trade file(s)`);
   const dataHealth = buildDataHealth({
     tradeFiles: tradeFiles.length,
@@ -2116,6 +2466,11 @@ export function buildNextsrPayloadFromFiles(input: {
     readiness,
     dataHealth,
     benchmarkCurve,
+    benchmarkGovernance,
+    tradesBeforeDedupe: enrichedTrades.length,
+    duplicateRowsRemoved: removed,
+    bondReferenceCusips: new Set(bondReference.keys()),
+    issuerMappingIssuers: new Set(issuerMapping.keys()),
     issuer: input.issuer,
     maturityBucket: input.maturityBucket,
     periodDays: input.periodDays
