@@ -3,12 +3,22 @@
 import { FormEvent, useMemo, useState } from "react";
 import type {
   ActivityPoint,
+  CrossIssuerRvPoint,
   CurvePoint,
+  CurveShapeMetric,
   DashboardAnalytics,
+  DealerProxyPoint,
+  HistoricalSpreadPoint,
+  IssuerOption,
+  LiquidityPoint,
   NextsrPayload,
   PayloadValidation,
+  PeerRvPoint,
   PositionPoint,
+  ScenarioShockPoint,
   SecurityCandidate,
+  SpreadAttributionPoint,
+  SpreadMovementPoint,
   TrendPoint
 } from "@/lib/nextsrPayload";
 
@@ -38,6 +48,54 @@ function linePath<T>(data: T[], x: (point: T, index: number) => number, y: (poin
 
 function EmptyChart() {
   return <div className="empty-chart">No chartable observations.</div>;
+}
+
+function BarMetricChart<T>({ data, label, value, tone = "teal" }: { data: T[]; label: (point: T) => string; value: (point: T) => number | null; tone?: "teal" | "rose" | "blue" }) {
+  const values = data.map(value).filter((item): item is number => item !== null && Number.isFinite(item));
+  if (!data.length || !values.length) {
+    return <EmptyChart />;
+  }
+  const max = Math.max(...values.map((item) => Math.abs(item)), 1);
+  const barWidth = 700 / data.length;
+  return (
+    <svg className="chart-svg compact" viewBox="0 0 800 280" role="img">
+      <line className="grid-line" x1="42" x2="758" y1="230" y2="230" />
+      {data.map((point, index) => {
+        const rawValue = value(point) ?? 0;
+        const height = (Math.abs(rawValue) / max) * 180;
+        const x = 52 + index * barWidth;
+        return (
+          <g key={`${label(point)}-${index}`}>
+            <rect className={`bar ${tone}`} height={height} width={Math.max(7, barWidth - 8)} x={x} y={230 - height} />
+            {index % Math.ceil(data.length / 12 || 1) === 0 ? <text className="axis-label" x={x + barWidth / 2} y="254" textAnchor="middle">{label(point)}</text> : null}
+          </g>
+        );
+      })}
+      <text className="axis-label" x="10" y="36">{formatNumber(max)}</text>
+    </svg>
+  );
+}
+
+function MiniTable<T>({ columns, rows }: { columns: Array<{ key: string; header: string; render: (row: T) => string | number | null | undefined }>; rows: T[] }) {
+  if (!rows.length) {
+    return <div className="empty-state small">No table observations.</div>;
+  }
+  return (
+    <div className="table-wrap mini">
+      <table>
+        <thead>
+          <tr>{columns.map((column) => <th key={column.key}>{column.header}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={index}>
+              {columns.map((column) => <td key={column.key}>{column.render(row) ?? "N/A"}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function IssuerCurveChart({ data }: { data: CurvePoint[] }) {
@@ -168,7 +226,10 @@ function PositioningChart({ data }: { data: PositionPoint[] }) {
 }
 
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
+  const [tradeFiles, setTradeFiles] = useState<File[]>([]);
+  const [bondReference, setBondReference] = useState<File | null>(null);
+  const [issuerMapping, setIssuerMapping] = useState<File | null>(null);
+  const [mmdBenchmark, setMmdBenchmark] = useState<File | null>(null);
   const [issuer, setIssuer] = useState("");
   const [maturityBucket, setMaturityBucket] = useState("");
   const [periodDays, setPeriodDays] = useState(30);
@@ -198,11 +259,25 @@ export default function Home() {
     }
     return `data:application/json;charset=utf-8,${encodeURIComponent(jsonText)}`;
   }, [jsonText]);
+  const exportSummaryHref = useMemo(() => {
+    if (!dashboard?.export_summary_markdown) {
+      return "";
+    }
+    return `data:text/markdown;charset=utf-8,${encodeURIComponent(dashboard.export_summary_markdown)}`;
+  }, [dashboard]);
+  const candidateCsvHref = useMemo(() => {
+    if (!candidates.length) {
+      return "";
+    }
+    const headers = ["signal", "cusip", "issuer", "maturity_bucket", "spread_to_benchmark_bps", "liquidity_score", "rv_score", "trade_count", "total_trade_amount", "latest_trade_date"];
+    const rows = candidates.map((candidate) => headers.map((header) => JSON.stringify(candidate[header as keyof SecurityCandidate] ?? "")).join(","));
+    return `data:text/csv;charset=utf-8,${encodeURIComponent([headers.join(","), ...rows].join("\n"))}`;
+  }, [candidates]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file) {
-      setError("Select a CSV or Excel trade file.");
+    if (!tradeFiles.length) {
+      setError("Select at least one CSV or Excel trade file.");
       return;
     }
 
@@ -214,7 +289,10 @@ export default function Home() {
     setDashboard(null);
 
     const formData = new FormData();
-    formData.set("file", file);
+    tradeFiles.forEach((file) => formData.append("tradeFiles", file));
+    if (bondReference) formData.set("bondReference", bondReference);
+    if (issuerMapping) formData.set("issuerMapping", issuerMapping);
+    if (mmdBenchmark) formData.set("mmdBenchmark", mmdBenchmark);
     formData.set("issuer", issuer);
     formData.set("maturityBucket", maturityBucket);
     formData.set("periodDays", String(periodDays));
@@ -254,17 +332,51 @@ export default function Home() {
           <h2>Input</h2>
           <form className="form-stack" onSubmit={submit}>
             <div className="field">
-              <label htmlFor="trade-file">Trade File</label>
+              <label htmlFor="trade-file">Trade Files</label>
               <input
                 id="trade-file"
                 accept=".csv,.xlsx,.xls,text/csv"
+                multiple
                 type="file"
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                onChange={(event) => setTradeFiles(Array.from(event.target.files ?? []))}
               />
+              <span className="field-help">{tradeFiles.length ? `${tradeFiles.length} file(s) selected` : "Upload one or more MuniPro trade-history exports."}</span>
             </div>
 
+            <details className="input-expander">
+              <summary>Optional Reference Files</summary>
+              <div className="form-stack compact-stack">
+                <div className="field">
+                  <label htmlFor="bond-reference">Bond Reference</label>
+                  <input id="bond-reference" accept=".csv,.xlsx,.xls,text/csv" type="file" onChange={(event) => setBondReference(event.target.files?.[0] ?? null)} />
+                </div>
+                <div className="field">
+                  <label htmlFor="issuer-mapping">Issuer / Sector Mapping</label>
+                  <input id="issuer-mapping" accept=".csv,.xlsx,.xls,text/csv" type="file" onChange={(event) => setIssuerMapping(event.target.files?.[0] ?? null)} />
+                </div>
+                <div className="field">
+                  <label htmlFor="mmd-benchmark">MMD / Benchmark Curve</label>
+                  <input id="mmd-benchmark" accept=".csv,.xlsx,.xls,text/csv" type="file" onChange={(event) => setMmdBenchmark(event.target.files?.[0] ?? null)} />
+                </div>
+              </div>
+            </details>
+
+            {dashboard?.issuers.length ? (
+              <div className="field">
+                <label htmlFor="issuer-picker">Uploaded Issuers</label>
+                <select id="issuer-picker" value={issuer} onChange={(event) => setIssuer(event.target.value)}>
+                  <option value="">Auto</option>
+                  {dashboard.issuers.map((option: IssuerOption) => (
+                    <option key={option.issuer} value={option.issuer}>
+                      {option.issuer}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
             <div className="field">
-              <label htmlFor="issuer">Issuer</label>
+              <label htmlFor="issuer">Issuer Override</label>
               <input
                 id="issuer"
                 value={issuer}
@@ -333,7 +445,7 @@ export default function Home() {
             </div>
 
             <button className="primary-button" type="submit" disabled={isLoading}>
-              {isLoading ? "Generating..." : "Generate Payload"}
+              {isLoading ? "Generating..." : "Generate Dashboard"}
             </button>
           </form>
 
@@ -375,9 +487,21 @@ export default function Home() {
           <div className="toolbar">
             <h2>Output</h2>
             {payload ? (
-              <a className="secondary-button" href={downloadHref} download="nextsr_payload.json">
-                Download JSON
-              </a>
+              <div className="button-row">
+                <a className="secondary-button" href={downloadHref} download="nextsr_payload.json">
+                  Download JSON
+                </a>
+                {exportSummaryHref ? (
+                  <a className="secondary-button" href={exportSummaryHref} download="secondary_market_summary.md">
+                    Summary MD
+                  </a>
+                ) : null}
+                {candidateCsvHref ? (
+                  <a className="secondary-button" href={candidateCsvHref} download="security_screener.csv">
+                    Screener CSV
+                  </a>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
@@ -431,6 +555,49 @@ export default function Home() {
       </div>
 
       {payload && dashboard ? (
+        <section className="parity-band">
+          <article className="panel">
+            <div className="chart-header">
+              <div>
+                <h2>File Readiness Check</h2>
+                <p>Streamlit parity layer for uploaded trade and optional reference files.</p>
+              </div>
+            </div>
+            <MiniTable
+              rows={dashboard.file_readiness}
+              columns={[
+                { key: "dataset", header: "Dataset", render: (row) => row.dataset },
+                { key: "source", header: "Source", render: (row) => row.source_file },
+                { key: "raw", header: "Raw Rows", render: (row) => row.raw_rows.toLocaleString() },
+                { key: "ready", header: "Model Ready", render: (row) => row.model_ready_rows.toLocaleString() },
+                { key: "status", header: "Ready", render: (row) => (row.can_run ? "Yes" : "Review") },
+                { key: "missing", header: "Missing Required", render: (row) => row.missing_required.join(", ") || "None" }
+              ]}
+            />
+          </article>
+
+          <article className="panel">
+            <div className="chart-header">
+              <div>
+                <h2>Data Health</h2>
+                <p>Coverage, reference-file status, and benchmark governance.</p>
+              </div>
+            </div>
+            <div className="metrics dense">
+              <div className="metric"><span>Trade Files</span><strong>{dashboard.data_health.trade_files}</strong></div>
+              <div className="metric"><span>Model Rows</span><strong>{dashboard.data_health.model_ready_rows.toLocaleString()}</strong></div>
+              <div className="metric"><span>Issuers</span><strong>{dashboard.data_health.issuers.toLocaleString()}</strong></div>
+              <div className="metric"><span>CUSIPs</span><strong>{dashboard.data_health.cusips.toLocaleString()}</strong></div>
+              <div className="metric"><span>First Trade</span><strong>{dashboard.data_health.first_trade_date ?? "N/A"}</strong></div>
+              <div className="metric"><span>Latest Trade</span><strong>{dashboard.data_health.latest_trade_date ?? "N/A"}</strong></div>
+              <div className="metric"><span>Benchmark</span><strong>{dashboard.data_health.benchmark_source ?? "N/A"}</strong></div>
+              <div className="metric"><span>Duplicates Removed</span><strong>{dashboard.data_health.duplicate_rows_removed.toLocaleString()}</strong></div>
+            </div>
+          </article>
+        </section>
+      ) : null}
+
+      {payload && dashboard ? (
         <section className="visual-grid">
           <article className="panel chart-panel wide">
             <div className="chart-header">
@@ -474,6 +641,130 @@ export default function Home() {
               </div>
             </div>
             <PositioningChart data={dashboard.positioning} />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Spread Movement Ladder</h2>
+                <p>Latest spread movement by maturity bucket.</p>
+              </div>
+            </div>
+            <MiniTable<SpreadMovementPoint>
+              rows={dashboard.spread_movement_ladder.slice(0, 18)}
+              columns={[
+                { key: "bucket", header: "Bucket", render: (row) => row.maturity_bucket },
+                { key: "latest", header: "Latest", render: (row) => formatNumber(row.latest_spread_bps, " bps") },
+                { key: "m1", header: "1M", render: (row) => formatNumber(row.move_1m_bps, " bps") },
+                { key: "m3", header: "3M", render: (row) => formatNumber(row.move_3m_bps, " bps") },
+                { key: "y1", header: "1Y", render: (row) => formatNumber(row.move_1y_bps, " bps") }
+              ]}
+            />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Liquidity / Trading Frequency</h2>
+                <p>Bucket-level trade frequency and liquidity score.</p>
+              </div>
+            </div>
+            <BarMetricChart<LiquidityPoint> data={dashboard.liquidity} label={(row) => row.maturity_bucket} value={(row) => row.liquidity_score} tone="teal" />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Peer Relative Value</h2>
+                <p>Selected issuer spread versus peer median by bucket.</p>
+              </div>
+            </div>
+            <BarMetricChart<PeerRvPoint> data={dashboard.peer_rv} label={(row) => row.maturity_bucket} value={(row) => row.peer_gap_bps} tone="rose" />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Cross-Issuer RV Ranking</h2>
+                <p>Issuer-level relative value score across uploaded files.</p>
+              </div>
+            </div>
+            <MiniTable<CrossIssuerRvPoint>
+              rows={dashboard.cross_issuer_rv.slice(0, 12)}
+              columns={[
+                { key: "issuer", header: "Issuer", render: (row) => row.issuer },
+                { key: "spread", header: "Avg Spread", render: (row) => formatNumber(row.avg_spread_bps, " bps") },
+                { key: "liq", header: "Liquidity", render: (row) => formatNumber(row.liquidity_score) },
+                { key: "rv", header: "RV", render: (row) => formatNumber(row.rv_score) },
+                { key: "trades", header: "Trades", render: (row) => row.trade_count.toLocaleString() }
+              ]}
+            />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Spread Attribution Waterfall</h2>
+                <p>Benchmark yield plus issuer spread bridge.</p>
+              </div>
+            </div>
+            <BarMetricChart<SpreadAttributionPoint> data={dashboard.spread_attribution} label={(row) => row.component} value={(row) => row.value_bps} tone="blue" />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Historical Spread Range</h2>
+                <p>Current spread percentile versus available history.</p>
+              </div>
+            </div>
+            <MiniTable<HistoricalSpreadPoint>
+              rows={dashboard.historical_percentiles.slice(0, 12)}
+              columns={[
+                { key: "bucket", header: "Bucket", render: (row) => row.maturity_bucket },
+                { key: "current", header: "Current", render: (row) => formatNumber(row.current_spread_bps, " bps") },
+                { key: "median", header: "Median", render: (row) => formatNumber(row.median_spread_bps, " bps") },
+                { key: "pct", header: "Pctile", render: (row) => formatNumber(row.percentile, "%") },
+                { key: "n", header: "Obs", render: (row) => row.observations.toLocaleString() }
+              ]}
+            />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Curve Shape Analytics</h2>
+                <p>Slope, butterfly, and spread-curve diagnostics.</p>
+              </div>
+            </div>
+            <MiniTable<CurveShapeMetric>
+              rows={dashboard.curve_shape}
+              columns={[
+                { key: "metric", header: "Metric", render: (row) => row.metric },
+                { key: "value", header: "Value", render: (row) => row.value === null ? "N/A" : `${row.value} ${row.unit}` },
+                { key: "read", header: "Read-through", render: (row) => row.readthrough }
+              ]}
+            />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Scenario Shock Analysis</h2>
+                <p>Approximate price impact by maturity bucket for a +25 bp shock.</p>
+              </div>
+            </div>
+            <BarMetricChart<ScenarioShockPoint> data={dashboard.scenario_shock} label={(row) => row.maturity_bucket} value={(row) => row.approx_price_impact_pct} tone="rose" />
+          </article>
+
+          <article className="panel chart-panel">
+            <div className="chart-header">
+              <div>
+                <h2>Bid / Ask & Dealer Behavior Proxy</h2>
+                <p>Buy/sell/other flow from uploaded trade side classifications.</p>
+              </div>
+            </div>
+            <BarMetricChart<DealerProxyPoint> data={dashboard.dealer_proxy} label={(row) => row.side} value={(row) => row.total_trade_amount} tone="teal" />
           </article>
         </section>
       ) : null}
@@ -520,6 +811,44 @@ export default function Home() {
           ) : (
             <div className="empty-state">No securities match the current screener filters.</div>
           )}
+        </section>
+      ) : null}
+
+      {payload && dashboard ? (
+        <section className="parity-band final-band">
+          <article className="panel">
+            <div className="chart-header">
+              <div>
+                <h2>AI Commentary Studio</h2>
+                <p>Structured evidence package for controlled commentary generation.</p>
+              </div>
+            </div>
+            <details className="developer-payload" open>
+              <summary>AI Context Package</summary>
+              <pre className="json-block small">{JSON.stringify(dashboard.analyst_context, null, 2)}</pre>
+            </details>
+          </article>
+
+          <article className="panel">
+            <div className="chart-header">
+              <div>
+                <h2>Export / Admin / Methodology</h2>
+                <p>Report summary, benchmark policy, module status, and version log.</p>
+              </div>
+            </div>
+            <div className="methodology-block">
+              <strong>{dashboard.admin.methodology_version}</strong>
+              <p>{dashboard.admin.benchmark_policy}</p>
+            </div>
+            <MiniTable
+              rows={dashboard.admin.module_status}
+              columns={[
+                { key: "module", header: "Module", render: (row) => row.module },
+                { key: "status", header: "Status", render: (row) => row.status },
+                { key: "notes", header: "Notes", render: (row) => row.notes }
+              ]}
+            />
+          </article>
         </section>
       ) : null}
     </main>

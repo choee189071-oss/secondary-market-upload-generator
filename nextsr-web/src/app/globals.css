@@ -90,6 +90,29 @@ select {
   gap: 14px;
 }
 
+.compact-stack {
+  margin-top: 12px;
+}
+
+.field-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.input-expander {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.input-expander summary {
+  color: #344054;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .validation-panel {
   border-top: 1px solid var(--line);
   display: grid;
@@ -218,10 +241,21 @@ select {
   color: #263343;
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .metrics {
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(4, minmax(130px, 1fr));
+}
+
+.metrics.dense {
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
 }
 
 .metric {
@@ -260,6 +294,10 @@ select {
   padding: 16px;
 }
 
+.json-block.small {
+  max-height: 360px;
+}
+
 .developer-payload {
   border-top: 1px solid var(--line);
   padding-top: 4px;
@@ -284,6 +322,10 @@ select {
   padding: 18px;
 }
 
+.empty-state.small {
+  min-height: 120px;
+}
+
 .error-state {
   border-color: #f3b7b2;
   color: var(--danger);
@@ -298,6 +340,17 @@ select {
 
 .screener-panel {
   margin: 0 28px 28px;
+}
+
+.parity-band {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0 28px 24px;
+}
+
+.final-band {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
 .visual-grid {
@@ -370,6 +423,10 @@ select {
   width: 100%;
 }
 
+.chart-svg.compact {
+  max-height: 300px;
+}
+
 .grid-line {
   stroke: #e5ebf3;
   stroke-width: 1;
@@ -418,6 +475,21 @@ select {
   opacity: 0.85;
 }
 
+.bar.teal {
+  fill: #0f766e;
+  opacity: 0.86;
+}
+
+.bar.rose {
+  fill: #e11d48;
+  opacity: 0.82;
+}
+
+.bar.blue {
+  fill: #2563eb;
+  opacity: 0.82;
+}
+
 .bubble {
   fill: #2563eb;
   opacity: 0.48;
@@ -450,6 +522,30 @@ select {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: auto;
+}
+
+.table-wrap.mini table {
+  min-width: 760px;
+}
+
+.methodology-block {
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
+.methodology-block strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.methodology-block p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
 }
 
 table {
@@ -492,6 +588,12 @@ tbody tr:last-child td {
   }
 
   .visual-grid {
+    grid-template-columns: 1fr;
+    padding: 0 18px 18px;
+  }
+
+  .parity-band,
+  .final-band {
     grid-template-columns: 1fr;
     padding: 0 18px 18px;
   }
