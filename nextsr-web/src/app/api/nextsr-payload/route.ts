@@ -76,11 +76,30 @@ export async function POST(request: Request) {
 
 async function readTabularFile(file: File): Promise<RawRow[]> {
   const lowerName = file.name.toLowerCase();
-  if (lowerName.endsWith(".csv")) {
-    return parseCsvRows(await file.text());
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer.slice(0, 8));
+  const isZipWorkbook = bytes[0] === 0x50 && bytes[1] === 0x4b;
+  const isLegacyWorkbook = lowerName.endsWith(".xls");
+  const isCsv = lowerName.endsWith(".csv") || lowerName.endsWith(".txt");
+  const isWorkbookName = lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls");
+
+  if (isZipWorkbook || isLegacyWorkbook || isWorkbookName) {
+    try {
+      return readWorkbookRows(buffer);
+    } catch (error) {
+      if (isCsv && isZipWorkbook) {
+        throw new Error(`${file.name} looks like an Excel workbook even though it is named .csv. Please export it as a real CSV, or rename/upload the original .xlsx file.`);
+      }
+      throw new Error(`Could not read workbook ${file.name}: ${error instanceof Error ? error.message : "Unsupported workbook format."}`);
+    }
   }
-  if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
-    return readWorkbookRows(await file.arrayBuffer());
+
+  if (isCsv) {
+    try {
+      return parseCsvRows(new TextDecoder("utf-8").decode(buffer));
+    } catch (error) {
+      throw new Error(`Could not read CSV ${file.name}: ${error instanceof Error ? error.message : "Unsupported CSV format."}`);
+    }
   }
   throw new Error(`Unsupported file type for ${file.name}. Upload CSV, XLSX, or XLS files.`);
 }
