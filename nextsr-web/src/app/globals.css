@@ -73,6 +73,80 @@ select {
   padding: 24px 28px;
 }
 
+.workflow-rail {
+  background: #ffffff;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(6, minmax(145px, 1fr));
+  padding: 14px 28px;
+  position: sticky;
+  top: 0;
+  z-index: 8;
+}
+
+.workflow-step {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #344054;
+  display: grid;
+  gap: 4px;
+  min-height: 82px;
+  padding: 10px 12px;
+  text-decoration: none;
+}
+
+.workflow-step span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workflow-step strong {
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.workflow-step em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.workflow-step.active,
+.workflow-step.ready,
+.workflow-step.pass {
+  background: var(--soft);
+  border-color: #b7d8d3;
+}
+
+.workflow-step.active strong,
+.workflow-step.ready strong,
+.workflow-step.pass strong {
+  color: var(--accent-dark);
+}
+
+.workflow-step.review {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.workflow-step.review strong {
+  color: #92400e;
+}
+
+.workflow-step.blocked {
+  background: #fff1f0;
+  border-color: #f3b7b2;
+}
+
+.workflow-step.blocked strong {
+  color: var(--danger);
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -945,6 +1019,14 @@ tbody tr:last-child td {
 }
 
 @media (max-width: 920px) {
+  .workflow-rail {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(155px, 1fr);
+    grid-template-columns: none;
+    overflow-x: auto;
+    padding: 12px 18px;
+  }
+
   .workspace {
     grid-template-columns: 1fr;
     padding: 18px;

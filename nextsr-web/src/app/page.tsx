@@ -1006,6 +1006,50 @@ export default function Home() {
     return warnings;
   }, [allUploadedFiles, tradeFiles.length, uploadBytes]);
   const canGenerate = tradeFiles.length > 0 && uploadWarnings.length === 0 && !isLoading;
+  const workflowSteps = [
+    {
+      href: "#data-intake",
+      index: "01",
+      title: "Data Intake",
+      detail: tradeFiles.length ? `${tradeFiles.length} trade file(s)` : "Upload files",
+      status: tradeFiles.length ? "ready" : "active"
+    },
+    {
+      href: "#audit-center",
+      index: "02",
+      title: "Audit",
+      detail: dashboard ? `${dashboard.data_audit_center.reconciliation.benchmark_match_rate_pct}% benchmark match` : "Waiting",
+      status: dashboard ? dashboard.data_audit_center.overall_status : "pending"
+    },
+    {
+      href: "#visual-analytics",
+      index: "03",
+      title: "Visuals",
+      detail: dashboard ? `${dashboard.issuer_curve.length} curve point(s)` : "Run dashboard",
+      status: dashboard ? "ready" : "pending"
+    },
+    {
+      href: "#security-workbench",
+      index: "04",
+      title: "Screener",
+      detail: candidates.length ? `${candidates.length} scored` : "No scores",
+      status: candidates.length ? "ready" : "pending"
+    },
+    {
+      href: "#cusip-drilldown",
+      index: "05",
+      title: "Drilldown",
+      detail: selectedCusip || "Select CUSIP",
+      status: selectedCusip ? "ready" : "pending"
+    },
+    {
+      href: "#narrative-export",
+      index: "06",
+      title: "Narrative / Export",
+      detail: dashboard ? dashboard.recommendation.label : "Waiting",
+      status: dashboard ? "ready" : "pending"
+    }
+  ];
   const watchlistRows = useMemo(() => {
     const details = dashboard?.security_details ?? [];
     return watchlist
@@ -1102,7 +1146,17 @@ export default function Home() {
         <span className="status-pill">nextsr_payload.v1</span>
       </header>
 
-      <div className="workspace">
+      <nav className="workflow-rail" aria-label="Dashboard workflow">
+        {workflowSteps.map((step) => (
+          <a className={`workflow-step ${step.status}`} href={step.href} key={step.href}>
+            <span>{step.index}</span>
+            <strong>{step.title}</strong>
+            <em>{step.detail}</em>
+          </a>
+        ))}
+      </nav>
+
+      <div className="workspace" id="data-intake">
         <section className="panel">
           <h2>Input</h2>
           <form className="form-stack" onSubmit={submit}>
@@ -1370,7 +1424,7 @@ export default function Home() {
       </div>
 
       {payload && dashboard ? (
-        <section className="parity-band">
+        <section className="parity-band" id="audit-center">
           <article className="panel">
             <div className="chart-header">
               <div>
@@ -1458,7 +1512,7 @@ export default function Home() {
       ) : null}
 
       {payload && dashboard ? (
-        <section className="visual-grid">
+        <section className="visual-grid" id="visual-analytics">
           <article className="panel chart-panel wide">
             <div className="chart-header">
               <div>
@@ -1653,7 +1707,7 @@ export default function Home() {
       ) : null}
 
       {payload ? (
-        <section className="panel screener-panel">
+        <section className="panel screener-panel" id="security-workbench">
           <div className="toolbar">
             <h2>Security Screener</h2>
             <span className="table-count">{filteredCandidates.length.toLocaleString()} shown / {candidates.length.toLocaleString()} scored</span>
@@ -1746,7 +1800,7 @@ export default function Home() {
       ) : null}
 
       {payload && dashboard ? (
-        <section className="parity-band final-band">
+        <section className="parity-band final-band" id="cusip-drilldown">
           <article className="panel">
             <div className="toolbar">
               <div>
@@ -1852,7 +1906,7 @@ export default function Home() {
       ) : null}
 
       {payload && dashboard ? (
-        <section className="parity-band final-band">
+        <section className="parity-band final-band" id="narrative-export">
           <article className="panel">
             <div className="chart-header">
               <div>
