@@ -10,24 +10,31 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(scriptDir, "..");
 const nodeRequire = createRequire(import.meta.url);
 const defaultExpectedPath = path.join(appRoot, "fixtures", "validation", "ladwp_expected.json");
+const defaultReportPath = path.join(appRoot, "fixtures", "validation", "ladwp_validation_report.md");
 const localLadwpDir = "/Users/zhouyiyi/Desktop/Intern_Muni_Data/Secondary/LADWP/2024-26";
 const defaultTradePath =
   process.env.NEXTSR_LADWP_TRADE_FILE ??
-  (fsSync.existsSync(path.join(localLadwpDir, "LADWP.csv")) ? path.join(localLadwpDir, "LADWP.csv") : "");
+  (fsSync.existsSync(path.join(localLadwpDir, "LADWP.xlsx"))
+    ? path.join(localLadwpDir, "LADWP.xlsx")
+    : fsSync.existsSync(path.join(localLadwpDir, "LADWP.csv"))
+      ? path.join(localLadwpDir, "LADWP.csv")
+      : "");
 const defaultMmdPath =
   process.env.NEXTSR_LADWP_MMD_FILE ??
   (fsSync.existsSync(path.join(localLadwpDir, "mmd.csv")) ? path.join(localLadwpDir, "mmd.csv") : "");
 
 const args = parseArgs(process.argv.slice(2));
-const tradePath = path.resolve(args.trade ?? defaultTradePath);
-const mmdPath = path.resolve(args.mmd ?? defaultMmdPath);
-const expectedPath = path.resolve(args.expected ?? defaultExpectedPath);
-const outPath = args.out ? path.resolve(args.out) : null;
-const updateExpected = Boolean(args.update);
-
-if (!tradePath || !mmdPath) {
+const tradePathInput = args.trade ?? defaultTradePath;
+const mmdPathInput = args.mmd ?? defaultMmdPath;
+if (!tradePathInput || !mmdPathInput) {
   throw new Error("Missing LADWP inputs. Pass --trade and --mmd, or set NEXTSR_LADWP_TRADE_FILE and NEXTSR_LADWP_MMD_FILE.");
 }
+const tradePath = path.resolve(tradePathInput);
+const mmdPath = path.resolve(mmdPathInput);
+const expectedPath = path.resolve(args.expected ?? defaultExpectedPath);
+const outPath = args.out ? path.resolve(args.out) : null;
+const reportPath = path.resolve(args.report ?? defaultReportPath);
+const updateExpected = Boolean(args.update);
 
 const { buildNextsrPayloadFromFiles } = loadTsModule(path.join(appRoot, "src", "lib", "nextsrPayload.ts"));
 const { buildPdfReportBlob, buildPptxReportBlob, buildReportSlides } = loadTsModule(
@@ -64,7 +71,9 @@ if (outPath) {
 if (updateExpected) {
   await fs.mkdir(path.dirname(expectedPath), { recursive: true });
   await fs.writeFile(expectedPath, `${JSON.stringify(actual, null, 2)}\n`);
+  await fs.writeFile(reportPath, buildMarkdownReport(actual, { tradePath, mmdPath }));
   console.log(`Updated expected snapshot: ${expectedPath}`);
+  console.log(`Updated validation report: ${reportPath}`);
   process.exit(0);
 }
 
@@ -307,6 +316,177 @@ function buildValidationSnapshot({ result, tradeRead, mmdRead, slides, pdfBuffer
       pptx_contains_theme: pptxBuffer.includes(Buffer.from("ppt/theme/theme1.xml"))
     }
   };
+}
+
+function buildMarkdownReport(snapshot, sources) {
+  const candidateRows = snapshot.top_5_candidates
+    .map(
+      (row, index) =>
+        `| ${index + 1} | ${row.cusip} | ${row.signal} | ${row.maturity_bucket ?? "N/A"} | ${formatBps(row.spread_to_benchmark_bps)} | ${formatNumber(row.liquidity_score)} | ${formatNumber(row.rv_score)} | ${row.trade_count.toLocaleString()} | ${formatMoney(row.total_trade_amount)} |`
+    )
+    .join("\n");
+  const crossIssuerRows = snapshot.cross_issuer_rv.length
+    ? snapshot.cross_issuer_rv
+        .map(
+          (row) =>
+            `| ${row.issuer} | ${row.sector ?? "N/A"} | ${formatBps(row.avg_spread_bps)} | ${formatNumber(row.liquidity_score)} | ${row.trade_count.toLocaleString()} | ${row.cusip_count.toLocaleString()} | ${formatNumber(row.rv_score)} | ${row.latest_trade_date ?? "N/A"} |`
+        )
+        .join("\n")
+    : "| N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |";
+  const slideRows = snapshot.report_exports.slide_titles.map((title, index) => `| ${index + 1} | ${title} |`).join("\n");
+
+  return `# LADWP Golden Sample Validation Report
+
+## Status
+
+This report makes \`LADWP.xlsx + mmd.csv\` the human-readable golden sample baseline for NextSR validation. The JSON fixture remains the machine-readable regression snapshot.
+
+## Source Files
+
+| Item | Value |
+| --- | --- |
+| Canonical trade file | \`LADWP.xlsx\` |
+| Trade file used in this run | \`${path.basename(sources.tradePath)}\` |
+| MMD file used in this run | \`${path.basename(sources.mmdPath)}\` |
+| Trade detected format | \`${snapshot.inputs.trade_detected_format}\` |
+| MMD detected format | \`${snapshot.inputs.mmd_detected_format}\` |
+| Trade source rows | ${snapshot.inputs.trade_source_rows.toLocaleString()} |
+| MMD source rows | ${snapshot.inputs.mmd_source_rows.toLocaleString()} |
+
+## Data Reconciliation
+
+| Metric | Value |
+| --- | ---: |
+| Raw/source trade rows | ${snapshot.inputs.trade_source_rows.toLocaleString()} |
+| Model-ready trade rows | ${snapshot.payload.trade_rows.toLocaleString()} |
+| Rows excluded before model-ready universe | ${(snapshot.inputs.trade_source_rows - snapshot.payload.trade_rows).toLocaleString()} |
+| CUSIP count | ${snapshot.payload.cusip_count.toLocaleString()} |
+| Benchmark source | ${snapshot.payload.benchmark_source} |
+| Uploaded AAA MMD points | ${snapshot.benchmark_governance.uploaded_mmd_points.toLocaleString()} |
+| Trade index fallback points | ${snapshot.benchmark_governance.trade_index_points.toLocaleString()} |
+| Fallback points used | ${snapshot.benchmark_governance.fallback_points_used.toLocaleString()} |
+
+## Core Output Snapshot
+
+| Metric | Value |
+| --- | --- |
+| Issuer | ${snapshot.payload.issuer} |
+| Maturity bucket | ${snapshot.payload.maturity_bucket} |
+| As of date | ${snapshot.payload.as_of_date} |
+| Label | ${snapshot.payload.label} |
+| Current spread | ${formatBps(snapshot.payload.current_spread_bps)} |
+| Spread change | ${formatBps(snapshot.payload.spread_change_bps)} |
+| Historical percentile | ${formatPercent(snapshot.payload.historical_percentile_1y)} |
+| Liquidity score | ${formatNumber(snapshot.payload.liquidity_score)} |
+| Liquidity trade count | ${snapshot.payload.liquidity_trade_count.toLocaleString()} |
+| Liquidity par amount | ${formatMoney(snapshot.payload.liquidity_total_trade_amount)} |
+| Flow imbalance | ${formatNumber(snapshot.payload.flow_imbalance)} |
+
+## Top CUSIP Screener
+
+| Rank | CUSIP | Signal | Bucket | Screener Spread | Liquidity | RV Score | Trades | Total Par |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+${candidateRows}
+
+## Selected Top CUSIP Detail
+
+| Metric | Value |
+| --- | --- |
+| CUSIP | ${snapshot.top_candidate_detail?.cusip ?? "N/A"} |
+| Detail trade count | ${snapshot.top_candidate_detail?.trade_count?.toLocaleString() ?? "N/A"} |
+| Detail total par | ${snapshot.top_candidate_detail ? formatMoney(snapshot.top_candidate_detail.total_trade_amount) : "N/A"} |
+| Latest yield | ${formatPercent(snapshot.top_candidate_detail?.latest_yield)} |
+| Latest price | ${formatNumber(snapshot.top_candidate_detail?.latest_price)} |
+| Detail spread | ${formatBps(snapshot.top_candidate_detail?.spread_to_benchmark_bps)} |
+| Trade path points returned | ${snapshot.top_candidate_detail?.trades_returned?.toLocaleString() ?? "N/A"} |
+
+## Peer RV And Cross-Issuer RV
+
+| Metric | Value |
+| --- | --- |
+| Current peer bucket | ${snapshot.peer_rv_current_bucket?.maturity_bucket ?? "N/A"} |
+| Issuer spread in current bucket | ${formatBps(snapshot.peer_rv_current_bucket?.issuer_spread_bps)} |
+| Peer median spread | ${formatBps(snapshot.peer_rv_current_bucket?.peer_median_spread_bps)} |
+| Peer gap | ${formatBps(snapshot.peer_rv_current_bucket?.peer_gap_bps)} |
+| Issuer trade count in bucket | ${snapshot.peer_rv_current_bucket?.issuer_trade_count?.toLocaleString() ?? "N/A"} |
+| Peer issuer count | ${snapshot.peer_rv_current_bucket?.peer_issuer_count?.toLocaleString() ?? "N/A"} |
+
+| Issuer | Sector | Avg Spread | Liquidity | Trades | CUSIPs | RV Score | Latest Trade |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+${crossIssuerRows}
+
+## Report Export Checks
+
+| Check | Value |
+| --- | --- |
+| PDF header | \`${formatHeader(snapshot.report_exports.pdf_header)}\` |
+| PDF bytes | ${snapshot.report_exports.pdf_bytes.toLocaleString()} |
+| PPTX header | \`${formatHeader(snapshot.report_exports.pptx_header)}\` |
+| PPTX bytes | ${snapshot.report_exports.pptx_bytes.toLocaleString()} |
+| PPTX includes slide 8 | ${snapshot.report_exports.pptx_contains_slide8 ? "Yes" : "No"} |
+| PPTX includes theme XML | ${snapshot.report_exports.pptx_contains_theme ? "Yes" : "No"} |
+| Slide count | ${snapshot.report_exports.slide_count.toLocaleString()} |
+
+| Slide | Title |
+| ---: | --- |
+${slideRows}
+
+## Locked Methodology Notes
+
+1. AAA MMD is the primary benchmark. Uploaded \`mmd.csv\` is treated as the AAA curve. Trade Sheet Index / Index Rate is fallback only.
+2. Spread is issuer yield minus the active benchmark yield, shown in basis points.
+3. Rating assumptions are explanatory and attribution-only. They are not embedded into the benchmark spread.
+4. Sector and maturity are fallback peer grouping keys when rating or issuer peer coverage is incomplete.
+5. Liquidity is scored separately from spread, using trade count, total par, and recency.
+6. Callable and structure effects should be displayed separately in attribution when source fields exist.
+7. Screener spread and CUSIP detail spread are different surfaces. Screener spread is the scored candidate aggregate. Detail spread is the selected security detail/latest path view.
+8. Peer RV is null in this single-issuer LADWP sample because no other issuer peer universe is uploaded.
+9. Recommendation remains rule-based and explainable. No OpenAI commentary is used for this validation baseline.
+
+## Analyst Signoff Checklist
+
+| Item | Status | Notes |
+| --- | --- | --- |
+| LADWP.xlsx accepted as canonical sample | Pending analyst signoff | This report assumes it is the trusted file. |
+| Raw rows vs model-ready rows accepted | Pending analyst signoff | ${snapshot.inputs.trade_source_rows.toLocaleString()} raw/source rows to ${snapshot.payload.trade_rows.toLocaleString()} model-ready rows. |
+| AAA MMD benchmark accepted | Pending analyst signoff | ${snapshot.benchmark_governance.uploaded_mmd_points.toLocaleString()} active uploaded MMD points, fallback used ${snapshot.benchmark_governance.fallback_points_used.toLocaleString()}. |
+| Spread/liquidity/top CUSIP accepted | Pending analyst signoff | ${formatBps(snapshot.payload.current_spread_bps)}, liquidity ${formatNumber(snapshot.payload.liquidity_score)}, top CUSIP ${snapshot.top_candidate?.cusip ?? "N/A"}. |
+| PDF/PPTX output accepted | Pending analyst signoff | Export package is structurally valid, content review still needed. |
+
+## Validation-Gated Streamlit Parity Plan
+
+After analyst signoff, use this LADWP baseline as the gate for UI and Streamlit parity changes:
+
+1. Any chart, screener, drilldown, export, or recommendation change must keep \`npm run validate:ladwp\` passing unless the methodology change is intentionally approved.
+2. If the methodology changes, refresh this report and \`ladwp_expected.json\` with \`npm run validate:ladwp -- --update\`.
+3. Next parity work should prioritize layout clarity, chart drilldown, and report polish only after the LADWP core numbers are accepted.
+`;
+}
+
+function formatNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "N/A";
+}
+
+function formatBps(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${formatNumber(value)} bps` : "N/A";
+}
+
+function formatPercent(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${formatNumber(value)}%` : "N/A";
+}
+
+function formatMoney(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `$${Math.round(value).toLocaleString()}` : "N/A";
+}
+
+function formatHeader(value) {
+  return String(value)
+    .split("")
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code >= 32 && code <= 126 ? char : `\\x${code.toString(16).padStart(2, "0")}`;
+    })
+    .join("");
 }
 
 function round(value) {

@@ -1,12 +1,12 @@
 # LADWP Validation Fixture
 
-This fixture locks a reproducible LADWP baseline for methodology and regression checks.
+This fixture locks a reproducible LADWP baseline for methodology and regression checks. `LADWP.xlsx` is the canonical golden sample.
 
 ## Inputs
 
-- Trade file: `LADWP.csv` or `LADWP.xlsx` from the local LADWP sample folder.
+- Trade file: `LADWP.xlsx` from the local LADWP sample folder.
 - Benchmark file: `mmd.csv` from the same sample folder.
-- Important format note: the local `LADWP.csv` file is actually an XLSX/ZIP workbook with a `.csv` extension. The validation script detects the file content and reads it as XLSX.
+- Compatibility note: the local `LADWP.csv` file is actually an XLSX/ZIP workbook with a `.csv` extension. The validation script detects the file content and reads it as XLSX, but `LADWP.xlsx` remains the trusted source.
 
 Set custom paths when the local sample folder is not available:
 
@@ -28,6 +28,8 @@ To intentionally refresh the expected snapshot after an approved methodology cha
 npm run validate:ladwp -- --update
 ```
 
+The update command also refreshes `ladwp_validation_report.md`.
+
 ## Current Locked Outputs
 
 - Issuer: `LADWP`
@@ -41,6 +43,21 @@ npm run validate:ladwp -- --update
 - PDF export header: `%PDF-1.4`
 - PPTX export header: `PK`
 - PPTX package check: includes slide 8 and theme XML.
+
+## Human-Readable Report
+
+Read `ladwp_validation_report.md` for the analyst-facing signoff package. It includes:
+
+- raw/source rows to model-ready rows
+- CUSIP count
+- benchmark source and MMD point counts
+- spread, liquidity, label, and top CUSIP
+- top 5 CUSIPs
+- selected top CUSIP drilldown
+- peer RV and cross-issuer RV notes
+- PDF/PPTX export checks
+- locked methodology notes
+- validation-gated Streamlit parity plan
 
 ## Review Notes
 
