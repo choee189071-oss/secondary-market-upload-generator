@@ -1,0 +1,143 @@
+{
+  "schema_version": "nextsr_ladwp_validation.v1",
+  "inputs": {
+    "trade_detected_format": "xlsx",
+    "mmd_detected_format": "csv",
+    "trade_source_rows": 47057,
+    "mmd_source_rows": 598
+  },
+  "payload": {
+    "issuer": "LADWP",
+    "maturity_bucket": "12Y",
+    "as_of_date": "2026-05-22",
+    "label": "Neutral / Needs More Evidence",
+    "trade_rows": 41269,
+    "cusip_count": 216,
+    "benchmark_source": "Uploaded AAA MMD",
+    "current_spread_bps": 57.98,
+    "spread_change_bps": 4.62,
+    "historical_percentile_1y": 50.5,
+    "liquidity_score": 100,
+    "liquidity_trade_count": 90,
+    "liquidity_total_trade_amount": 29490002,
+    "flow_imbalance": null
+  },
+  "benchmark_governance": {
+    "active_source": "Uploaded AAA MMD",
+    "uploaded_mmd_points": 17940,
+    "trade_index_points": 9097,
+    "fallback_points_used": 0,
+    "missing_active_tenors": []
+  },
+  "top_candidate": {
+    "cusip": "544532NV2",
+    "signal": "Wide + Liquid",
+    "maturity_bucket": "14Y",
+    "latest_trade_date": "2026-05-26",
+    "spread_to_benchmark_bps": 63.26,
+    "liquidity_score": 91.2,
+    "rv_score": 92.5,
+    "trade_count": 28,
+    "total_trade_amount": 3845000
+  },
+  "top_candidate_detail": {
+    "cusip": "544532NV2",
+    "trade_count": 410,
+    "total_trade_amount": 176330000,
+    "latest_yield": 3.83,
+    "latest_price": 108.09,
+    "spread_to_benchmark_bps": 68.8,
+    "trades_returned": 45
+  },
+  "top_5_candidates": [
+    {
+      "cusip": "544532NV2",
+      "signal": "Wide + Liquid",
+      "maturity_bucket": "14Y",
+      "spread_to_benchmark_bps": 63.26,
+      "liquidity_score": 91.2,
+      "rv_score": 92.5,
+      "trade_count": 28,
+      "total_trade_amount": 3845000
+    },
+    {
+      "cusip": "544532PU2",
+      "signal": "Wide + Liquid",
+      "maturity_bucket": "25Y",
+      "spread_to_benchmark_bps": 46.82,
+      "liquidity_score": 92.9,
+      "rv_score": 88.2,
+      "trade_count": 37,
+      "total_trade_amount": 7890000
+    },
+    {
+      "cusip": "544532LV4",
+      "signal": "Wide + Liquid",
+      "maturity_bucket": "13Y",
+      "spread_to_benchmark_bps": 54.91,
+      "liquidity_score": 82.9,
+      "rv_score": 87.3,
+      "trade_count": 22,
+      "total_trade_amount": 2495000
+    },
+    {
+      "cusip": "544532NG5",
+      "signal": "Wide + Liquid",
+      "maturity_bucket": "22Y",
+      "spread_to_benchmark_bps": 39.37,
+      "liquidity_score": 92.3,
+      "rv_score": 83.8,
+      "trade_count": 49,
+      "total_trade_amount": 4370000
+    },
+    {
+      "cusip": "544532SC9",
+      "signal": "Wide + Liquid",
+      "maturity_bucket": "25Y",
+      "spread_to_benchmark_bps": 45.38,
+      "liquidity_score": 77.5,
+      "rv_score": 82.4,
+      "trade_count": 42,
+      "total_trade_amount": 4980000
+    }
+  ],
+  "peer_rv_current_bucket": {
+    "maturity_bucket": "12Y",
+    "issuer_spread_bps": 57.98,
+    "peer_median_spread_bps": null,
+    "peer_gap_bps": null,
+    "issuer_trade_count": 6,
+    "peer_issuer_count": 0
+  },
+  "cross_issuer_rv": [
+    {
+      "issuer": "LADWP",
+      "sector": "Unknown",
+      "avg_spread_bps": 40.11,
+      "liquidity_score": 63,
+      "trade_count": 41269,
+      "cusip_count": 216,
+      "rv_score": 63.4,
+      "latest_trade_date": "2026-05-26"
+    }
+  ],
+  "report_exports": {
+    "slide_count": 8,
+    "slide_titles": [
+      "LADWP Secondary Market Snapshot",
+      "Methodology Lock",
+      "Core Signals",
+      "Reference Lines",
+      "Peer Relative Value",
+      "Top CUSIP Opportunities",
+      "Recommendation",
+      "Next Steps"
+    ],
+    "pdf_header": "%PDF-1.4",
+    "pdf_bytes": 6831,
+    "pptx_header": "PK\u0003\u0004",
+    "pptx_bytes": 34994,
+    "pptx_contains_slide8": true,
+    "pptx_contains_theme": true
+  }
+}
