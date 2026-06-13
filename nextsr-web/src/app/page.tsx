@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, MouseEvent as ReactMouseEvent, useEffect, useMemo, useState } from "react";
+import { buildPdfReportBlob, buildPptxReportBlob, downloadBlob } from "@/lib/clientExports";
 import type {
   ActivityPoint,
   BenchmarkAuditRow,
@@ -1072,9 +1073,12 @@ export default function Home() {
   const [selectedCusip, setSelectedCusip] = useState("");
   const [activeBucket, setActiveBucket] = useState<string | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [watchlistNotes, setWatchlistNotes] = useState<Record<string, string>>({});
   const [curveMode, setCurveMode] = useState<"yield" | "spread">("yield");
   const [showIssuerCurve, setShowIssuerCurve] = useState(true);
   const [showBenchmarkCurve, setShowBenchmarkCurve] = useState(true);
+  const [showReferenceLines, setShowReferenceLines] = useState(true);
+  const [ratingCurveView, setRatingCurveView] = useState("AAA");
   const [positioningYAxis, setPositioningYAxis] = useState<"spread" | "yield">("spread");
   const [trendRange, setTrendRange] = useState("90");
   const [scenarioShockBps, setScenarioShockBps] = useState(25);
@@ -1104,8 +1108,30 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const saved = window.localStorage.getItem("nextsr-watchlist-notes");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          setWatchlistNotes(
+            Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+            )
+          );
+        }
+      } catch {
+        setWatchlistNotes({});
+      }
+    }
+  }, []);
+
+  useEffect(() => {
     window.localStorage.setItem("nextsr-watchlist", JSON.stringify(watchlist));
   }, [watchlist]);
+
+  useEffect(() => {
+    window.localStorage.setItem("nextsr-watchlist-notes", JSON.stringify(watchlistNotes));
+  }, [watchlistNotes]);
 
   useEffect(() => {
     if (payload?.maturity_bucket) {
@@ -1248,6 +1274,111 @@ export default function Home() {
       (counts, item) => ({ ...counts, [item.status]: counts[item.status] + 1 }),
       { ported: 0, partial: 0, missing: 0, "next-enhanced": 0 }
     );
+  }, [dashboard]);
+  const selectedRatingAssumption = useMemo(() => {
+    const rows = dashboard?.benchmark_governance.spread_assumptions ?? [];
+    return rows.find((row) => row.rating === ratingCurveView) ?? rows[0] ?? null;
+  }, [dashboard, ratingCurveView]);
+  const methodologyLockRows = useMemo(() => {
+    if (!payload || !dashboard) {
+      return [];
+    }
+    return [
+      {
+        topic: "AAA MMD",
+        status: dashboard.benchmark_governance.uploaded_mmd_points ? "Primary" : "Needs Upload",
+        rule: "Uploaded MMD is treated as the AAA base curve. Trade Sheet Index / Index Rate is fallback only.",
+        evidence: `${dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()} uploaded AAA MMD point(s); ${dashboard.benchmark_governance.fallback_points_used.toLocaleString()} fallback point(s).`
+      },
+      {
+        topic: "Spread",
+        status: "Locked",
+        rule: "Spread equals issuer yield minus active benchmark yield, shown in basis points.",
+        evidence: `Current selected spread is ${formatNumber(payload.signals.spread.current_spread_bps, " bps")}.`
+      },
+      {
+        topic: "Rating",
+        status: "Separated",
+        rule: "Ratings support peer grouping and attribution. Rating assumptions are displayed, not embedded into the benchmark spread.",
+        evidence: selectedRatingAssumption ? `${selectedRatingAssumption.rating}: AAA MMD + ${formatNumber(selectedRatingAssumption.spread_bps, " bps")}.` : "No rating assumption selected."
+      },
+      {
+        topic: "Sector",
+        status: "Fallback Peer Key",
+        rule: "When issuer/rating coverage is thin, use sector plus maturity bucket for comparisons.",
+        evidence: `${dashboard.data_health.issuers.toLocaleString()} issuer(s) and ${dashboard.data_health.cusips.toLocaleString()} CUSIP(s) in uploaded universe.`
+      },
+      {
+        topic: "Liquidity",
+        status: "Separate Score",
+        rule: "Liquidity is scored from trade count, total par, and recency; it does not change benchmark spread.",
+        evidence: `Selected-bucket liquidity score is ${formatNumber(payload.signals.liquidity.liquidity_score)}.`
+      },
+      {
+        topic: "Callable",
+        status: "Attribution Layer",
+        rule: "Callable/structure effects should be shown as separate attribution when reference data is available.",
+        evidence: dashboard.spread_attribution.find((row) => row.component.toLowerCase().includes("call"))?.detail ?? "No callable reference field detected in current upload."
+      },
+      {
+        topic: "Peer RV",
+        status: "Active",
+        rule: "Compare selected issuer spread against same-bucket peer median and rank the gap separately.",
+        evidence: `${dashboard.peer_rv.length.toLocaleString()} peer RV bucket row(s) generated.`
+      },
+      {
+        topic: "Recommendation",
+        status: "Rule-Based",
+        rule: "Recommendations use explainable spread, liquidity, peer gap, and caveat rules. No OpenAI dependency is required.",
+        evidence: dashboard.recommendation.summary
+      }
+    ];
+  }, [dashboard, payload, selectedRatingAssumption]);
+  const partialBuildQueue = useMemo(() => {
+    const priorityRank: Record<StreamlitParityAuditItem["priority"], number> = { High: 0, Medium: 1, Low: 2 };
+    return (dashboard?.streamlit_parity_audit ?? [])
+      .filter((item) => item.status === "partial" || item.status === "missing")
+      .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority])
+      .slice(0, 8)
+      .map((item, index) => ({
+        order: index + 1,
+        area: item.area,
+        priority: item.priority,
+        status: item.status,
+        next_step: item.next_step
+      }));
+  }, [dashboard]);
+  const rvDecisionRows = useMemo(() => {
+    if (!dashboard) {
+      return [];
+    }
+    return [...dashboard.peer_rv]
+      .sort((a, b) => Math.abs(b.peer_gap_bps ?? 0) - Math.abs(a.peer_gap_bps ?? 0))
+      .slice(0, 12)
+      .map((row) => ({
+        ...row,
+        decision:
+          row.peer_gap_bps === null
+            ? "Review"
+            : row.peer_gap_bps >= 20
+              ? "Cheap vs peers"
+              : row.peer_gap_bps <= -15
+                ? "Rich vs peers"
+                : "In line",
+        evidence: `${row.issuer_trade_count.toLocaleString()} issuer trade(s); ${row.peer_issuer_count.toLocaleString()} peer issuer(s).`
+      }));
+  }, [dashboard]);
+  const crossIssuerMatrixRows = useMemo(() => {
+    if (!dashboard) {
+      return [];
+    }
+    return [...dashboard.cross_issuer_rv]
+      .sort((a, b) => (b.rv_score ?? -Infinity) - (a.rv_score ?? -Infinity))
+      .slice(0, 12)
+      .map((row) => ({
+        ...row,
+        decision: decisionLabel(row)
+      }));
   }, [dashboard]);
   const selectedSecurity = useMemo(() => {
     if (!dashboard?.security_details.length) {
@@ -1408,6 +1539,46 @@ export default function Home() {
     }
     return warnings;
   }, [allUploadedFiles, tradeFiles.length, uploadBytes]);
+  const validationChecklistRows = useMemo(() => {
+    if (!dashboard) {
+      return [];
+    }
+    const benchmarkMatch = dashboard.data_audit_center.reconciliation.benchmark_match_rate_pct;
+    return [
+      {
+        check: "Multi-file upload",
+        status: tradeFiles.length >= 2 ? "Ready" : tradeFiles.length === 1 ? "Single file" : "Waiting",
+        detail: `${tradeFiles.length.toLocaleString()} trade file(s) selected; UI accepts two or more files.`
+      },
+      {
+        check: "AAA MMD benchmark",
+        status: dashboard.benchmark_governance.uploaded_mmd_points ? "Ready" : "Needs upload",
+        detail: dashboard.benchmark_governance.uploaded_mmd_points
+          ? `${dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()} uploaded AAA MMD point(s) available.`
+          : "Upload the AAA MMD file when validating production outputs."
+      },
+      {
+        check: "Benchmark match",
+        status: benchmarkMatch >= 80 ? "Pass" : benchmarkMatch >= 40 ? "Review" : "Blocked",
+        detail: `${benchmarkMatch.toFixed(1)}% active benchmark match rate.`
+      },
+      {
+        check: "Expected output sample",
+        status: "Needed",
+        detail: "Still need one validated issuer file with expected spreads, liquidity, top CUSIPs, and report outputs."
+      },
+      {
+        check: "Vercel upload limits",
+        status: uploadWarnings.length ? "Review" : "Pass",
+        detail: uploadWarnings.length ? uploadWarnings.join(" ") : `${(uploadBytes / 1024 / 1024).toFixed(1)}MB selected versus 80MB UI bundle limit.`
+      },
+      {
+        check: "Report exports",
+        status: "Ready",
+        detail: "JSON, HTML, CSV, Markdown, direct PDF, and PPTX deck exports are wired in the client."
+      }
+    ];
+  }, [dashboard, tradeFiles.length, uploadBytes, uploadWarnings]);
   const canGenerate = tradeFiles.length > 0 && uploadWarnings.length === 0 && !isLoading;
   const previewRowLimit = performanceMode === "lean" ? 12 : 40;
   const chartRowLimit = performanceMode === "lean" ? 10 : 18;
@@ -1415,44 +1586,58 @@ export default function Home() {
     {
       href: "#data-intake",
       index: "01",
-      title: "Intake",
+      title: "Upload",
       detail: tradeFiles.length ? `${tradeFiles.length} trade file(s)` : "Upload files",
       status: tradeFiles.length ? "ready" : "active"
     },
     {
-      href: "#desk-output",
+      href: "#audit-center",
       index: "02",
+      title: "Data Audit",
+      detail: dashboard ? `${dashboard.data_audit_center.reconciliation.benchmark_match_rate_pct}% benchmark match` : "Waiting",
+      status: dashboard ? dashboard.data_audit_center.overall_status : "pending"
+    },
+    {
+      href: "#desk-output",
+      index: "03",
       title: "Snapshot",
       detail: dashboard ? dashboard.desk_snapshot.confidence : "Waiting",
       status: dashboard ? "ready" : "pending"
     },
     {
-      href: "#audit-center",
-      index: "03",
-      title: "Audit",
-      detail: dashboard ? `${dashboard.data_audit_center.reconciliation.benchmark_match_rate_pct}% benchmark match` : "Waiting",
-      status: dashboard ? dashboard.data_audit_center.overall_status : "pending"
-    },
-    {
       href: "#visual-analytics",
       index: "04",
-      title: "Charts",
+      title: "Core Charts",
       detail: dashboard ? `${dashboard.issuer_curve.length} curve point(s)` : "Run dashboard",
       status: dashboard ? "ready" : "pending"
     },
     {
-      href: "#security-workbench",
+      href: "#cusip-drilldown",
       index: "05",
-      title: "CUSIPs",
-      detail: candidates.length ? `${candidates.length} scored` : "No scores",
-      status: candidates.length ? "ready" : "pending"
+      title: "CUSIP Drilldown",
+      detail: selectedCusip || "Select CUSIP",
+      status: selectedCusip ? "ready" : "pending"
+    },
+    {
+      href: "#advanced-rv",
+      index: "06",
+      title: "Advanced RV",
+      detail: dashboard ? `${dashboard.peer_rv.length + dashboard.cross_issuer_rv.length} RV row(s)` : "Waiting",
+      status: dashboard ? "ready" : "pending"
     },
     {
       href: "#narrative-export",
-      index: "06",
-      title: "Export / Parity",
-      detail: dashboard ? `${parityStats.partial} partial gaps` : "Waiting",
+      index: "07",
+      title: "Export",
+      detail: dashboard ? "PDF / PPTX ready" : "Waiting",
       status: dashboard ? "ready" : "pending"
+    },
+    {
+      href: "#streamlit-parity",
+      index: "08",
+      title: "Validation",
+      detail: dashboard ? `${parityStats.partial} partial gap(s)` : "Waiting",
+      status: dashboard ? (validationChecklistRows.some((row) => row.status === "Blocked") ? "blocked" : "ready") : "pending"
     }
   ];
   const watchlistRows = useMemo(() => {
@@ -1465,10 +1650,26 @@ export default function Home() {
     if (!watchlistRows.length) {
       return "";
     }
-    const headers = ["cusip", "issuer", "signal", "maturity_bucket", "spread_to_benchmark_bps", "liquidity_score", "rv_score", "trade_count", "total_trade_amount", "latest_trade_date"];
-    const rows = watchlistRows.map((row) => headers.map((header) => JSON.stringify(row[header as keyof typeof row] ?? "")).join(","));
+    const headers = ["cusip", "issuer", "signal", "maturity_bucket", "spread_to_benchmark_bps", "liquidity_score", "rv_score", "trade_count", "total_trade_amount", "latest_trade_date", "note"];
+    const rows = watchlistRows.map((row) =>
+      [
+        row.cusip,
+        row.issuer,
+        row.signal,
+        row.maturity_bucket ?? "",
+        row.spread_to_benchmark_bps ?? "",
+        row.liquidity_score ?? "",
+        row.rv_score ?? "",
+        row.trade_count,
+        row.total_trade_amount,
+        row.latest_trade_date ?? "",
+        watchlistNotes[row.cusip] ?? ""
+      ]
+        .map((value) => JSON.stringify(value))
+        .join(",")
+    );
     return `data:text/csv;charset=utf-8,${encodeURIComponent([headers.join(","), ...rows].join("\n"))}`;
-  }, [watchlistRows]);
+  }, [watchlistRows, watchlistNotes]);
 
   function selectCusip(cusip: string) {
     setSelectedCusip(cusip);
@@ -1482,6 +1683,26 @@ export default function Home() {
 
   function toggleWatchlist(cusip: string) {
     setWatchlist((current) => (current.includes(cusip) ? current.filter((item) => item !== cusip) : [...current, cusip].sort()));
+  }
+
+  function updateWatchlistNote(cusip: string, note: string) {
+    setWatchlistNotes((current) => ({ ...current, [cusip]: note }));
+  }
+
+  function downloadPdfReport() {
+    if (!payload || !dashboard) {
+      setError("Generate a dashboard before downloading the PDF report.");
+      return;
+    }
+    downloadBlob(buildPdfReportBlob(payload, dashboard, candidates), "secondary_market_report.pdf");
+  }
+
+  function downloadPptxReport() {
+    if (!payload || !dashboard) {
+      setError("Generate a dashboard before downloading the PPTX deck.");
+      return;
+    }
+    downloadBlob(buildPptxReportBlob(payload, dashboard, candidates), "secondary_market_deck.pptx");
   }
 
   function openPrintReport() {
@@ -1525,6 +1746,8 @@ export default function Home() {
     setCurveMode("yield");
     setShowIssuerCurve(true);
     setShowBenchmarkCurve(true);
+    setShowReferenceLines(true);
+    setRatingCurveView("AAA");
     setPositioningYAxis("spread");
     setTrendRange("90");
     setScenarioShockBps(25);
@@ -2107,22 +2330,32 @@ export default function Home() {
                 <h2>Spread Trend</h2>
                 <p>{activeBucket ?? payload.maturity_bucket ?? "Selected bucket"} spread to benchmark · {visibleSpreadTrend.length.toLocaleString()} point(s).</p>
               </div>
-              <div className="segmented-control">
-                {[
-                  ["30", "30D"],
-                  ["90", "90D"],
-                  ["180", "180D"],
-                  ["365", "1Y"],
-                  ["all", "All"]
-                ].map(([value, label]) => (
-                  <button className={trendRange === value ? "active" : ""} key={value} type="button" onClick={() => setTrendRange(value)}>
-                    {label}
+              <div className="chart-control-stack">
+                <div className="segmented-control">
+                  {[
+                    ["30", "30D"],
+                    ["90", "90D"],
+                    ["180", "180D"],
+                    ["365", "1Y"],
+                    ["all", "All"]
+                  ].map(([value, label]) => (
+                    <button className={trendRange === value ? "active" : ""} key={value} type="button" onClick={() => setTrendRange(value)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="segmented-control">
+                  <button className={showReferenceLines ? "active" : ""} type="button" onClick={() => setShowReferenceLines(true)}>
+                    Refs On
                   </button>
-                ))}
+                  <button className={!showReferenceLines ? "active" : ""} type="button" onClick={() => setShowReferenceLines(false)}>
+                    Refs Off
+                  </button>
+                </div>
               </div>
             </div>
-            <SpreadTrendChart data={visibleSpreadTrend} referenceLines={dashboard.chart_reference_lines} />
-            {dashboard.chart_reference_lines.length ? (
+            <SpreadTrendChart data={visibleSpreadTrend} referenceLines={showReferenceLines ? dashboard.chart_reference_lines : []} />
+            {showReferenceLines && dashboard.chart_reference_lines.length ? (
               <div className="reference-line-list">
                 {dashboard.chart_reference_lines.map((line) => (
                   <div className={`reference-chip ${line.tone}`} key={line.id} title={line.description}>
@@ -2327,6 +2560,45 @@ export default function Home() {
                 { key: "action", header: "Action", render: (row) => decisionLabel(row) }
               ]}
             />
+          </article>
+
+          <article className="panel chart-panel wide" id="advanced-rv">
+            <div className="chart-header">
+              <div>
+                <h2>Advanced RV Decision Matrix</h2>
+                <p>Peer gap and cross-issuer rank translated into decision-ready review tables.</p>
+              </div>
+            </div>
+            <div className="split-list">
+              <div>
+                <h3>Peer Gap Ladder</h3>
+                <MiniTable
+                  rows={rvDecisionRows}
+                  columns={[
+                    { key: "bucket", header: "Bucket", render: (row) => row.maturity_bucket },
+                    { key: "issuer", header: "Issuer Spread", render: (row) => formatNumber(row.issuer_spread_bps, " bps") },
+                    { key: "peer", header: "Peer Median", render: (row) => formatNumber(row.peer_median_spread_bps, " bps") },
+                    { key: "gap", header: "Gap", render: (row) => formatNumber(row.peer_gap_bps, " bps") },
+                    { key: "decision", header: "Decision", render: (row) => row.decision },
+                    { key: "evidence", header: "Evidence", render: (row) => row.evidence }
+                  ]}
+                />
+              </div>
+              <div>
+                <h3>Issuer Opportunity Ranking</h3>
+                <MiniTable
+                  rows={crossIssuerMatrixRows}
+                  columns={[
+                    { key: "issuer", header: "Issuer", render: (row) => row.issuer },
+                    { key: "sector", header: "Sector", render: (row) => row.sector ?? "N/A" },
+                    { key: "spread", header: "Avg Spread", render: (row) => formatNumber(row.avg_spread_bps, " bps") },
+                    { key: "liquidity", header: "Liquidity", render: (row) => formatNumber(row.liquidity_score) },
+                    { key: "rv", header: "RV", render: (row) => formatNumber(row.rv_score) },
+                    { key: "decision", header: "Decision", render: (row) => row.decision }
+                  ]}
+                />
+              </div>
+            </div>
           </article>
 
           <article className="panel chart-panel">
@@ -2575,6 +2847,15 @@ export default function Home() {
                 <div className="readthrough-list">
                   {selectedSecurity.readthrough.map((item) => <p key={item}>{item}</p>)}
                 </div>
+                <div className="watch-note-card">
+                  <label htmlFor="watchlist-note">Watchlist Note</label>
+                  <textarea
+                    id="watchlist-note"
+                    value={watchlistNotes[selectedSecurity.cusip] ?? ""}
+                    onChange={(event) => updateWatchlistNote(selectedSecurity.cusip, event.target.value)}
+                    placeholder="Add thesis, follow-up, client context, or execution note for this CUSIP."
+                  />
+                </div>
                 {selectedCusipReadthrough ? (
                   <AnalystReadthrough
                     title="Analyst read-through - CUSIP detail"
@@ -2664,7 +2945,8 @@ export default function Home() {
                 { key: "signal", header: "Signal", render: (row) => row.signal },
                 { key: "spread", header: "Spread", render: (row) => formatNumber(row.spread_to_benchmark_bps, " bps") },
                 { key: "liq", header: "Liquidity", render: (row) => formatNumber(row.liquidity_score) },
-                { key: "rv", header: "RV", render: (row) => formatNumber(row.rv_score) }
+                { key: "rv", header: "RV", render: (row) => formatNumber(row.rv_score) },
+                { key: "note", header: "Note", render: (row) => watchlistNotes[row.cusip] || "N/A" }
               ]}
             />
           </article>
@@ -2744,6 +3026,16 @@ export default function Home() {
               </div>
             </div>
             <div className="export-center">
+              <button className="export-tile action primary-export" type="button" onClick={downloadPdfReport}>
+                <strong>PDF Report</strong>
+                <span>Download a desk-ready PDF summary with methodology, signals, RV, and recommendation pages.</span>
+                <em>secondary_market_report.pdf</em>
+              </button>
+              <button className="export-tile action primary-export" type="button" onClick={downloadPptxReport}>
+                <strong>PPTX Deck</strong>
+                <span>Download a PowerPoint deck outline as editable slides for review and client distribution.</span>
+                <em>secondary_market_deck.pptx</em>
+              </button>
               {[
                 { label: "Payload JSON", href: downloadHref, file: "nextsr_payload.json", detail: "Model input for NextSR." },
                 { label: "Summary MD", href: exportSummaryHref, file: "secondary_market_summary.md", detail: "Lightweight written summary." },
@@ -2764,8 +3056,8 @@ export default function Home() {
                 </a>
               ))}
               <button className="export-tile action" type="button" onClick={openPrintReport}>
-                <strong>PDF Print View</strong>
-                <span>Open report and print/save as PDF.</span>
+                <strong>Browser Print View</strong>
+                <span>Open the HTML report and print/save from the browser if you want a manual PDF fallback.</span>
                 <em>browser print</em>
               </button>
               {watchlistCsvHref ? (
@@ -2788,6 +3080,15 @@ export default function Home() {
                 <div className="metric"><span>Uploaded AAA MMD Points</span><strong>{dashboard.benchmark_governance.uploaded_mmd_points.toLocaleString()}</strong></div>
                 <div className="metric"><span>Fallback Used</span><strong>{dashboard.benchmark_governance.fallback_points_used.toLocaleString()}</strong></div>
               </div>
+              <MiniTable
+                rows={methodologyLockRows}
+                columns={[
+                  { key: "topic", header: "Methodology Item", render: (row) => row.topic },
+                  { key: "status", header: "Status", render: (row) => row.status },
+                  { key: "rule", header: "Locked Rule", render: (row) => row.rule },
+                  { key: "evidence", header: "Evidence", render: (row) => row.evidence }
+                ]}
+              />
             </details>
             <details className="developer-payload" open>
               <summary>Benchmark Governance</summary>
@@ -2795,6 +3096,31 @@ export default function Home() {
                 <strong>{dashboard.benchmark_governance.rating_curve_selector}</strong>
                 <p>{dashboard.benchmark_governance.policy}</p>
                 <p>Missing active tenors: {dashboard.benchmark_governance.missing_active_tenors.join(", ") || "None"}</p>
+              </div>
+              <div className="rating-selector-block">
+                <div>
+                  <span>Displayed Rating View</span>
+                  <div className="segmented-control">
+                    {dashboard.benchmark_governance.spread_assumptions.map((assumption) => (
+                      <button
+                        className={ratingCurveView === assumption.rating ? "active" : ""}
+                        key={assumption.rating}
+                        type="button"
+                        onClick={() => setRatingCurveView(assumption.rating)}
+                      >
+                        {assumption.rating}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <strong>
+                  {selectedRatingAssumption
+                    ? `${selectedRatingAssumption.rating}: AAA MMD + ${formatNumber(selectedRatingAssumption.spread_bps, " bps")}`
+                    : "No rating view selected"}
+                </strong>
+                <p>
+                  This selector is explanatory. The active benchmark remains uploaded AAA MMD; rating assumptions are shown for peer grouping, attribution, and governance review.
+                </p>
               </div>
               <MiniTable
                 rows={dashboard.benchmark_governance.source_priority}
@@ -2811,6 +3137,17 @@ export default function Home() {
                   { key: "rating", header: "Rating", render: (row) => row.rating },
                   { key: "spread", header: "Spread Assumption", render: (row) => formatNumber(row.spread_bps, " bps") },
                   { key: "source", header: "Source", render: (row) => row.source }
+                ]}
+              />
+            </details>
+            <details className="developer-payload" open>
+              <summary>Validation / Deployment Checklist</summary>
+              <MiniTable
+                rows={validationChecklistRows}
+                columns={[
+                  { key: "check", header: "Check", render: (row) => row.check },
+                  { key: "status", header: "Status", render: (row) => row.status },
+                  { key: "detail", header: "Detail", render: (row) => row.detail }
                 ]}
               />
             </details>
@@ -2912,6 +3249,20 @@ export default function Home() {
             <strong>What this means</strong>
             <p>Ported means the core workflow exists in Next. Partial means the main analytical idea exists but Streamlit has more controls, charts, or exports. Next enhanced means the new version is intentionally productized beyond the Streamlit page. Missing means the original surface still needs to be built.</p>
           </div>
+          <div className="parity-guidance">
+            <strong>Next Build Queue</strong>
+            <p>Use this as the working checklist for remaining Streamlit parity and product hardening. High-priority partial items should be validated against sample outputs before adding more polish.</p>
+          </div>
+          <MiniTable
+            rows={partialBuildQueue}
+            columns={[
+              { key: "order", header: "#", render: (row) => row.order },
+              { key: "area", header: "Area", render: (row) => row.area },
+              { key: "priority", header: "Priority", render: (row) => row.priority },
+              { key: "status", header: "Status", render: (row) => row.status },
+              { key: "next", header: "Next Step", render: (row) => row.next_step }
+            ]}
+          />
           <div className="table-wrap parity-table">
             <table>
               <thead>
